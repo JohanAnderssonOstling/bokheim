@@ -12,7 +12,7 @@ pub struct BackendLaunch {
     data_dir: PathBuf,
     default_library_root: PathBuf,
     discovery: Option<(String, PathBuf)>,
-    private_library_storage: bool,
+    configured_library_storage: bool,
 }
 
 impl BackendLaunch {
@@ -22,7 +22,7 @@ impl BackendLaunch {
         // Desktop startup opens instance and update locks before the backend
         // registry, which otherwise creates this directory on first launch.
         fs::create_dir_all(&data_dir).map_err(|error| BackendError::operation(error).context(format!("failed to create app-data directory {}", data_dir.display())))?;
-        Ok(Self { data_dir, default_library_root, discovery: None, private_library_storage: false })
+        Ok(Self { data_dir, default_library_root, discovery: None, configured_library_storage: false })
     }
 
     /// Location for platform-owned files such as desktop instance locks and UI sessions.
@@ -35,7 +35,15 @@ impl BackendLaunch {
     /// registered libraries and their files are never moved or deleted.
     pub fn with_private_library_storage(mut self) -> Self {
         self.default_library_root = self.data_dir.join("libraries");
-        self.private_library_storage = true;
+        self.configured_library_storage = true;
+        self
+    }
+
+    /// Use the platform's persisted user-selected folder for future libraries.
+    /// Existing library roots remain unchanged.
+    pub fn with_library_storage(mut self, root: PathBuf) -> Self {
+        self.default_library_root = root;
+        self.configured_library_storage = true;
         self
     }
 
@@ -50,8 +58,16 @@ impl BackendLaunch {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn into_context(self) -> Result<BackendContext, BackendError> {
         let context = BackendContext::open(self.data_dir, &self.default_library_root)?;
-        if self.private_library_storage {
-            app_preferences::library_folder::set_library_save_location(context.preferences.storage_root(), &self.default_library_root.to_string_lossy()).map_err(BackendError::operation)?;
+        if self.configured_library_storage {
+            #[cfg(target_os = "android")]
+            let document_root = client_platform_runtime::filesystem::is_document_path(&self.default_library_root);
+            #[cfg(not(target_os = "android"))]
+            let document_root = false;
+            if document_root {
+                app_preferences::library_folder::remember_library_save_location(context.preferences.storage_root(), &self.default_library_root.to_string_lossy()).map_err(BackendError::operation)?;
+            } else {
+                app_preferences::library_folder::set_library_save_location(context.preferences.storage_root(), &self.default_library_root.to_string_lossy()).map_err(BackendError::operation)?;
+            }
         }
         if let Some((name, fallback)) = self.discovery {
             context.registry.discover(&self.default_library_root).map_err(BackendError::operation)?;

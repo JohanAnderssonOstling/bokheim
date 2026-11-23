@@ -21,16 +21,20 @@ Kobo forces reduced motion through its GPUI platform capability. Other platforms
 
 ## Bokheim component subset
 
+- Tables with native row selection disabled leave selection fills to their caller, including when the caller uses the native cursor for keyboard scrolling.
+
+- Checkboxes support an indeterminate state with a dash and mixed accessibility state. Clicking a mixed checkbox requests the checked state, allowing folder downloads to reuse the book download control.
+
 This vendored copy is intentionally tailored to Bokheim; these removals do not change the upstream repository or the shared GPUI fork.
 
-- Removed unused chart/plot, table, docking, calendar/date-picker, color-picker, combobox/select, resizable, searchable-list, settings, accordion, avatar, badge, collapsible, description-list, form, group-box, hover-card, pagination, radio, rating, sidebar, status-bar, stepper, tab, and tag modules and their initialization hooks.
+- Removed unused chart/plot, docking, calendar/date-picker, color-picker, combobox/select, resizable, searchable-list, settings, accordion, avatar, badge, collapsible, description-list, form, group-box, hover-card, pagination, radio, rating, sidebar, status-bar, stepper, tab, and tag modules and their initialization hooks.
 - Kept the dropdown button caret as a private button helper and the circular-progress arc as a private progress helper, so retained widgets do not depend on the removed select/plot subsystems. Removed the now-unused `IntoPlot` derive macro.
 - Removed LSP providers, completion/code-action/hover/diagnostic overlays, semantic tokens, document colors, and the component inspector. Input uses a local UTF-16 `Position` type instead of `lsp-types`; ordinary editing, selection, and clipboard menus remain. Syntax parsing and highlighting were subsequently removed as described below.
 - Removed theme-directory watching and reloading, its `notify` dependency, and the unused `decimal` feature/dependency. Bundled JSON themes and palettes are translated into typed Rust during the build, including the schema's fallback order. The `json-themes` feature retains loading additional themes from JSON; Bokheim leaves it disabled.
 - Retained shared input, menu, focus, scrolling, and theme infrastructure. Rich-text rendering was subsequently replaced by selectable literal text as described below.
-- Removed unused private list focus/reset helpers, the table-specific virtual-list scroll-handle builder, and scrollbar FPS/width helpers.
+- Removed unused private list focus/reset helpers. Table-specific scroll helpers are restored below.
 
-The public module count falls from 57 to 29. The desktop and browser normal dependency graphs each lose five external package versions.
+The retained module subset excludes unused widgets. The desktop and browser normal dependency graphs each lose five external package versions.
 
 GPUI's broad `image-formats` default is disabled in both workspace dependency declarations. Other GPUI defaults remain explicitly enabled. Bokheim's `ui-components` manifest configures the shared image decoder for PNG, JPEG, GIF, WebP, BMP, and TIFF and retains SVG raster-image support through resvg, including on the browser target. This avoids enabling AVIF encoding and EXR through GPUI without modifying the shared GPUI fork.
 
@@ -59,3 +63,8 @@ The component text view now displays literal text through `TextView::plain` and 
 - Removed the component HTML/Markdown parsers, minifier, rich-text AST/rendering, inline images, code blocks, extension callbacks, and background parsing channels. Their direct `markdown`, `html5ever`, `markup5ever_rcdom`, `chrono`, `futures`, `async-channel`, and `smol` dependencies are removed. Plain text is available synchronously for first layout and copying.
 - Removed code-editor mode, syntax highlighters, language registries, grammar/query files, incremental/background syntax parsing, syntax-derived folding, syntax theme configuration, and all Tree-sitter features/dependencies. Normal single-line, multiline, auto-grow, undo/redo, IME, selection, and explicit search/decorations remain. Soft-wrapping and display-coordinate infrastructure stay shared with ordinary inputs.
 - Input find/replace panels, their actions and key bindings, search-match painting, and the direct `aho-corasick` dependency require the `input-search` feature. Bokheim leaves it disabled; ordinary editing, replacement APIs, selection, and IME remain available.
+
+- Restored the pinned upstream table module and its horizontal virtual-list scroll-handle builder for the library table view.
+- Library tables can reserve a uniform body row height separately from typography and header height. Non-selectable column headers sort across their full hit area, using ascending/descending toggles; sort-icon clicks stop propagation to avoid sorting twice.
+- Visible-range callbacks include a single visible row, so tall book rows continue paging on small viewports.
+- Table cells vertically center their contents. Row and cell selection fills paint behind the content; the selection border remains above it so opaque theme colors cannot cover text or controls.

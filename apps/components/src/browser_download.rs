@@ -1,8 +1,9 @@
 //! Download feedback shared by the desktop and Android book browsers.
 use ui_text::text;
 
+use crate::TEXT_XS;
 use gpui::prelude::*;
-use gpui::{App, AppContext, Context, Entity, SharedString, Window, div, px};
+use gpui::{App, AppContext, Context, Entity, SharedString, Window, div, px, rems};
 use gpui_component::notification::Notification;
 use gpui_component::progress::Progress;
 use gpui_component::{ActiveTheme, Root, WindowExt};
@@ -72,11 +73,6 @@ impl BrowserDownloads {
         }
     }
 
-    pub fn waiting(&mut self, id: &str, window: &mut Window, cx: &mut App) {
-        let Some(entry) = self.entries.get(id) else { return };
-        self.apply(BrowserDownloadUpdate { download: id.into(), name: entry.name.clone(), phase: BrowserDownloadPhase::Waiting, percent: None, message: Some(text!(common::waiting_for_an_unmetered_connection).into()) }, window, cx);
-    }
-
     pub fn apply(&mut self, update: BrowserDownloadUpdate, window: &mut Window, cx: &mut App) {
         let BrowserDownloadUpdate { download, name, phase, percent, message } = update;
         if phase != BrowserDownloadPhase::Dismissed && self.cancelled.contains(&download) {
@@ -121,17 +117,13 @@ impl BrowserDownloads {
                 entry.name = name;
                 entry.phase = phase;
                 entry.message = message;
-                if phase == BrowserDownloadPhase::Waiting {
-                    Notification::new().title(text!(common::transfer_waiting)).message(text).autohide(false)
-                } else {
-                    let progress = entry.progress.clone();
-                    let title = match phase {
-                        BrowserDownloadPhase::Preparing => text!(common::preparing_download),
-                        BrowserDownloadPhase::Importing => text!(common::adding_to_library),
-                        _ => text!(common::downloading),
-                    };
-                    Notification::new().title(title).message(text).autohide(false).content(move |_, _, _| progress.clone().into_any_element())
-                }
+                let progress = entry.progress.clone();
+                let title = match phase {
+                    BrowserDownloadPhase::Preparing => text!(common::preparing_download),
+                    BrowserDownloadPhase::Importing => text!(common::adding_to_library),
+                    _ => text!(common::downloading),
+                };
+                Notification::new().title(title).message(text).autohide(false).content(move |_, _, _| progress.clone().into_any_element())
             }
         };
         if !matches!(phase, BrowserDownloadPhase::Completed | BrowserDownloadPhase::Failed(_)) {
@@ -161,11 +153,11 @@ impl Render for BrowserDownloadProgress {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .h_4()
+                    .min_h(rems(TEXT_XS))
                     .child(div().flex_1().child(Progress::new("download-progress").color(accent).loading(self.percent.is_none()).value(f32::from(self.percent.unwrap_or(0)))))
-                    .when_some(self.percent, |row, percent| row.child(div().text_xs().child(format!(text!(common::percent), percent = percent)))),
+                    .when_some(self.percent, |row, percent| row.child(div().text_size(rems(TEXT_XS)).child(format!(text!(common::percent), percent = percent)))),
             )
-            .when_some(self.detail.clone(), |view, detail| view.child(div().text_xs().child(detail)))
+            .when_some(self.detail.clone(), |view, detail| view.child(div().text_size(rems(TEXT_XS)).child(detail)))
     }
 }
 

@@ -66,11 +66,11 @@ async fn postgres_sync_performance() {
                 let response = repository.exchange("performance-user", &SyncExchangeRequest { library_id: library, replica_id: replica, mutations: Vec::new(), cursor }).await.unwrap();
                 db_ms += started.elapsed().as_secs_f64() * 1_000.0;
                 let started = Instant::now();
-                let bytes = sync_common::transport::encode(&response).unwrap();
+                let bytes = sync_common::http::encode(&response).unwrap();
                 encode_ms += started.elapsed().as_secs_f64() * 1_000.0;
                 maximum_page = maximum_page.max(bytes.len());
                 let started = Instant::now();
-                let received: SyncExchangeResponse = sync_common::transport::decode_byte_fields(&bytes, sync_common::transport::MAX_DECODED_RESPONSE_BYTES).unwrap();
+                let received: SyncExchangeResponse = sync_common::http::decode(&bytes, sync_common::http::MAX_DECODED_RESPONSE_BYTES).unwrap();
                 decode_ms += started.elapsed().as_secs_f64() * 1_000.0;
                 count += received.pull.mutations.len();
                 cursor = received.pull.next_cursor;

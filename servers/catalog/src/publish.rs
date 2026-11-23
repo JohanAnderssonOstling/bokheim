@@ -7,11 +7,11 @@ use reqwest::Url;
 use rusqlite::{Connection, OpenFlags, params};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use subject_projection::{UNIFIED_MATCHER_VERSION, project_subject_codes, project_subject_concepts, unified_taxonomy_revision_id};
+use subject_projection::{UNIFIED_PROJECTION_VERSION, project_subject_codes, project_subject_concepts, unified_taxonomy_revision_id};
 
 mod compression;
 
-pub const FORMAT_VERSION: u32 = 12;
+pub const FORMAT_VERSION: u32 = 13;
 const PAGE_SIZE: u32 = 8192;
 
 /// Adds transfer encodings without changing an immutable snapshot's bytes,
@@ -171,6 +171,7 @@ CREATE TABLE book_author(book_row_id INTEGER NOT NULL REFERENCES book(row_id),au
 CREATE TABLE book_language(book_row_id INTEGER NOT NULL REFERENCES book(row_id),language TEXT NOT NULL,PRIMARY KEY(book_row_id,language)) STRICT, WITHOUT ROWID;
 CREATE TABLE book_identifier(book_row_id INTEGER NOT NULL REFERENCES book(row_id),scheme INTEGER NOT NULL CHECK(scheme BETWEEN 0 AND 12),scheme_label TEXT NOT NULL,value TEXT NOT NULL,scope INTEGER NOT NULL CHECK(scope IN(0,1,2)),PRIMARY KEY(book_row_id,scheme,scheme_label,value,scope)) STRICT, WITHOUT ROWID;
 CREATE TABLE subject_projection(singleton INTEGER PRIMARY KEY CHECK(singleton=1),taxonomy_revision TEXT NOT NULL) STRICT;
+CREATE TABLE taxonomy_requirement(singleton INTEGER PRIMARY KEY CHECK(singleton=1),minimum_release INTEGER NOT NULL CHECK(minimum_release>0)) STRICT;
 CREATE TABLE book_concept(book_row_id INTEGER NOT NULL REFERENCES book(row_id),concept_id INTEGER NOT NULL CHECK(concept_id>0),PRIMARY KEY(book_row_id,concept_id)) STRICT, WITHOUT ROWID;
 CREATE TABLE book_source(book_row_id INTEGER NOT NULL REFERENCES book(row_id),source_id INTEGER NOT NULL REFERENCES source(id),PRIMARY KEY(book_row_id,source_id)) STRICT, WITHOUT ROWID;
 CREATE TABLE source_entry(
@@ -203,7 +204,8 @@ pub fn publish(dir: &Path, db: &Connection, out: &Path, release_id: u64) -> Resu
     snapshot.set_prepared_statement_cache_capacity(128);
     snapshot.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     snapshot.execute("INSERT INTO snapshot VALUES(1,?1,?2)", params![FORMAT_VERSION, release_id as i64]).map_err(|e| e.to_string())?;
-    snapshot.execute("INSERT INTO subject_projection VALUES(1,?1)", [format!("{}:{UNIFIED_MATCHER_VERSION}", unified_taxonomy_revision_id())]).map_err(|e| e.to_string())?;
+    snapshot.execute("INSERT INTO subject_projection VALUES(1,?1)", [format!("{}:{UNIFIED_PROJECTION_VERSION}", unified_taxonomy_revision_id())]).map_err(|e| e.to_string())?;
+    snapshot.execute("INSERT INTO taxonomy_requirement VALUES(1,?1)", [i64::try_from(subject_projection::installed::selected_release().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?]).map_err(|e| e.to_string())?;
     let mut sources = BTreeMap::new();
     let mut authors = Authors::default();
     let mut descriptions = Descriptions::default();

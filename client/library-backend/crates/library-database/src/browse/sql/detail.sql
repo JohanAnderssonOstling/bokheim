@@ -5,8 +5,8 @@
 -- record, which holds the publication year.
 SELECT book.row_id,
        CASE WHEN book.duration_ms IS NOT NULL THEN book.entry_count END AS audiobook_chapter_count,
-       (SELECT body FROM sync_book_record record
-        WHERE record.state_kind='book_add' AND record.content_hash=book.content_hash),
+       (SELECT body FROM sync_state_version record
+        WHERE record.state_kind='book_add' AND record.state_key=book.content_hash AND record.state_subkey=''),
        book.duration_ms
 FROM book
 WHERE book.content_hash=:content_hash AND book.deleted_at IS NULL

@@ -59,14 +59,15 @@ final class SpeechAssets {
     private static File install(Context context, String voice) throws IOException {
         File destination = directory(context, voice);
         String asset = "tts/" + voice;
-        String model = "en_GB-alba-medium.onnx";
+        String model = "en_GB-alba-medium";
         AssetManager assets = context.getAssets();
         String expected;
         try (InputStream input = assets.open(asset + "/" + MARKER)) {
             expected = readText(input);
         }
         File marker = new File(destination, MARKER);
-        if (marker.isFile() && new File(destination, model).isFile()
+        if (marker.isFile() && (new File(destination, model + ".ort").isFile()
+                || new File(destination, model + ".onnx").isFile())
                 && new File(destination, "tokens.txt").isFile()
                 && new File(destination, "espeak-ng-data/en_dict").isFile()) {
             try (InputStream input = new FileInputStream(marker)) {

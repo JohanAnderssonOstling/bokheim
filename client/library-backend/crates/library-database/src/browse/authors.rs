@@ -4,6 +4,7 @@ use crate::browse::books::MatchingBooks;
 use crate::browse::sections::SectionSelection;
 use crate::browse::subjects::Books;
 use crate::browse::{AuthorsSql, BrowseOptions, BrowseRow, parse_uuid_column};
+use crate::query_methods::text_column;
 use crate::{Database, DatabaseError};
 use book_model::{AUTHOR_MARC_RELATOR_CODE, AuthorId};
 use library_model::{BrowseContents, BrowseHeadingState, BrowseLocation, BrowsePageRequest};
@@ -27,7 +28,7 @@ pub(super) fn index_rows(authors: &BTreeMap<AuthorId, Author>, matching: &Matchi
         }
         let book_count = found.books.intersection(&matching.books).count();
         if book_count > 0 {
-            rows.push(BrowseRow { id: location(*id), name: found.name.clone(), path: None, book_count, downloaded_book_count: found.books.intersection(&matching.downloaded).count() });
+            rows.push(BrowseRow { id: location(*id), name: found.name.clone(), path: None, book_count, downloaded_book_count: found.books.intersection(&matching.downloaded).count(), size_bytes: None });
         }
     }
     super::ordering::sort_rows(&mut rows, options.chip_sort);
@@ -124,7 +125,7 @@ impl Database {
     pub(super) fn library_browse_authors(&self) -> Result<BTreeMap<AuthorId, Author>, DatabaseError> {
         let mut authors = BTreeMap::<AuthorId, Author>::new();
         self.connection.author_books(AUTHOR_MARC_RELATOR_CODE.0.as_slice(), |row| {
-            let id = parse_uuid_column(row.get(0)?, 0)?;
+            let id = parse_uuid_column(text_column(row, 0)?, 0)?;
             let name: String = row.get(1)?;
             authors.entry(id).or_insert_with(|| Author { name, books: BTreeSet::new() }).books.insert(row.get(2)?);
             Ok(())

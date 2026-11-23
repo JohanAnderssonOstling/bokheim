@@ -71,8 +71,8 @@ pub(crate) fn uuid_blob_column(row: &Row<'_>, column: usize) -> rusqlite::Result
     Uuid::from_slice(blob_column(row, column)?).map_err(|error| SqlError::FromSqlConversionFailure(column, Type::Blob, Box::new(error)))
 }
 
-pub(crate) fn parse_uuid_column(value: String, column: usize) -> rusqlite::Result<Uuid> {
-    Uuid::parse_str(&value).map_err(|error| invalid_text_column(column, error.to_string()))
+pub(crate) fn parse_uuid_column(value: &str, column: usize) -> rusqlite::Result<Uuid> {
+    Uuid::parse_str(value).map_err(|error| invalid_text_column(column, error.to_string()))
 }
 
 pub(crate) fn first_column<T: rusqlite::types::FromSql>(query: impl FnOnce(&mut dyn FnMut(&Row<'_>) -> rusqlite::Result<()>) -> rusqlite::Result<()>) -> rusqlite::Result<Option<T>> {
@@ -121,6 +121,11 @@ pub(crate) fn try_for_each_row(query: impl FnOnce(&mut dyn FnMut(&Row<'_>) -> ru
 
 /// Borrowed SQL values retain their caller's lifetime.
 pub type SqlParam<'a> = dyn rusqlite::ToSql + 'a;
+
+/// Decode the complete unsigned filesystem fingerprint; NULL means unknown.
+pub(crate) fn fingerprint_column(row: &Row<'_>, column: usize) -> rusqlite::Result<Option<u64>> {
+    Ok(row.get::<_, Option<[u8; 8]>>(column)?.map(u64::from_le_bytes))
+}
 
 /// Inspect the active generated query during its row callback, so tests can
 /// keep checking bounded scans without copying SQL or preparing it separately.

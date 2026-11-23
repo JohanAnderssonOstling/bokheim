@@ -3,7 +3,7 @@ mod fts;
 use crate::query_methods::invalid_integer_column;
 use crate::{Database, DatabaseError, browse::options::BrowseOptions};
 use book_model::{BookFormat, BookTextIndex, BookTextLocation};
-use library_model::{BookTextMatchPage, NotebookSort};
+use library_model::{BookTextMatchPage, FINISHED_PROGRESS_THRESHOLD, NotebookSort};
 use rusqlite::{Connection, Error as SqlError, ErrorCode, OpenFlags, OptionalExtension, params};
 use std::path::Path;
 use sync_common::BookId;
@@ -23,7 +23,7 @@ pub struct TextMatchPage {
 }
 
 const SOURCE: &str = "SELECT b.row_id,b.content_hash,b.format,
-    'v1:' || COALESCE((SELECT group_concat(value,':') FROM (SELECT hex(byte_hash) AS value FROM local_file_content WHERE book_id=b.content_hash ORDER BY dir_id)),
+    'v2:' || b.format || ':' || COALESCE((SELECT group_concat(value,':') FROM (SELECT hex(byte_hash) AS value FROM local_file_content WHERE book_id=b.content_hash ORDER BY dir_id)),
     (SELECT hex(canonical_hash) FROM book_content WHERE book_id=b.content_hash),hex(b.content_hash)) AS revision
     FROM book b JOIN library_book_presence p ON p.book_row_id=b.row_id
     WHERE p.downloaded=1 AND b.deleted_at IS NULL AND b.format IN (1,2,4,32)";
@@ -180,13 +180,13 @@ impl Database {
             if !client_platform_runtime::text_search::enabled() {
                 return Ok(());
             }
-            let mut source = tx.prepare(&format!("SELECT row_id FROM ({SOURCE}) WHERE content_hash=?1 AND revision=?2"))?;
+            let mut source = tx.prepare(&format!("SELECT row_id FROM ({SOURCE}) WHERE content_hash=?1 AND revision=?2 AND format=?3"))?;
             let mut remove = tx.prepare("DELETE FROM book_text_state WHERE row_id=?1")?;
             let mut insert_text = tx.prepare("INSERT INTO book_text(rowid,body) VALUES(?1,?2)")?;
             let mut insert_state = tx.prepare("INSERT INTO book_text_state VALUES(?1,?2,?3)")?;
             for (book, text, checkpoints) in batch {
                 // Recheck each source under the writer lock; stale books are skipped.
-                let row = source.query_row(params![book.book, book.revision], |row| row.get::<_, i64>(0)).optional()?;
+                let row = source.query_row(params![book.book, book.revision, book.format as i64], |row| row.get::<_, i64>(0)).optional()?;
                 let Some(row) = row else { continue };
                 remove.execute([row])?;
                 insert_text.execute(params![row, text])?;
@@ -211,12 +211,17 @@ impl Database {
         let sql = format!(
             "SELECT b.row_id,book_matches(book_text) FROM book_text
             JOIN book b ON b.row_id=book_text.rowid
-            WHERE book_text MATCH ?1 AND (?2=0 OR (b.format & ?2)!=0) ORDER BY {order}"
+            JOIN book_text_state state ON state.row_id=b.row_id
+            JOIN ({SOURCE}) current_source ON current_source.row_id=b.row_id AND current_source.revision=state.revision
+            WHERE book_text MATCH ?1 AND (?2=0 OR (b.format & ?2)!=0)
+              AND (?3='' OR EXISTS(SELECT 1 FROM book_language language WHERE language.book_row_id=b.row_id AND instr(?3,','||language.language||',')>0))
+              AND (?4=0 OR COALESCE(b.read_progress,0)<?5)
+            ORDER BY {order}"
         );
         Ok(self
             .connection
             .prepare(&sql)?
-            .query_map(params![phrase, options.file_types], |row| {
+            .query_map(params![phrase, options.file_types, options.languages, options.hide_finished, f64::from(FINISHED_PROGRESS_THRESHOLD)], |row| {
                 let bytes = row.get::<_, Vec<u8>>(1)?;
                 let offsets = bytes.chunks_exact(4).map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])).collect();
                 Ok((row.get(0)?, offsets))

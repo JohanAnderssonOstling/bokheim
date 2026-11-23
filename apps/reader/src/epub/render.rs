@@ -213,7 +213,10 @@ impl Render for ReaderView {
                     reader.copy_preview_image(cx);
                     window.prevent_default();
                     cx.stop_propagation();
-                } else if (modifiers.control || modifiers.platform) && !modifiers.alt && matches!(event.keystroke.key.as_str(), "+" | "=" | "-" | "0") {
+                    return;
+                }
+                #[cfg(all(feature = "image-zoom", not(feature = "kobo")))]
+                if (modifiers.control || modifiers.platform) && !modifiers.alt && matches!(event.keystroke.key.as_str(), "+" | "=" | "-" | "0") {
                     reader.image_canvas.update(cx, |canvas, cx| {
                         match event.keystroke.key.as_str() {
                             "+" | "=" => canvas.zoom_by(1.2),
@@ -225,7 +228,9 @@ impl Render for ReaderView {
                     });
                     window.prevent_default();
                     cx.stop_propagation();
-                } else if event.keystroke.key == "escape" {
+                    return;
+                }
+                if event.keystroke.key == "escape" {
                     reader.image_preview = None;
                     reader.focus_document(window, cx);
                     cx.notify();

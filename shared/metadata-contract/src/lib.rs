@@ -80,6 +80,9 @@ pub struct SiblingSubjectConsensus {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SiblingSubjectSupport {
+    /// Stable identity. Older responses contain only a display path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concept_id: Option<i64>,
     pub path: String,
     pub supporting_editions: usize,
     /// Each edition splits one vote across its distinct deepest subjects.

@@ -222,7 +222,7 @@ impl Database {
         if book_count == 0 {
             return None;
         }
-        Some(BrowseRow { id: books.location(route), name: node.label.clone(), path: path(), book_count, downloaded_book_count: node.members.intersection(&matching.downloaded).count() })
+        Some(BrowseRow { id: books.location(route), name: node.label.clone(), path: path(), book_count, downloaded_book_count: node.members.intersection(&matching.downloaded).count(), size_bytes: None })
     }
 }
 

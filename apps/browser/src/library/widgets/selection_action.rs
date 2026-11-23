@@ -28,7 +28,6 @@ pub(crate) enum SelectionActionKind {
 }
 
 impl SelectionAction {
-    #[cfg(test)]
     pub(crate) fn is_disabled(&self) -> bool {
         self.disabled
     }
@@ -62,7 +61,10 @@ impl SelectionAction {
     }
 
     pub(crate) fn menu_item(&self, menu: PopupMenu) -> PopupMenu {
+        if self.disabled {
+            return menu;
+        }
         let run = self.run.clone();
-        menu.item(components::menu_item_with_icon(self.label, self.icon.clone(), move |_, window, cx| run(window, cx)).disabled(self.disabled))
+        menu.item(components::menu_item_with_icon(self.label, self.icon.clone(), move |_, window, cx| run(window, cx)))
     }
 }

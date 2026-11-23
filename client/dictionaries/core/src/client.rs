@@ -14,7 +14,7 @@ pub trait Client {
     fn snapshot(&self, languages: Vec<String>) -> ClientFuture<'_, DictionarySnapshot>;
     fn downloads(&self, languages: Vec<String>) -> ClientFuture<'_, DictionaryDownloads>;
     fn download(&self, id: String) -> ClientFuture<'_, Vec<DictionaryInfo>>;
-    fn configure(&self, id: String, enabled: bool, direction: i8) -> ClientFuture<'_, Vec<DictionaryInfo>>;
+    fn reorder(&self, id: String, direction: i8) -> ClientFuture<'_, Vec<DictionaryInfo>>;
     fn remove(&self, id: String) -> ClientFuture<'_, Vec<DictionaryInfo>>;
     fn lookup(&self, query: String, languages: Vec<String>) -> ClientFuture<'_, DictionaryLookup>;
 }

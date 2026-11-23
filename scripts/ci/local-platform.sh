@@ -21,7 +21,7 @@ case "$platform" in
     source "$sdk_environment"
     python3 apps/reader/crates/speech/build_native.py --env-file "$speech_environment"
     source "$speech_environment"
-    cargo desktop-app --release --timings
+    python3 scripts/ci/build-native.py cargo desktop-app --release --timings
     bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh "$CARGO_TARGET_DIR/release/bokheim" 2.17
     if [[ "${BOKHEIM_BROWSER:-auto}" != disabled && -z "${BOKHEIM_BROWSER_HELPER:-}" ]]; then
       python3 scripts/linux/browser-toolchain.py --env-file "$browser_environment"

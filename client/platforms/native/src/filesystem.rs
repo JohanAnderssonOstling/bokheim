@@ -1,8 +1,12 @@
 //! Filesystem durability mechanisms independent of book layout.
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem as fs;
 use std::io::{self, Error, ErrorKind};
 use std::path::Path;
 use std::time::Duration;
 
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem::temporary;
 #[derive(Default)]
 struct Retry {
     attempts: usize,
@@ -41,8 +45,12 @@ pub fn parent_directory(path: &Path) -> io::Result<&Path> {
 }
 
 pub fn sync_directory(path: &Path) -> io::Result<()> {
+    // Document providers own directory durability; directories cannot be opened as files.
+    if fs::is_document_path(path) {
+        return fs::metadata(path).map(|_| ());
+    }
     #[cfg(unix)]
-    retry_transient(|| std::fs::File::open(path)?.sync_all())?;
+    retry_transient(|| fs::open(path)?.sync_all())?;
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
@@ -51,7 +59,7 @@ pub fn sync_directory(path: &Path) -> io::Result<()> {
 /// Flush a whole Linux filesystem at a bulk-import durability boundary.
 /// syncfs has been available since glibc 2.14 (our baseline is 2.17).
 #[cfg(target_os = "linux")]
-pub fn sync_filesystem(file: &std::fs::File) -> io::Result<()> {
+pub fn sync_filesystem(file: &fs::File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     retry_transient(|| {
         // SAFETY: the borrowed file owns this descriptor for the entire call.
@@ -63,7 +71,7 @@ pub fn sync_filesystem(file: &std::fs::File) -> io::Result<()> {
 /// neither flushes metadata nor replaces the final sync at a commit boundary.
 /// sync_file_range has been available since glibc 2.6 (our baseline is 2.17).
 #[cfg(target_os = "linux")]
-pub fn start_file_writeback(file: &std::fs::File) -> io::Result<()> {
+pub fn start_file_writeback(file: &fs::File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     retry_transient(|| {
         // SAFETY: the borrowed file owns this descriptor throughout the call.
@@ -79,11 +87,11 @@ pub fn start_file_writeback(file: &std::fs::File) -> io::Result<()> {
         }
     })
 }
-pub fn persist_noclobber(temporary: tempfile::TempPath, destination: &Path) -> Result<(), tempfile::PathPersistError> {
+pub fn persist_noclobber(temporary: temporary::TempPath, destination: &Path) -> Result<(), temporary::PathPersistError> {
     persist_with_retry(temporary, |temporary| temporary.persist_noclobber(destination))
 }
 
-fn persist_with_retry(mut temporary: tempfile::TempPath, mut persist: impl FnMut(tempfile::TempPath) -> Result<(), tempfile::PathPersistError>) -> Result<(), tempfile::PathPersistError> {
+fn persist_with_retry(mut temporary: temporary::TempPath, mut persist: impl FnMut(temporary::TempPath) -> Result<(), temporary::PathPersistError>) -> Result<(), temporary::PathPersistError> {
     let mut retry = Retry::default();
     loop {
         match persist(temporary) {
@@ -98,6 +106,10 @@ pub fn rename_noclobber(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 fn rename_noclobber_once(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(target_os = "android")]
+    if fs::is_document_path(source) || fs::is_document_path(destination) {
+        return fs::rename_noclobber(source, destination);
+    }
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     {
         use std::ffi::CString;
@@ -109,11 +121,7 @@ fn rename_noclobber_once(source: &Path, destination: &Path) -> io::Result<()> {
         let result = unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, source.as_ptr(), libc::AT_FDCWD, destination.as_ptr(), libc::RENAME_NOREPLACE) };
         #[cfg(target_os = "macos")]
         let result = unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(Error::last_os_error())
-        }
+        if result == 0 { Ok(()) } else { Err(Error::last_os_error()) }
     }
     #[cfg(windows)]
     {
@@ -134,11 +142,7 @@ fn rename_noclobber_once(source: &Path, destination: &Path) -> io::Result<()> {
         let destination = wide(destination)?;
         // With no replacement flag, Windows rejects an existing destination
         // atomically. Both terminated strings remain alive for the call.
-        if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) } != 0 {
-            Ok(())
-        } else {
-            Err(Error::last_os_error())
-        }
+        if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) } != 0 { Ok(()) } else { Err(Error::last_os_error()) }
     }
     #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
     {
@@ -216,11 +220,7 @@ mod tests {
         let mut attempts = 0;
         persist_with_retry(temporary, |temporary| {
             attempts += 1;
-            if attempts == 1 {
-                Err(tempfile::PathPersistError { error: ErrorKind::WouldBlock.into(), path: temporary })
-            } else {
-                temporary.persist_noclobber(&destination)
-            }
+            if attempts == 1 { Err(tempfile::PathPersistError { error: ErrorKind::WouldBlock.into(), path: temporary }) } else { temporary.persist_noclobber(&destination) }
         })
         .unwrap();
         assert_eq!(attempts, 2);

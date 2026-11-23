@@ -5,6 +5,7 @@ use crate::import::ValidatedImport;
 use book_inspection::{InspectedBook, PdfSourceIdentity};
 use client_protocol::BackendError;
 use content_address::ContentHash;
+use cpu_contract::{as_cpu_reader, submit_book, HashAudiobookContent};
 use library_database::transfer::{BookTransferState, ImportedBook};
 use library_database::{ContributorNameMatcher, ImportCommit};
 use library_files::asset_store::{BookLease, StagedBook};
@@ -41,7 +42,7 @@ impl LibraryImport<'_> {
         let reader = staged.open_reader().map_err(BackendError::operation)?;
         #[cfg(target_arch = "wasm32")]
         let reader = staged.open_reader().await.map_err(BackendError::operation)?;
-        let checksum = cpu_host::submit_book(&*self.cpu, cpu_host::HashAudiobookContent {}, cpu_host::as_cpu_reader(reader)).await?;
+        let checksum = submit_book(&*self.cpu, HashAudiobookContent {}, as_cpu_reader(reader)).await?;
         checksum.content_hash().ok_or_else(|| BackendError::message("audiobook fingerprint is unavailable"))
     }
 
@@ -98,7 +99,7 @@ impl LibraryImport<'_> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use crate::reader_transfer::test_importer;
+    use crate::{reader_transfer::test_importer, LibraryImport};
     use book_model::BookFormat;
     use std::fs::{self, File};
     use sync_common::ROOT_DIR_ID;
@@ -128,12 +129,12 @@ mod tests {
         assert!(!moved.created);
         assert!(!path.exists());
 
-        assert_eq!(importer.storage.database().book_count().unwrap(), 1);
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 1);
         let paths = importer.storage.database().book_paths(&identity).await.unwrap();
-        assert!(importer.storage.assets().book_exists(&identity, &paths).unwrap());
+        assert!(importer.storage.assets().book_exists(&identity, &paths).await.unwrap());
         let current = importer.storage.database().book_transfer_state(identity).await.unwrap();
         assert_eq!(current.addition.record.title, original.addition.record.title);
         assert_eq!(current.expected_checksum(), original.expected_checksum());
-        assert!(importer.storage.database().has_import_inspection(&identity, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).unwrap());
+        assert!(importer.storage.database().has_import_inspection(&identity, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).await.unwrap());
     }
 }

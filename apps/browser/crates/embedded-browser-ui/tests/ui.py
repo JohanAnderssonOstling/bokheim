@@ -142,7 +142,7 @@ try:
         root = Path(folder).resolve()
         history = root / 'history.json'
         history.write_text(json.dumps([base + '/suggest-one', base + '/suggest-two', 'previous search words']))
-        preferences = {'keyboard_shortcuts': {}, 'allow_metered_transfers': False, 'text_search': True, 'animations': True, 'custom_ui_font_enabled': False, 'generated_covers_only': False, 'catalog_grouping': 'subject', 'keyboard_layouts': ['SV'], 'theme': 'cool', 'appearance_override': args.appearance, 'ui_font_size_px': 16,
+        preferences = {'keyboard_shortcuts': {}, 'text_search': True, 'animations': True, 'custom_ui_font_enabled': False, 'generated_covers_only': False, 'catalog_grouping': 'subject', 'keyboard_layouts': ['SV'], 'theme': 'cool', 'appearance_override': args.appearance, 'ui_font_size_px': 16,
                        'ui_font_family': 'sans_serif', 'cover_text': 'always'}
         request = {'url': base + '/start', 'title': 'Bokheim browser UI regression',
                    'data_directory': str(root / 'profile'), 'downloads': str(root / 'downloads'),

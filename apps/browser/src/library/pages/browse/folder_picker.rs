@@ -5,7 +5,7 @@ use ui_text::text;
 use std::collections::HashSet;
 
 use gpui::prelude::*;
-use gpui::{Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, Render, Window, div, px};
+use gpui::{Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, Render, Window, div, px, rems};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{Disableable, IconName, Sizable};
 use library_model::LibraryFolderDestination;
@@ -159,10 +159,10 @@ impl Render for FolderPicker {
         // explicit height to grow into — that left the column strip at zero
         // height. Computed here instead, from the tallest column's own rows,
         // and clamped the same way the library switcher's list is.
-        const ROW_HEIGHT: f32 = 36.0;
+        let row_height = f32::from(window.rem_size()) * 2.25;
         let rows = columns.iter().map(|destinations| destinations.len()).max().unwrap_or(0);
-        let column_content_height = rows as f32 * ROW_HEIGHT + components::SPACE_XS * 2.0;
-        let panel_height = (58.0 + column_content_height).min(components::NAVIGATION_MODAL_MAX_HEIGHT_REM * f32::from(window.rem_size()));
+        let column_content_height = rows as f32 * row_height + components::SPACE_XS * 2.0;
+        let panel_height = (f32::from(window.rem_size()) * 3.625 + column_content_height).min(components::NAVIGATION_MODAL_MAX_HEIGHT_REM * f32::from(window.rem_size()));
         let mut column_strip = div().flex_1().min_h_0().min_w_0().flex().flex_row().overflow_x_scrollbar();
         for (depth, destinations) in columns.into_iter().enumerate() {
             let mut contents = div().w_full().flex().flex_col().p(px(components::SPACE_XS));
@@ -171,7 +171,7 @@ impl Render for FolderPicker {
                 let disabled = self.disabled_ids.contains(&destination.id);
                 let destination_id = destination.id;
                 contents = contents.child(
-                    components::selectable_button(components::base_button(format!("folder-picker-{destination_id}")).ghost().small().disabled(disabled).w_full().h(px(36.0)).justify_start().icon(IconName::Folder), on_path, theme)
+                    components::selectable_button(components::base_button(format!("folder-picker-{destination_id}")).ghost().small().disabled(disabled).w_full().h(rems(2.25)).justify_start().icon(IconName::Folder), on_path, theme)
                         .label(destination.label.clone())
                         .on_click(cx.listener(move |picker, _, _, cx| picker.select(destination_id, cx))),
                 );
@@ -179,7 +179,7 @@ impl Render for FolderPicker {
             let column = div()
                 .id(format!("folder-picker-column-{depth}"))
                 .flex_1()
-                .min_w(px(190.0))
+                .min_w(rems(11.875))
                 .min_h_0()
                 .border_r_1()
                 .border_color(theme.rule)

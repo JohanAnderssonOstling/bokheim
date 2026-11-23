@@ -112,19 +112,7 @@ impl PostgresSyncRepository {
         sqlx::query("UPDATE libraries SET deleted_at=now(), name='Deleted library' WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL").bind(&library_id).bind(user_id).execute(&mut *transaction).await.map_err(internal)?;
 
         sqlx::query(include_str!("sql/cloud_storage/delete_claims.sql")).bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
-        // Release unfinished upload quota before deleting its reservations.
-        let reserved: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(size_bytes), 0)::BIGINT
-             FROM book_upload_reservation WHERE library_id=$1 AND user_id=$2",
-        )
-        .bind(&library_id)
-        .bind(user_id)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(internal)?;
-        if reserved > 0 {
-            sqlx::query("UPDATE user_storage_account SET reserved_bytes=GREATEST(reserved_bytes-$2, 0) WHERE user_id=$1").bind(user_id).bind(reserved).execute(&mut *transaction).await.map_err(internal)?;
-        }
+        sqlx::query(include_str!("sql/cloud_storage/release_reservations.sql")).bind(&library_id).bind(user_id).execute(&mut *transaction).await.map_err(internal)?;
         let lifecycle_hashes = sqlx::query_scalar::<_, Vec<u8>>("SELECT content_hash FROM sync_state WHERE library_id=$1 AND kind='book_lifecycle' AND version_rank<>2 AND content_hash IS NOT NULL")
             .bind(&library_id)
             .fetch_all(&mut *transaction)
@@ -139,7 +127,6 @@ impl PostgresSyncRepository {
         .await
         .map_err(internal)?;
         sqlx::query(include_str!("sql/cloud_storage/release_unreferenced.sql")).bind(user_id).execute(&mut *transaction).await.map_err(internal)?;
-        sqlx::query("DELETE FROM book_upload_reservation WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("DELETE FROM sync_state WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("DELETE FROM sync_library_revision WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
         transaction.commit().await.map_err(internal)?;

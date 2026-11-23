@@ -6,7 +6,7 @@ use crate::import::ImportObservation;
 use crate::native::observations::forget_file;
 use crate::projection::{place_book, project_dirty};
 #[cfg(feature = "scanner")]
-use crate::query_methods::optional_blob_column;
+use crate::query_methods::{fingerprint_column, optional_blob_column};
 use crate::query_methods::{first_column, optional_text_column, query_last, query_rows, text_column, try_for_each_row};
 pub(crate) use crate::shared_sql::SharedSql;
 #[cfg(feature = "scanner")]
@@ -15,10 +15,10 @@ use crate::sync::apply::registers::record_local;
 #[cfg(feature = "scanner")]
 use crate::sync::parse_uuid_column;
 use crate::transactions::WriteOutcome::Commit;
+use book_inspection_contract::{CachedPdfReader, InspectedBook, PdfSourceIdentity};
 #[cfg(feature = "scanner")]
 use client_platform_runtime::profiling::ProfileSpan;
 use content_address::ContentHash;
-use book_inspection_contract::{CachedPdfReader, InspectedBook, PdfSourceIdentity};
 use pdf_view_common::PdfReaderMetadata;
 use rusqlite::{Connection, Row, Transaction};
 use std::collections::HashMap;
@@ -38,7 +38,7 @@ pub(crate) use rusqlite::OptionalExtension;
 pub(crate) use std::collections::HashSet;
 pub(crate) use sync_common::{BookId, DirId, FileName};
 #[cfg(feature = "scanner")]
-use sync_common::{StateKey, wire};
+use sync_common::{ROOT_DIR_ID, StateKey, wire};
 
 /// A physical import folder awaiting registration, with parents before children.
 #[derive(Clone, Debug)]
@@ -338,9 +338,20 @@ pub(crate) fn trashed_subtree(connection: &rusqlite::Connection, roots: Vec<Stri
 
 /// Materialized paths first, then the book's live placements.
 pub(crate) fn book_paths_in(connection: &rusqlite::Connection, hash: &BookId) -> Result<Vec<RelativeBookPath>, DatabaseError> {
+    book_paths_with_folders(connection, hash, None)
+}
+
+pub(crate) fn book_paths_with_folders<'c>(connection: &'c Connection, hash: &BookId, resolver: Option<&mut FolderPaths<'c>>) -> Result<Vec<RelativeBookPath>, DatabaseError> {
     let mut paths = query_rows(|read| connection.book_projection_paths(hash, read), |row| stored_book_path_column(row, 0))?;
     let placements = query_rows(|read| connection.shared_live_book_placements(hash, read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
-    let mut resolver = FolderPaths::for_directories(connection, placements.iter().map(|(id, _)| id.as_str()))?;
+    let mut local_resolver;
+    let resolver = match resolver {
+        Some(resolver) => resolver,
+        None => {
+            local_resolver = FolderPaths::for_directories(connection, placements.iter().map(|(id, _)| id.as_str()))?;
+            &mut local_resolver
+        }
+    };
     for (dir_id, file_name) in placements {
         paths.extend(resolver.placement(&dir_id, &file_name)?);
     }
@@ -474,6 +485,22 @@ fn record_directory(transaction: &rusqlite::Transaction<'_>, dir_id: &DirId, par
     Ok(())
 }
 
+/// Stage batch edges for child validation, then force display reconciliation
+/// even when record_local found an unchanged canonical winner.
+fn stage_directory(transaction: &Transaction<'_>, id: &DirId, parent: &DirId, name: &str, hidden: bool) -> Result<(), DatabaseError> {
+    transaction.execute(
+        "INSERT INTO dir(id,parent_id,name,deleted_at) VALUES(?1,?2,?3,?4)
+         ON CONFLICT(id) DO UPDATE SET parent_id=excluded.parent_id,name=excluded.name,deleted_at=excluded.deleted_at",
+        (id.to_string(), parent.to_string(), name, hidden.then_some(1i64)),
+    )?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO sync_projection_dirty SELECT state_kind,state_key,state_subkey FROM sync_state_version
+         WHERE state_kind='directory_parent' AND state_key=CAST(?1 AS BLOB) AND state_subkey=''",
+        [id.to_string()],
+    )?;
+    Ok(())
+}
+
 /// The relative path a live directory would materialize at, or `None` when
 /// it is not reachable from the library root.
 pub(crate) fn directory_relative_path(connection: &rusqlite::Connection, dir_id: &DirId) -> Result<Option<String>, DatabaseError> {
@@ -548,11 +575,15 @@ pub(crate) fn register_created_directories(transaction: &Transaction<'_>, direct
         if path != &expected || choose_move_folder_name(transaction, &parent_id.to_string(), &id.to_string(), name)? != *name {
             return Err(DatabaseError::message("folder destination changed during creation"));
         }
-        upsert_dir(transaction, id, parent_id, name)?;
+        record_directory(transaction, id, parent_id, name)?;
+        // Seed the validated display so later children in this batch can resolve
+        // their parent. Canonical projection runs once after the entire batch.
+        stage_directory(transaction, id, parent_id, name, false)?;
         transaction.native_set_directory_projection(&id.to_string(), &format!("/{}", path.trim_start_matches('/')))?;
         transaction.directory_clear_work(&(id.to_string()))?;
         result.push(Dir::new(*id, name.to_owned(), 0, 0));
     }
+    project_dirty(transaction)?;
     Ok(result)
 }
 
@@ -660,6 +691,16 @@ impl Database {
     /// Never adopt an identity already known here, including hidden or purged folders.
     pub fn can_recover_import_directory(&self, id: DirId) -> Result<bool, DatabaseError> {
         can_recover_import_directory(&self.connection, id)
+    }
+
+    /// Resolve one live destination by identity without listing the library tree.
+    pub fn folder_destination(&self, id: &DirId) -> Result<Option<LibraryFolderDestination>, DatabaseError> {
+        let Some(path) = directory_relative_path(&self.connection, id)? else { return Ok(None) };
+        let row = self.connection.query_row("SELECT parent_id,name FROM dir WHERE id=?1 AND deleted_at IS NULL", [id.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).optional()?;
+        row.map(|(parent, label)| {
+            Ok(LibraryFolderDestination { id: *id, parent_id: if *id == sync_common::ROOT_DIR_ID { None } else { Some(parse_dir_id(&parent)?) }, label, path: if path.is_empty() { "Library".into() } else { format!("Library/{path}") } })
+        })
+        .transpose()
     }
 
     pub fn folder_destinations(&self) -> Result<Vec<LibraryFolderDestination>, DatabaseError> {
@@ -1016,33 +1057,40 @@ pub(crate) fn copy_directory_in(transaction: &Transaction<'_>, directory_id: &Di
 
     let copy_id = next_id();
     let mut pending = vec![(*directory_id, copy_id, chosen, *destination_parent_id)];
+    let mut copied_books = Vec::new();
     let mut visited = HashSet::new();
     while let Some((source_id, copy_id, copy_name, copy_parent)) = pending.pop() {
         if !visited.insert(source_id) {
             continue;
         }
-        upsert_dir(transaction, &copy_id, &copy_parent, &copy_name)?;
+        record_directory(transaction, &copy_id, &copy_parent, &copy_name)?;
+        // Placements reference their directory immediately, before the batched
+        // canonical projection. The copy's fresh IDs and names are already checked.
+        stage_directory(transaction, &copy_id, &copy_parent, &copy_name, false)?;
         queue_directory_work(transaction, &copy_id)?;
         let placements = query_rows(|read| transaction.copy_directory_record_select_3(&source_id.to_string(), read), |row| Ok((row.get::<_, BookId>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?)))?;
         for (hash, file_name, downloaded) in placements {
             // Names are already unique within the source folder and the
             // copy is empty, so each placement keeps the name it had.
             place_book(transaction, &copy_id, &hash, &file_name)?;
-            project_dirty(transaction)?;
-            #[cfg(target_arch = "wasm32")]
-            if downloaded {
-                transaction.shared_set_book_hash_downloaded(&hash, 1)?;
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            let _ = downloaded;
-            copy_book_baseline(transaction, &source_id, &copy_id, &hash)?;
-            #[cfg(not(target_arch = "wasm32"))]
-            queue_materialization(transaction, &hash, &copy_id)?;
+            copied_books.push((source_id, copy_id, hash, downloaded));
         }
         let children = query_rows(|read| transaction.copy_directory_record_select_4(&source_id.to_string(), read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
         for (child_id, child_name) in children {
             pending.push((parse_dir_id(&child_id)?, next_id(), child_name, copy_id));
         }
+    }
+    project_dirty(transaction)?;
+    for (source, destination, hash, downloaded) in copied_books {
+        #[cfg(target_arch = "wasm32")]
+        if downloaded {
+            transaction.shared_set_book_hash_downloaded(&hash, 1)?;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = downloaded;
+        copy_book_baseline(transaction, &source, &destination, &hash)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        queue_materialization(transaction, &hash, &destination)?;
     }
     Ok(copy_id)
 }
@@ -1180,35 +1228,37 @@ pub struct ScanSnapshot {
 }
 
 /// Local placement state captured before filesystem I/O, including rows whose
-/// fingerprint is empty (for example, a freshly downloaded book).
+/// fingerprint is unknown (for example, a freshly downloaded book).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanPlacement {
     pub book_id: BookId,
     pub directory: DirId,
     pub name: String,
     pub path: String,
-    pub fingerprint: String,
+    pub fingerprint: Option<u64>,
     pub downloaded: bool,
     pub projected_path: Option<String>,
 }
 
 #[cfg(feature = "scanner")]
-pub(crate) fn scan_placements(connection: &rusqlite::Connection) -> Result<Vec<ScanPlacement>, DatabaseError> {
-    let mut folders = FolderPaths::all(connection)?;
-    scan_placements_with_folders(connection, &mut folders)
+fn scan_placements_with_folders(connection: &rusqlite::Connection, folders: &mut FolderPaths<'_>) -> Result<Vec<ScanPlacement>, DatabaseError> {
+    scan_placements_since(connection, folders, None, "[]")
 }
 
 #[cfg(feature = "scanner")]
-fn scan_placements_with_folders(connection: &rusqlite::Connection, folders: &mut FolderPaths<'_>) -> Result<Vec<ScanPlacement>, DatabaseError> {
+fn scan_placements_since(connection: &Connection, folders: &mut FolderPaths<'_>, revision: Option<i64>, directories: &str) -> Result<Vec<ScanPlacement>, DatabaseError> {
     // A placement in a folder that is not live has no path on disk to scan.
     let mut placements = Vec::new();
     try_for_each_row(
-        |read| connection.scanner_placements(read),
+        |read| match revision {
+            Some(revision) => connection.scanner_changed_placements(revision, directories, read),
+            None => connection.scanner_placements(read),
+        },
         |row| {
             let book_id = row.get::<_, BookId>(0)?;
             let directory = text_column(row, 1)?;
             let name = text_column(row, 2)?;
-            let fingerprint = text_column(row, 3)?;
+            let fingerprint = fingerprint_column(row, 3)?;
             let downloaded = row.get(4)?;
             let projected_path = optional_text_column(row, 5)?;
             let Some(folder) = folders.folder(directory)? else { return Ok(()) };
@@ -1217,7 +1267,7 @@ fn scan_placements_with_folders(connection: &rusqlite::Connection, folders: &mut
                 directory: parse_dir_id(directory)?,
                 path: if folder.is_empty() { name.to_owned() } else { format!("{folder}/{name}") },
                 name: name.to_owned(),
-                fingerprint: fingerprint.to_owned(),
+                fingerprint,
                 downloaded,
                 projected_path: projected_path.map(str::to_owned),
             });
@@ -1225,6 +1275,80 @@ fn scan_placements_with_folders(connection: &rusqlite::Connection, folders: &mut
         },
     )?;
     Ok(placements)
+}
+
+/// Refresh journaled books and folders, including both old and new descendants
+/// of moved directories. Deleted edges are recovered from the prior snapshot.
+#[cfg(feature = "scanner")]
+fn scan_inventory_update(connection: &Connection, snapshot: &ScanSnapshot) -> Result<ScanInventoryUpdate, DatabaseError> {
+    let mut changed_directories = connection
+        .prepare_cached(
+            "WITH RECURSIVE affected(id) AS (
+        SELECT id FROM local_scan_changed_directory WHERE revision>?1
+        UNION SELECT d.id FROM dir d JOIN affected a ON d.parent_id=a.id
+    ) SELECT id FROM affected",
+        )?
+        .query_map([snapshot.work_revision], |row| row.get::<_, String>(0))?
+        .map(|id| parse_dir_id(&id?))
+        .collect::<Result<HashSet<_>, _>>()?;
+    let mut children = HashMap::<DirId, Vec<DirId>>::new();
+    if !changed_directories.is_empty() {
+        for directory in &snapshot.directories {
+            children.entry(directory.parent_id).or_default().push(directory.id);
+        }
+        let mut pending = changed_directories.iter().copied().collect::<Vec<_>>();
+        while let Some(parent) = pending.pop() {
+            for child in children.remove(&parent).into_iter().flatten() {
+                if changed_directories.insert(child) {
+                    pending.push(child);
+                }
+            }
+        }
+    }
+    let ids = changed_directories.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let ids_json = serde_json::to_string(&ids).map_err(DatabaseError::operation)?;
+    let changed = connection
+        .prepare_cached(
+            "SELECT content_hash FROM local_scan_changed_book INDEXED BY idx_local_scan_changed_revision WHERE revision>?1
+        UNION SELECT b.content_hash FROM json_each(?2) affected JOIN book_dir bd ON bd.dir_id=affected.value JOIN book b ON b.row_id=bd.book_row_id",
+        )?
+        .query_map((snapshot.work_revision, &ids_json), |row| row.get::<_, BookId>(0))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    let mut folders = FolderPaths::for_directories(connection, ids.iter().map(String::as_str))?;
+    let placements = scan_placements_since(connection, &mut folders, Some(snapshot.work_revision), &ids_json)?;
+    let rows = connection
+        .prepare_cached("SELECT d.id,d.parent_id,d.name,d.deleted_at IS NULL FROM json_each(?1) affected JOIN dir d ON d.id=affected.value")?
+        .query_map([&ids_json], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, bool>(3)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let directories = rows
+        .into_iter()
+        .map(|(id, parent, name, live)| Ok(ScanKnownDirectory { id: parse_dir_id(&id)?, parent_id: parse_dir_id(&parent)?, name, deleted: !live, path: if live { folders.folder(&id)?.map(str::to_owned) } else { None } }))
+        .collect::<Result<Vec<_>, DatabaseError>>()?;
+    Ok(ScanInventoryUpdate { changed, placements, changed_directories, directories })
+}
+
+#[cfg(feature = "scanner")]
+struct ScanInventoryUpdate {
+    changed: HashSet<BookId>,
+    placements: Vec<ScanPlacement>,
+    changed_directories: HashSet<DirId>,
+    directories: Vec<ScanKnownDirectory>,
+}
+
+#[cfg(feature = "scanner")]
+impl ScanInventoryUpdate {
+    fn apply(self, placements: &mut Vec<ScanPlacement>, directories: &mut Vec<ScanKnownDirectory>) {
+        if !self.changed.is_empty() || !self.changed_directories.is_empty() {
+            placements.retain(|placement| !self.changed.contains(&placement.book_id) && !self.changed_directories.contains(&placement.directory));
+            placements.extend(self.placements);
+            placements.sort_unstable_by_key(|placement| (placement.directory, placement.book_id));
+        }
+        if !self.changed_directories.is_empty() {
+            directories.retain(|directory| !self.changed_directories.contains(&directory.id));
+            directories.extend(self.directories);
+            directories.sort_unstable_by_key(|directory| directory.id);
+        }
+    }
 }
 
 #[cfg(feature = "scanner")]
@@ -1265,7 +1389,7 @@ fn scan_directories(connection: &Connection, folders: &mut FolderPaths<'_>) -> R
 
 /// Keep concurrent edits out of this pass without abandoning unrelated files.
 #[cfg(feature = "scanner")]
-fn changed_scan_paths(connection: &Connection, snapshot: &ScanSnapshot, placements: &[ScanPlacement], folders: &mut FolderPaths<'_>) -> Result<Vec<String>, DatabaseError> {
+fn changed_scan_paths(connection: &Connection, snapshot: &ScanSnapshot, placements: &[ScanPlacement], directories: &[ScanKnownDirectory], folders: &mut FolderPaths<'_>) -> Result<Vec<String>, DatabaseError> {
     let mut paths = scan_pending_paths(connection, folders)?;
     let old = snapshot.placements.iter().map(|placement| ((placement.directory, placement.book_id), placement)).collect::<HashMap<_, _>>();
     let current = placements.iter().map(|placement| ((placement.directory, placement.book_id), placement)).collect::<HashMap<_, _>>();
@@ -1277,7 +1401,6 @@ fn changed_scan_paths(connection: &Connection, snapshot: &ScanSnapshot, placemen
             }
         }
     }
-    let directories = scan_directories(connection, folders)?;
     let old = snapshot.directories.iter().map(|directory| (directory.id, directory)).collect::<HashMap<_, _>>();
     let current = directories.iter().map(|directory| (directory.id, directory)).collect::<HashMap<_, _>>();
     for (before, after) in [(&old, &current), (&current, &old)] {
@@ -1288,7 +1411,7 @@ fn changed_scan_paths(connection: &Connection, snapshot: &ScanSnapshot, placemen
         }
     }
     // A newly trashed book may no longer have any live placement to compare.
-    let tombstoned = query_rows(|read| connection.scanner_tombstoned_files(read), |row| Ok((parse_uuid_column(row.get(0)?, 0)?, row.get::<_, String>(1)?)))?;
+    let tombstoned = query_rows(|read| connection.scanner_tombstoned_files(read), |row| Ok((parse_uuid_column(text_column(row, 0)?, 0)?, row.get::<_, String>(1)?)))?;
     for (directory, name) in tombstoned {
         if !snapshot.tombstoned_files.contains(&(directory, name.clone())) {
             paths.extend(folders.placement(&directory.to_string(), &name)?.map(|path| path.to_string()));
@@ -1380,6 +1503,14 @@ pub struct ScannedBook {
 }
 
 impl Database {
+    /// Presentation and canonical edits; scan bookkeeping and work queues are excluded.
+    #[cfg(feature = "scanner")]
+    pub fn scan_content_revision(&self) -> Result<i64, DatabaseError> {
+        Ok(self
+            .connection
+            .query_row("SELECT visibility+subjects+authors+metadata+availability+reading+folders+facets+COALESCE((SELECT sequence FROM sync_clock WHERE singleton=1),0) FROM browse_revision WHERE singleton=1", [], |row| row.get(0))?)
+    }
+
     /// Takes the immutable inventory view required by filesystem discovery. The
     /// connection is released before the caller walks or hashes any path.
     /// The scanner supplies its extractor version to select reusable PDF facts.
@@ -1388,15 +1519,14 @@ impl Database {
         self.with_write_transaction(|transaction| {
             let connection = &*transaction;
             let work_revision = connection.scanner_file_work_revision(|row| row.get(0))?;
-            let sequence = first_column::<String>(|read| connection.shared_scanner_sequence(read))?;
-            let current = sequence.map(|value| value.parse::<i64>().map_err(DatabaseError::operation)).transpose()?.unwrap_or(0);
+            let current = first_column::<i64>(|read| connection.shared_scanner_sequence(read))?.unwrap_or(0);
             let scan_id = current.checked_add(1).ok_or_else(|| DatabaseError::message("scan sequence overflow"))?;
-            connection.scanner_set_sequence(&scan_id.to_string())?;
+            connection.scanner_set_sequence(scan_id)?;
             let mut folders = FolderPaths::all(connection)?;
             let excluded_paths = scan_pending_paths(connection, &mut folders)?;
             let mut books = Vec::new();
             connection.scanner_known_books(|row| {
-                let Ok(fingerprint) = row.get::<_, String>(0)?.parse::<u64>() else { return Ok(()) };
+                let fingerprint = u64::from_le_bytes(row.get::<_, [u8; 8]>(0)?);
                 let book_id = row.get::<_, BookId>(1)?;
                 let mut inspection_version = row.get::<_, Option<i64>>(4)?;
                 let format = BookFormat::from_code(row.get(5)?);
@@ -1409,7 +1539,7 @@ impl Database {
                 } else {
                     None
                 };
-                books.push(ScanKnownBook { book_id, directory: parse_uuid_column(row.get(2)?, 2)?, name: row.get(3)?, fingerprint, inspection_version, cached_audiobook_format, cached_pdf: None });
+                books.push(ScanKnownBook { book_id, directory: parse_uuid_column(text_column(row, 2)?, 2)?, name: row.get(3)?, fingerprint, inspection_version, cached_audiobook_format, cached_pdf: None });
                 Ok(())
             })?;
             for book in &mut books {
@@ -1420,7 +1550,7 @@ impl Database {
                 }
             }
             let directories = scan_directories(connection, &mut folders)?;
-            let tombstoned_files = query_rows(|read| connection.scanner_tombstoned_files(read), |row| Ok((parse_uuid_column(row.get(0)?, 0)?, row.get::<_, String>(1)?)))?;
+            let tombstoned_files = query_rows(|read| connection.scanner_tombstoned_files(read), |row| Ok((parse_uuid_column(text_column(row, 0)?, 0)?, row.get::<_, String>(1)?)))?;
             // The inventory above already resolved live folders. Reuse those
             // paths instead of walking their ancestry again per folder.
             let placements = scan_placements_with_folders(connection, &mut folders)?;
@@ -1444,7 +1574,8 @@ impl Database {
         // Normalize metadata and serialize inspection data before acquiring
         // the writer. Check concurrent edits under the writer so affected
         // paths can wait for a follow-up without interrupting this pass.
-        let reconcile_missing = complete && discovery.readable && inspected.readable;
+        let readable = discovery.readable && inspected.readable;
+        let reconcile_missing = complete && readable;
         let preparation = ProfileSpan::new("database_batch_preparation", "batch");
         let prepared_books = inspected
             .books
@@ -1482,7 +1613,7 @@ impl Database {
                     size_bytes: book.size_bytes,
                     inspection_version: book.inspection_version,
                     inspection: None,
-                    published: library_model::PublishedStagedBook { name: book.name, relative_path: book.path, published: true, fingerprint: Some(book.fingerprint.to_string()) },
+                    published: library_model::PublishedStagedBook { name: book.name, relative_path: book.path, published: true, fingerprint: Some(book.fingerprint) },
                     request_thumbnail: true,
                     restore_paths: Vec::new(),
                 };
@@ -1497,13 +1628,15 @@ impl Database {
             let _body = ProfileSpan::new("scan_transaction_body", "batch");
             let guard = ProfileSpan::new("placement_guard", "batch");
             let current_revision: i64 = transaction.scanner_file_work_revision(|row| row.get(0))?;
-            let current_sequence = first_column::<String>(|read| transaction.shared_scanner_sequence(read))?.unwrap_or_default();
-            let placements = scan_placements(transaction)?;
-            let mut needs_rescan = current_revision != snapshot.work_revision || current_sequence != snapshot.scan_id.to_string() || placements != snapshot.placements;
+            let current_sequence = first_column::<i64>(|read| transaction.shared_scanner_sequence(read))?.unwrap_or_default();
+            let mut needs_rescan = current_revision != snapshot.work_revision || current_sequence != snapshot.scan_id;
             let mut excluded_paths = snapshot.excluded_paths.clone();
             if needs_rescan {
-                let mut folders = FolderPaths::all(transaction)?;
-                excluded_paths.extend(changed_scan_paths(transaction, snapshot, &placements, &mut folders)?);
+                let mut placements = snapshot.placements.clone();
+                let mut directories = snapshot.directories.clone();
+                scan_inventory_update(transaction, snapshot)?.apply(&mut placements, &mut directories);
+                let mut folders = FolderPaths::new(transaction);
+                excluded_paths.extend(changed_scan_paths(transaction, snapshot, &placements, &directories, &mut folders)?);
                 excluded_paths.sort_unstable();
                 excluded_paths.dedup();
                 log::debug!(target: "library_add_profile", "follow_up_scan=file_work_or_placements expected_revision={} actual_revision={current_revision} excluded_paths={}", snapshot.work_revision, excluded_paths.len());
@@ -1528,18 +1661,15 @@ impl Database {
                 // relocation. Observing it again must not rewrite synced intent.
                 let retained: bool = transaction.scanner_directory_projection_retained(&directory.id.to_string(), &directory.parent_id.to_string(), &directory.path, |row| row.get(0))?;
                 if !retained {
-                    let existing: bool = transaction.scanner_directory_exists(&directory.id.to_string(), |row| row.get(0))?;
-                    if existing {
-                        // Existing-directory edits keep sequential cycle checks:
-                        // their parents must include earlier admissions here.
-                        project_dirty(transaction)?;
-                        upsert_dir(transaction, &directory.id, &directory.parent_id, &directory.name)?;
-                    } else {
-                        // Discovery already supplies unique IDs in an acyclic
-                        // physical tree. Admit new folders together, then build
-                        // the directory projection once before importing books.
-                        record_directory(transaction, &directory.id, &directory.parent_id, &directory.name)?;
+                    record_directory(transaction, &directory.id, &directory.parent_id, &directory.name)?;
+                    // Keep earlier edges visible to subsequent cycle checks.
+                    // Hidden staging rows permit concurrent name collisions;
+                    // the final batched projection chooses their display names.
+                    use crate::sync::SyncApplySql;
+                    if directory.parent_id != ROOT_DIR_ID {
+                        transaction.ensure_remote_directory_placeholder(&directory.parent_id.to_string())?;
                     }
+                    stage_directory(transaction, &directory.id, &directory.parent_id, &directory.name, true)?;
                 }
             }
             project_dirty(transaction)?;
@@ -1637,17 +1767,17 @@ impl Database {
                     if scan_path_in(&excluded_paths, &file.path) {
                         continue;
                     }
-                    if let Some(old) = known.get(&(file.directory, file.name.as_str())).filter(|old| old.fingerprint == file.fingerprint.to_string())
+                    if let Some(old) = known.get(&(file.directory, file.name.as_str())).filter(|old| old.fingerprint == Some(file.fingerprint))
                         && (!old.downloaded || old.projected_path.as_deref().map(|path| path.trim_matches('/')) != Some(file.path.trim_matches('/')))
                     {
-                        crate::native::observations::record_file(transaction, &file.directory.to_string(), &old.book_id, &file.path, Some(&old.fingerprint), crate::native::observations::Revision::Retained)?;
+                        crate::native::observations::record_file(transaction, &file.directory.to_string(), &old.book_id, &file.path, old.fingerprint, crate::native::observations::Revision::Retained)?;
                     }
                 }
                 if reconcile_missing && !needs_rescan {
                     let observed = discovery.files.iter().map(|file| (file.directory, file.name.as_str())).collect::<HashSet<_>>();
                     let observed_paths = discovery.files.iter().map(|file| file.path.trim_matches('/')).collect::<HashSet<_>>();
                     for old in &snapshot.placements {
-                        if !old.downloaded && old.projected_path.is_none() && old.fingerprint.is_empty() {
+                        if !old.downloaded && old.projected_path.is_none() && old.fingerprint.is_none() {
                             continue;
                         }
                         if observed.contains(&(old.directory, old.name.as_str()))
@@ -1667,7 +1797,6 @@ impl Database {
                 ({
                     use crate::assets::ActivitySql;
                     let connection: &rusqlite::Connection = transaction;
-                    let readable: bool = discovery.readable;
 
                     connection.activity_finish_scan(if readable { "idle" } else { "failed" })?;
                 });
@@ -1687,14 +1816,14 @@ impl Database {
                 }
             }
             let _refresh = ProfileSpan::new("scan_guard_refresh", "batch");
-            let mut folders = FolderPaths::all(transaction)?;
-            next_guard = Some((transaction.scanner_file_work_revision(|row| row.get(0))?, scan_placements_with_folders(transaction, &mut folders)?, scan_directories(transaction, &mut folders)?, excluded_paths));
+            let inventory = scan_inventory_update(transaction, snapshot)?;
+            next_guard = Some((transaction.scanner_file_work_revision(|row| row.get(0))?, inventory, excluded_paths));
             Ok(Commit(if needs_rescan { ScanApplyResult::AppliedNeedsRescan } else { ScanApplyResult::Applied }))
         })?;
-        if let Some((revision, placements, directories, excluded_paths)) = next_guard {
+        if let Some((revision, inventory, excluded_paths)) = next_guard {
+            // Merge the in-memory inventory after releasing the database writer.
+            inventory.apply(&mut snapshot.placements, &mut snapshot.directories);
             snapshot.work_revision = revision;
-            snapshot.placements = placements;
-            snapshot.directories = directories;
             snapshot.excluded_paths = excluded_paths;
         }
         Ok(result)
@@ -1933,6 +2062,10 @@ database_methods! {
     arguments (DirId,) = (id,);
     execute database, arguments => database.can_recover_import_directory(arguments.0);
 
+    fn folder_destination(id: &DirId) -> Option<LibraryFolderDestination>;
+    arguments (DirId,) = (*id,);
+    execute database, arguments => database.folder_destination(&arguments.0);
+
     fn folder_destinations() -> Vec<LibraryFolderDestination>;
     arguments () = ();
     execute database, arguments => database.folder_destinations();
@@ -1992,6 +2125,11 @@ database_methods! {
     fn empty_trash() -> ();
     arguments () = ();
     execute database, arguments => database.empty_trash();
+
+    #[cfg(feature = "scanner")]
+    fn scan_content_revision() -> i64;
+    arguments () = ();
+    execute database, arguments => database.scan_content_revision();
 
     #[cfg(feature = "scanner")]
     fn scan_snapshot(pdf_inspection_version: i64) -> ScanSnapshot;

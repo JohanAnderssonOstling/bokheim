@@ -1,8 +1,8 @@
 //! Device-local filenames. Logical archive names and ordering remain immutable.
 use audiobook_archive::{EntryFormat, Track, audio_file, valid_archive_name};
+use client_platform_runtime::filesystem::{self as fs, OpenOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
@@ -56,7 +56,7 @@ fn regular_mapped_track(folder: &Path, local: &str) -> io::Result<bool> {
 }
 
 pub(crate) fn load(folder: &Path) -> io::Result<Option<PathMapping>> {
-    let file = match File::open(folder.join(PATH_MAPPING_FILE)) {
+    let file = match fs::open(folder.join(PATH_MAPPING_FILE)) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),

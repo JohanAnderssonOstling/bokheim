@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bokheim · Kobo settings layout proposals</title>
+  <style>
+    @font-face { font-family: Garamond; src: url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf'); }
+    @font-face { font-family: Jost; src: url('../../desktop-gpui/assets/fonts/NV_Jost-Regular.ttf'); }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    :root { color-scheme: light; --ink: #111; --muted: #555; --rule: #aaa; }
+    body { margin: 0; background: #eeede9; color: #222; font: 15px/1.5 Jost, sans-serif; }
+    button, select { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid #111; outline-offset: 3px; }
+    button:disabled { color: #888; cursor: default; }
+    main { max-width: 1400px; padding: 28px 32px 40px; margin: auto; }
+    .masthead { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 12px; padding-bottom: 18px; border-bottom: 1px solid #bab9b4; }
+    h1 { font: 36px/1.15 Garamond, Georgia, serif; margin: 4px 0 0; }
+    .eyebrow { text-transform: uppercase; letter-spacing: .12em; font-size: 11px; color: #555; }
+    .masthead p { margin: 0; font-size: 13px; color: #555; }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 28px; margin: 22px 0 16px; }
+    .toolbar label { display: flex; align-items: center; gap: 10px; }
+    select { background: #fff; border: 1px solid #aaa; padding: 8px 32px 8px 12px; min-height: 40px; border-radius: 3px; }
+    .toolbar button { min-height: 40px; background: transparent; border: 1px solid #aaa; border-radius: 3px; padding: 6px 14px; }
+    .variants { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
+    .variants button { padding: 10px 18px; border: 1px solid #aaa; border-radius: 4px; background: transparent; text-align: left; min-height: 52px; }
+    .variants button[aria-pressed=true] { background: #fff; border: 2px solid #111; padding: 9px 17px; }
+    .variants small { display: block; color: #555; font-size: 11px; }
+    .workbench { display: grid; grid-template-columns: minmax(0, 1fr) 270px; align-items: start; gap: 32px; }
+    .preview-column { min-width: 0; }
+    .viewport-label { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 9px; font-size: 12px; color: #555; }
+    .stage { position: relative; width: 100%; }
+    .screen { position: absolute; left: 50%; top: 0; transform-origin: top center; background: white; color: #000; border: 1px solid #777; overflow: hidden; font: 16px/1.3 Jost, sans-serif; display: flex; flex-direction: column; --control: 48px; }
+    .screen button { background: white; border: 0; min-height: var(--control); }
+    .screen button:hover:not(:disabled) { background: #eee; }
+    .screen button:active:not(:disabled) { background: #ddd; }
+    .topbar { flex: none; min-height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 16px; border-bottom: 1px solid var(--rule); }
+    .topbar strong { font-weight: 500; }
+    .topbar .context { font-size: 14px; color: #444; }
+    .topbar .device { margin-left: auto; font-size: 13px; display: flex; align-items: center; gap: 16px; }
+    .topbar .close { width: 48px; padding: 0; font-size: 27px; font-weight: 300; }
+    .workspace { flex: 1; min-height: 0; display: flex; }
+    .scroller { flex: 1; min-height: 0; min-width: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: #999 white; }
+    .body-grid { padding: 4px 12px 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; align-content: start; }
+    .settings-column { min-width: 0; }
+    .setting-group { min-width: 0; }
+    .setting-group h2 { font: 500 14px/1.3 Jost, sans-serif; margin: 0; padding: 14px 0 9px; border-bottom: 1px solid #777; letter-spacing: .03em; }
+    .setting-row { display: grid; grid-template-columns: minmax(85px, 1fr) minmax(0, auto); align-items: center; gap: 8px; min-height: 66px; border-bottom: 1px solid #ddd; padding: 8px 0; }
+    .setting-row .name { font-size: 15px; }
+    .setting-row.wide { grid-template-columns: 1fr; gap: 5px; }
+    .control { display: flex; align-items: stretch; border: 1px solid #777; border-radius: 3px; overflow: hidden; min-width: 0; }
+    .control button { min-width: var(--control); padding: 3px 10px; font-size: 15px; border-right: 1px solid #aaa; white-space: normal; }
+    .control button:last-child { border-right: 0; }
+    .choice { flex: 1; }
+    .choice[aria-pressed=true] { box-shadow: inset 0 -3px 0 #000; font-weight: 500; }
+    .stepper { flex: none; }
+    .stepper button { width: 48px; font-size: 22px; padding: 0; }
+    .stepper output { display: flex; justify-content: center; align-items: center; min-width: 62px; padding: 0 6px; font-size: 15px; }
+    .override { display: flex; gap: 6px; justify-content: end; min-width: 0; }
+    .override .book { border: 1px solid #aaa; border-radius: 3px; padding: 0 8px; min-width: 48px; font-size: 14px; }
+    .override .book[aria-pressed=true] { box-shadow: inset 0 -3px 0 #000; }
+    .override[data-book=true] output { color: #777; }
+    .hint { font-size: 13px; line-height: 1.4; color: #555; margin: 10px 0; }
+    .rail { width: 140px; flex: none; border-right: 1px solid #aaa; padding: 8px; overflow: auto; }
+    .rail button { display: block; width: 100%; text-align: left; padding: 12px 9px; margin-bottom: 6px; font-size: 16px; border: 2px solid transparent; }
+    .rail button[aria-pressed=true] { border-color: black; }
+    .layout-categories .body-grid { display: block; padding: 0 20px 20px; }
+    .layout-categories .setting-row { min-height: 66px; }
+    .layout-categories .setting-row.wide { grid-template-columns: minmax(95px, 1fr) minmax(0, 350px); }
+    .layout-categories .setting-group h2 { font-size: 20px; padding-top: 18px; }
+    .layout-preview .body-grid { display: block; padding: 4px 14px 20px; }
+    .layout-preview .scroller { flex: none; width: 400px; border-right: 1px solid #aaa; }
+    .sample { flex: 1; min-width: 0; padding: 30px 28px; overflow: hidden; font: 21px/1.55 Garamond, Georgia, serif; }
+    .sample h2 { font-weight: 400; text-align: center; font-size: 25px; margin: 0 0 24px; }
+    .sample p { margin: 0 0 16px; text-align: justify; }
+    .sample .folio { text-align: center; font-size: 14px; margin-top: 30px; }
+    .sample .preview-label { font: 11px/1.3 Jost, sans-serif; text-transform: uppercase; letter-spacing: .1em; margin-bottom: 24px; color: #555; }
+    .category-strip { display: flex; flex: none; border-bottom: 1px solid #aaa; overflow: auto; }
+    .category-strip button { flex: 1; padding: 0 12px; white-space: nowrap; font-size: 14px; }
+    .category-strip button[aria-pressed=true] { box-shadow: inset 0 -3px 0 #111; }
+    .bottom { flex: none; min-height: 60px; border-top: 1px solid #aaa; display: flex; align-items: center; justify-content: space-around; font-size: 14px; color: #444; }
+    .bottom span { padding: 12px; }
+    .bottom .active { color: #000; border-bottom: 3px solid black; }
+    .layout-current .body-grid { display: block; padding: 0; }
+    .layout-current .setting-group { padding: 16px; border-bottom: 1px solid #aaa; }
+    .layout-current .setting-group h2 { display: none; }
+    .layout-current .setting-row { display: flex; flex-direction: column; align-items: stretch; border: 0; gap: 4px; padding: 0 0 16px; }
+    .layout-current .setting-row .control { width: 100%; }
+    .layout-current .setting-row .stepper { width: auto; align-self: flex-start; }
+    .layout-current .setting-row .name { font-size: 14px; }
+    .layout-current .control.picture button { min-height: 100px; }
+    .layout-current .override { justify-content: start; }
+    .layout-current.app .setting-row { flex-direction: row; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #ddd; }
+    .layout-current.app .setting-row .control { max-width: 400px; }
+    .portrait .body-grid { grid-template-columns: 1fr; gap: 0; padding-left: 16px; padding-right: 16px; }
+    .portrait .settings-column { display: contents; }
+    .portrait .setting-row { grid-template-columns: minmax(130px, 1fr) minmax(0, auto); }
+    .portrait .setting-row.wide { grid-template-columns: minmax(130px, 1fr) minmax(0, 350px); }
+    .portrait .rail { width: 132px; }
+    .portrait.layout-categories .setting-row.wide { grid-template-columns: 1fr; }
+    .portrait.layout-preview .scroller { width: 100%; border: 0; }
+    .portrait.layout-preview .sample { display: none; }
+    .layout-paired.reader .body-grid { display: block; padding: 0; }
+    .layout-paired.reader .setting-group { padding: 16px; border-bottom: 1px solid #aaa; }
+    .layout-paired.reader .setting-group h2 { display: none; }
+    .layout-paired.reader .setting-row { display: flex; flex-direction: column; align-items: stretch; min-height: 0; padding: 0; gap: 4px; border: 0; }
+    .layout-paired.reader .setting-row .name { font-size: 14px; }
+    .field-pair { display: flex; flex-wrap: wrap; align-items: start; gap: 16px; margin-bottom: 16px; }
+    .field-pair > .setting-row { flex: 1 1 320px; min-width: 0; max-width: 100%; }
+    .layout-paired.reader .control.picture { gap: 8px; border: 0; background: white; overflow: visible; }
+    .layout-paired.reader .control.picture button { display: flex; flex: 1; min-width: 0; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 68px; border: 1px solid #aaa; border-radius: 3px; padding: 4px 0; font-size: 13px; }
+    .layout-paired.reader .control.picture button[aria-pressed=true] { border: 2px solid #111; padding: 3px 0; box-shadow: none; }
+    .tile-art { width: 36px; height: 36px; object-fit: contain; }
+    .type-sample { height: 36px; font: 26px/36px Garamond, Georgia, serif; }
+    .type-sample.sans { font-family: Jost, sans-serif; }
+    .layout-current .type-sample { display: block; margin: auto; }
+    .layout-current .tile-art { display: block; margin: auto; }
+    .stepper-run { display: flex; flex-wrap: wrap; gap: 16px; align-items: start; }
+    .layout-paired.reader .stepper-run > .setting-row { flex: 1 1 176px; min-width: 0; max-width: 100%; align-items: stretch; }
+    .layout-paired.reader .stepper-run .control { width: 100%; }
+    .layout-paired.reader .stepper-run output { flex: 1; }
+    .layout-paired.reader .stepper-run .override { width: 100%; justify-content: start; }
+    .layout-paired.reader .stepper-run .override .stepper { width: auto; flex: 1; }
+    .layout-paired.reader .spacing-run > .setting-row { flex-basis: 240px; }
+    .stepper-run.unpacked { flex-direction: column; }
+    .layout-paired.reader .stepper-run.unpacked > .setting-row { flex: none; width: 100%; }
+    .layout-paired.reader .ruler-run > [data-setting="ruler"] { flex: 2 1 320px; }
+    .stepper.inactive output { color: #888; }
+    .empty { flex: 1; display: grid; place-content: center; text-align: center; font: 24px Garamond, Georgia, serif; }
+    .empty button { padding: 0 20px; border: 1px solid #777; margin: 20px auto; font: 16px Jost, sans-serif; }
+    .metrics { display: flex; gap: 24px; flex-wrap: wrap; font-size: 12px; color: #555; margin-top: 12px; }
+    aside { padding-top: 18px; }
+    aside h2 { font: 29px/1.1 Garamond, Georgia, serif; margin: 8px 0 16px; }
+    aside p { font-size: 14px; margin: 12px 0; }
+    .recommend { border-bottom: 1px solid #bbb; padding-bottom: 20px; margin-bottom: 20px; }
+    .recommend b { font-weight: 500; }
+    .facts { border-top: 1px solid #bbb; padding-top: 14px; margin-top: 22px; }
+    .facts p { font-size: 12px; color: #555; }
+    .facts a { color: inherit; }
+    .notes { color: #555; font-size: 12px; line-height: 1.6; margin-top: 24px; max-width: 1000px; }
+    @media (max-width: 1080px) { .workbench { grid-template-columns: 1fr; } aside { display: grid; grid-template-columns: 1fr 1fr; gap: 0 28px; } aside .facts { margin: 0; } }
+    @media (max-width: 650px) { main { padding: 20px 14px; } h1 { font-size: 29px; } aside { display: block; } .variants button { flex: 1; padding: 8px; } .variants button[aria-pressed=true] { padding: 7px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header class="masthead"><div><div class="eyebrow">Bokheim / Kobo / Layout study</div><h1>More settings, less scrolling.</h1></div><p>Interactive proposals · No app preferences are changed</p></header>
+  <div class="toolbar">
+    <label>Settings <select id="surface"><option value="reader">Reader</option><option value="app">App</option></select></label>
+    <label>Orientation <select id="orientation"><option value="landscape">Landscape</option><option value="portrait">Portrait</option></select></label>
+    <label><input type="checkbox" id="pack-steppers" checked> Share stepper rows</label>
+    <button id="reset">Reset sample values</button>
+  </div>
+  <nav class="variants" aria-label="Layout proposals">
+    <button data-layout="current" aria-pressed="false">Source reference<small>Approximate existing structure</small></button>
+    <button data-layout="paired" aria-pressed="true">A · Current controls, paired<small>Headings above · shared stepper rows</small></button>
+    <button data-layout="categories" aria-pressed="false">B · Category rail<small>Jump to a smaller settings page</small></button>
+    <button data-layout="preview" aria-pressed="false">C · Beside the page<small>Reader only · live sample</small></button>
+  </nav>
+  <div class="workbench">
+    <section class="preview-column" aria-label="Kobo screen preview">
+      <div class="viewport-label"><span id="dimensions"></span><span id="scale-label"></span></div>
+      <div class="stage"><div class="screen" id="screen"></div></div>
+      <div class="metrics" aria-live="polite"><span id="visible-count"></span><span id="scroll-count"></span><span>48-unit touch controls</span></div>
+    </section>
+    <aside>
+      <div><div class="eyebrow" id="proposal-number"></div><h2 id="proposal-title"></h2><div id="proposal-copy"></div></div>
+      <div class="facts"><div class="eyebrow">Your layout · Proposal A</div><p>Keep each heading above its options. Keep the typeface samples and alignment pictures. Place complete settings beside one another.</p><p>The ruler is one row: Off / Band / Focus / Lines, with line count beside it. Line count stays visible and is disabled while the ruler is off.</p><p>Spacing and margins share a grid: three controls per row in landscape, balanced pairs in portrait. Rotate or toggle “Share stepper rows” to compare.</p><p>Source: <a href="../../reader/src/epub/toolbar.rs">reader controls</a>, <a href="../../components/src/reader.rs">reader layout</a>, <a href="../../browser/src/universal/settings.rs">app settings</a>.</p></div>
+    </aside>
+  </div>
+  <p class="notes">HTML design proposals, not screenshots or a running GPUI build. The source reference illustrates stacking and tile proportions rather than reproducing every control. Screen proportions use Kobo Libra 2: 1680 × 1264 physical pixels at the app’s 2× device scale. The preview may scale down to fit your browser. Counts describe this mockup, not measured device performance. Selection uses an underline on white; no animation is used.</p>
+</main>
+<script>
+  const defaults = { font: 'Serif', size: 24, alignment: 'Justify', weight: 'Normal', hyphenation: 'Book', word: 100, line: 1.4, paragraph: .6, indent: 1.2, width: 560, side: 16, vertical: 16, gap: 24, ruler: 'Off', rulerStyle: 'Band', rulerLines: 1, covers: 'Book art', coverText: 'Always', uiFont: 'Serif', uiSize: 16, sleep: '15 min', powerOff: 'Never', search: 'On', dictionaries: 'English', account: 'Signed out' };
+  let values = { ...defaults }, bookModes = { line: true, paragraph: true, indent: true };
+  let surface = 'reader', orientation = location.hash === '#portrait' ? 'portrait' : 'landscape', layout = 'paired', category = 'Typography', closed = false;
+  const definitions = {
+    reader: [
+      { title: 'Typography', fields: [
+        ['font', 'Typeface', ['Book', 'Serif', 'Sans', 'Custom']], ['size', 'Font size', 12, 48, 1, 'px'],
+        ['alignment', 'Alignment', ['Book', 'Left', 'Justify']], ['weight', 'Font weight', ['Light', 'Normal', 'Heavy']],
+        ['hyphenation', 'Hyphenation', ['Book', 'Off', 'On']], ['word', 'Word spacing', 50, 200, 5, '%']
+      ] },
+      { title: 'Text spacing', fields: [
+        ['line', 'Line height', .8, 3, .1, '×', 'override'], ['paragraph', 'Paragraph gap', 0, 3, .1, 'em', 'override'], ['indent', 'First-line indent', 0, 3, .2, 'em', 'override']
+      ] },
+      { title: 'Page layout', fields: [
+        ['width', 'Column width', 240, 1000, 40, 'px'], ['side', 'Side margins', 0, 120, 8, 'px'], ['vertical', 'Top / bottom', 0, 120, 8, 'px'], ['gap', 'Column gap', 0, 120, 8, 'px']
+      ] },
+      { title: 'Reading ruler', fields: [['ruler', 'Reading ruler', ['Off', 'On']], ['rulerStyle', 'Style', ['Band', 'Focus', 'Lines']], ['rulerLines', 'Lines', 1, 5, 1, '']] }
+    ],
+    app: [
+      { title: 'Appearance', fields: [
+        ['covers', 'Covers', ['Book art', 'Generated']], ['coverText', 'Cover text', ['Always', 'Cover only']], ['uiFont', 'UI typeface', ['Serif', 'Sans', 'Custom']], ['uiSize', 'UI font size', 12, 28, 1, 'px']
+      ] },
+      { title: 'Device', fields: [['sleep', 'Auto sleep', ['Never', '5 min', '15 min', '30 min']], ['powerOff', 'Auto power off', ['Never', '1 hour', '4 hours']]] },
+      { title: 'Books & search', fields: [['search', 'Text search', ['Off', 'On']], ['dictionaries', 'Dictionary', ['English', 'Swedish']]] },
+      { title: 'Account & libraries', fields: [['account', 'Sample account', ['Signed out', 'Signed in']]] }
+    ]
+  };
+  const copy = {
+    current: ['Source reference', 'The current shape', '<p>A schematic view of the current components: stacked groups, labels above many reader controls, and tall picture tiles.</p><p>The reader reference starts with the ruler, followed by type and alignment controls. Scroll to reach spacing and page layout.</p><p>This is a structural comparison, not a pixel-perfect reconstruction.</p>'],
+    paired: ['Proposal A · Your layout', 'Same controls. Side by side.', '<div class="recommend"><p><b>Keep the existing design.</b> Headings stay above the choices, with the same typeface samples and alignment pictures.</p><p>Typeface sits beside alignment. Font weight sits beside hyphenation.</p></div><p>The ruler combines Off, Band, Focus and Lines in one choice group. Its line-count stepper sits beside it and stays disabled while Off is selected.</p><p>Spacing and margins form balanced pairs in portrait and rows of three in landscape. Every row fills the available width, with the same touch-target sizes.</p>'],
+    categories: ['Proposal B', 'One category at a time.', '<div class="recommend"><p>A narrow rail uses landscape width for navigation. Typography, spacing, page layout and ruler settings each have a focused page.</p><p>Choose a category to see its controls; each keeps a large target and a full text label.</p></div><p>Works for app settings too: Appearance, Device, Books & search, Account & libraries.</p><p>Tradeoff: fewer controls at once, with an extra tap to change categories.</p>'],
+    preview: ['Proposal C · Reader only', 'Keep the page visible.', '<div class="recommend"><p>A 400-unit panel sits beside a live sample of the book. Font and spacing changes remain visible while you adjust them.</p><p>A short category strip divides the controls without adding a second side rail.</p></div><p>In portrait, settings use the full width and the sample is hidden.</p><p>Tradeoff: the panel is narrower and more complex to implement. Long categories can still scroll.</p>']
+  };
+  const screen = document.querySelector('#screen');
+  const escapeHTML = text => String(text).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
+  const displayValue = field => { const value = values[field[0]]; return (field[4] < 1 ? Number(value).toFixed(1) : value) + field[5]; };
+  function control(field) {
+    const [key, label, choices] = field;
+    if (Array.isArray(choices)) {
+      if (key === 'ruler' && layout === 'paired' && surface === 'reader') {
+        return `<div class="control" role="group" aria-label="Reading ruler">${['Off','Band','Focus','Lines'].map(value => `<button class="choice" data-key="rulerStyle" data-choice="${value}" aria-pressed="${value === 'Off' ? values.ruler === 'Off' : values.ruler === 'On' && values.rulerStyle === value}">${value}</button>`).join('')}</div>`;
+      }
+      const picture = (layout === 'current' || (layout === 'paired' && surface === 'reader')) && ['font','alignment','uiFont'].includes(key);
+      const art = value => !picture ? '' : key === 'alignment' ? `<img class="tile-art" src="assets/reader-settings/align-${value.toLowerCase()}.svg" alt="">` : `<span class="type-sample ${value === 'Sans' ? 'sans' : ''}">Aa</span>`;
+      return `<div class="control ${picture ? 'picture' : ''}" role="group" aria-label="${label}">${choices.map(value => `<button class="choice" data-key="${key}" data-choice="${escapeHTML(value)}" aria-pressed="${values[key] === value}">${art(value)}<span>${escapeHTML(value)}</span></button>`).join('')}</div>`;
+    }
+    const inactive = key === 'rulerLines' && values.ruler === 'Off';
+    const stepper = `<div class="control stepper ${inactive ? 'inactive' : ''}" role="group" aria-label="${label}"><button data-key="${key}" data-delta="-1" aria-label="Decrease ${label}" ${inactive || values[key] <= field[2] ? 'disabled' : ''}>−</button><output>${displayValue(field)}</output><button data-key="${key}" data-delta="1" aria-label="Increase ${label}" ${inactive || values[key] >= field[3] ? 'disabled' : ''}>+</button></div>`;
+    return field[6] === 'override' ? `<div class="override" data-book="${bookModes[key]}"><button class="book" data-book-key="${key}" aria-pressed="${bookModes[key]}" aria-label="Use book ${label}">Book</button>${stepper}</div>` : stepper;
+  }
+  function fieldsFor(group) { return group.fields.filter(field => !['rulerStyle','rulerLines'].includes(field[0]) || values.ruler === 'On'); }
+  function pairedReaderHTML() {
+    const fields = definitions.reader.flatMap(group => group.fields);
+    const row = key => { const field = fields.find(field => field[0] === key); return `<div class="setting-row" data-setting="${key}"><span class="name">${field[1]}</span>${control(field)}</div>`; };
+    const pair = (first, second) => `<div class="field-pair">${row(first)}${row(second)}</div>`;
+    const steppers = (keys, extraClass = '') => `<div class="stepper-run ${extraClass} ${document.querySelector('#pack-steppers').checked ? '' : 'unpacked'}">${keys.map(row).join('')}</div>`;
+    const ruler = `<section class="setting-group"><div class="stepper-run ruler-run">${row('ruler')}${row('rulerLines')}</div></section>`;
+    return `<section class="setting-group">${pair('font', 'alignment')}${pair('weight', 'hyphenation')}${steppers(['size', 'word', 'width'])}</section><section class="setting-group">${steppers(['line','paragraph','indent','side','vertical','gap'], 'spacing-run')}</section>` + ruler;
+  }
+  function groupHTML(group) {
+    let extra = '';
+    if (surface === 'app' && group.title === 'Account & libraries') extra = `<p class="hint">${values.account === 'Signed in' ? 'Sample account · 240 MB of 1 GB used' : 'Sign-in and library management would open from this category.'}</p><p class="hint">On device · Fiction · 42 books<br>On device · Reference · 18 books</p>`;
+    if (surface === 'app' && group.title === 'Books & search') extra = '<p class="hint">Text index · 24 MB<br>Manage installed dictionaries from this category.</p>';
+    return `<section class="setting-group"><h2>${group.title}</h2>${fieldsFor(group).map(field => `<div class="setting-row ${Array.isArray(field[2]) && field[2].length > 3 ? 'wide' : ''}" data-setting="${field[0]}"><span class="name">${field[1]}</span>${control(field)}</div>`).join('')}${extra}</section>`;
+  }
+  function categoryButtons(className) { return `<nav class="${className}" aria-label="Settings categories">${definitions[surface].map(group => `<button data-category="${group.title}" aria-pressed="${category === group.title}">${group.title}</button>`).join('')}</nav>`; }
+  function sample() { return '<article class="sample"><div class="preview-label">Live sample · Chapter IV</div><h2>A quieter afternoon</h2><p>There was a certain hour when the light settled on the windowsill and the town seemed to pause. Beyond the garden, the path continued between the trees, turning slowly out of sight.</p><p>She had brought a book, although she had not yet opened it. The river was close enough to hear, a steady sound beneath the movement of the leaves.</p><p>Nothing in the landscape asked to be hurried. Even the shadows seemed to take their time, crossing the stones one patient inch after another.</p><div class="folio">42</div></article>'; }
+  function applySample() {
+    const page = screen.querySelector('.sample');
+    if (!page) return;
+    page.style.fontSize = values.size + 'px';
+    page.style.fontFamily = values.font === 'Sans' ? 'Jost, sans-serif' : 'Garamond, Georgia, serif';
+    page.style.lineHeight = bookModes.line ? 1.5 : values.line;
+    page.style.paddingInline = Math.min(values.side + 14, 70) + 'px';
+    page.style.paddingBlock = Math.min(values.vertical + 14, 70) + 'px';
+    page.style.fontWeight = values.weight === 'Heavy' ? '700' : values.weight === 'Light' ? '300' : '400';
+    page.querySelectorAll('p').forEach(p => {
+      p.style.textAlign = values.alignment === 'Left' ? 'left' : 'justify';
+      p.style.wordSpacing = (values.word - 100) / 20 + 'px';
+      p.style.marginBottom = (bookModes.paragraph ? .6 : values.paragraph) + 'em';
+      p.style.textIndent = (bookModes.indent ? 0 : values.indent) + 'em';
+    });
+  }
+  function render(keepScroll = false) {
+    const previousScroll = keepScroll ? screen.querySelector('.scroller')?.scrollTop || 0 : 0;
+    if (!definitions[surface].some(group => group.title === category)) category = definitions[surface][0].title;
+    screen.className = `screen layout-${layout} ${orientation} ${surface}`;
+    let groups = definitions[surface];
+    if (layout === 'current' && surface === 'reader') groups = [groups[3], groups[0], groups[1], groups[2]];
+    if (['categories','preview'].includes(layout)) groups = groups.filter(group => group.title === category);
+    const header = `<header class="topbar"><strong>${surface === 'reader' ? 'Reader settings' : 'App settings'}</strong><span class="context">${layout === 'preview' ? 'A quieter afternoon' : 'Bokheim'}</span><span class="device">☼ 60% <span>▰ 82%</span></span><button class="close" id="close-settings" aria-label="Close sample settings">×</button></header>`;
+    const groupContent = layout === 'paired' && surface === 'reader' ? pairedReaderHTML() : layout === 'paired'
+      ? [[groups[0], groups[surface === 'reader' ? 3 : 2]], [groups[1], groups[surface === 'reader' ? 2 : 3]]].map(column => `<div class="settings-column">${column.map(groupHTML).join('')}</div>`).join('')
+      : groups.map(groupHTML).join('');
+    screen.innerHTML = closed ? `<div class="empty"><span>${surface === 'reader' ? 'Back to the book' : 'Back to the library'}</span><button id="reopen">Reopen settings</button></div>` : header + (layout === 'preview' ? categoryButtons('category-strip') : '') + `<div class="workspace">${layout === 'categories' ? categoryButtons('rail') : ''}<div class="scroller" tabindex="0" aria-label="Scrollable settings"><div class="body-grid">${groupContent}</div></div>${layout === 'preview' ? sample() : ''}</div>` + (['current','paired'].includes(layout) && surface === 'reader' ? '<nav class="bottom" aria-label="Reference reader navigation"><span>Contents</span><span>Notes</span><span>Bookmarks</span><span class="active">Settings</span></nav>' : '');
+    document.querySelectorAll('[data-layout]').forEach(button => { button.setAttribute('aria-pressed', String(button.dataset.layout === layout)); button.hidden = button.dataset.layout === 'preview' && surface === 'app'; });
+    const [number, title, text] = copy[layout];
+    document.querySelector('#proposal-number').textContent = number;
+    document.querySelector('#proposal-title').textContent = title;
+    document.querySelector('#proposal-copy').innerHTML = text;
+    const scroller = screen.querySelector('.scroller');
+    if (scroller) { scroller.scrollTop = previousScroll; scroller.addEventListener('scroll', metrics, { passive: true }); }
+    applySample(); resize();
+  }
+  function resize() {
+    const width = orientation === 'landscape' ? 840 : 632, height = orientation === 'landscape' ? 632 : 840;
+    const stage = document.querySelector('.stage');
+    const scale = Math.min(1, stage.clientWidth / width);
+    screen.style.width = width + 'px'; screen.style.height = height + 'px';
+    screen.style.transform = `translateX(-50%) scale(${scale})`;
+    stage.style.height = height * scale + 'px';
+    document.querySelector('#dimensions').textContent = `Libra 2 · ${width} × ${height} logical units`;
+    document.querySelector('#scale-label').textContent = `Preview ${Math.round(scale * 100)}%`;
+    requestAnimationFrame(metrics);
+  }
+  function metrics() {
+    const scroller = screen.querySelector('.scroller');
+    if (!scroller) { document.querySelector('#visible-count').textContent = 'Settings closed'; document.querySelector('#scroll-count').textContent = ''; return; }
+    const bounds = scroller.getBoundingClientRect();
+    const rows = [...scroller.querySelectorAll('.setting-row')];
+    const visible = rows.filter(row => { const rect = row.getBoundingClientRect(); return rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1; }).length;
+    document.querySelector('#visible-count').textContent = `${visible} of ${rows.length} shown settings fully visible`;
+    document.querySelector('#scroll-count').textContent = scroller.scrollHeight > scroller.clientHeight + 1 ? `Scroll ${Math.round(scroller.scrollTop)} / ${scroller.scrollHeight - scroller.clientHeight} units` : 'This page fits without scrolling';
+  }
+  screen.addEventListener('click', event => {
+    const button = event.target.closest('button'); if (!button) return;
+    if (button.id === 'close-settings') { closed = true; render(); return; }
+    if (button.id === 'reopen') { closed = false; render(); return; }
+    if (button.dataset.category) { category = button.dataset.category; render(); return; }
+    if (button.dataset.bookKey) { bookModes[button.dataset.bookKey] = true; render(true); return; }
+    const key = button.dataset.key; if (!key) return;
+    if (button.dataset.choice !== undefined) {
+      if (key === 'rulerStyle') {
+        values.ruler = button.dataset.choice === 'Off' ? 'Off' : 'On';
+        if (values.ruler === 'On') values.rulerStyle = button.dataset.choice;
+      } else values[key] = button.dataset.choice;
+    }
+    else {
+      const field = definitions[surface].flatMap(group => group.fields).find(field => field[0] === key);
+      values[key] = Math.round(Math.max(field[2], Math.min(field[3], values[key] + Number(button.dataset.delta) * field[4])) * 100) / 100;
+      if (key in bookModes) bookModes[key] = false;
+    }
+    const focusChoice = button.dataset.choice, delta = button.dataset.delta;
+    render(true);
+    [...screen.querySelectorAll('button')].find(candidate => candidate.dataset.key === key && candidate.dataset.choice === focusChoice && candidate.dataset.delta === delta)?.focus({ preventScroll: true });
+  });
+  document.querySelector('.variants').addEventListener('click', event => { const button = event.target.closest('[data-layout]'); if (button) { layout = button.dataset.layout; closed = false; render(); } });
+  document.querySelector('#surface').addEventListener('change', event => { surface = event.target.value; if (surface === 'app' && layout === 'preview') layout = 'paired'; category = definitions[surface][0].title; closed = false; render(); });
+  document.querySelector('#orientation').addEventListener('change', event => { orientation = event.target.value; render(true); });
+  document.querySelector('#pack-steppers').addEventListener('change', () => render(true));
+  document.querySelector('#reset').addEventListener('click', () => { values = { ...defaults }; bookModes = { line: true, paragraph: true, indent: true }; render(); });
+  new ResizeObserver(resize).observe(document.querySelector('.stage'));
+  document.fonts.ready.then(() => { resize(); });
+  document.querySelector('#orientation').value = orientation;
+  render();
+</script>
+</body>
+</html>

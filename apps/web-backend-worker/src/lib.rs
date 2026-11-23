@@ -3,11 +3,11 @@
 
 mod import_hasher;
 
-use operation_failure::OperationError;
 use app::BackendError;
 use app::host::cpu::{self, BookTask, CpuRequest};
 use book_model::BookFormat;
 use library_backend::library::web_reader::{Reader, connect};
+use operation_failure::OperationError;
 use wasm_bindgen::prelude::*;
 use wasm_callback::future_to_promise_aborting;
 
@@ -82,7 +82,7 @@ async fn initialize() -> Result<(), JsValue> {
                         match taxonomy {
                             Some(artifact) => {
                                 let snapshot = update_client::fetch::download(artifact).await.map_err(|error| OperationError::operation(error).into_js())?;
-                                subject_projection::installed::install_published_snapshot(&snapshot).map_err(|error| OperationError::operation(error).into_js())?;
+                                subject_projection::installed::install_snapshot(&snapshot).map_err(|error| OperationError::operation(error).into_js())?;
                             }
                             None => app::host::cpu::initialize_bundled_taxonomy().await.map_err(|error| OperationError::operation(error).into_js())?,
                         }

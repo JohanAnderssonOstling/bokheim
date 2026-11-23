@@ -4,13 +4,17 @@
 //! It does not classify books or persist scan decisions.
 
 use client_platform_native::filesystem::retry_transient;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem::temporary;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem::walk;
+use client_platform_runtime::filesystem::{self as fs, File};
 use std::ffi::OsStr;
-use std::fs::{self, File};
 use std::io::{self, Error, ErrorKind};
 use std::path::{Path, PathBuf};
 
 pub struct DirectoryWalk {
-    entries: walkdir::IntoIter,
+    entries: walk::IntoIter,
 }
 
 pub struct DirectoryEntry {
@@ -74,17 +78,17 @@ impl DirectoryWalk {
 }
 
 pub fn walk(root: impl AsRef<Path>) -> DirectoryWalk {
-    DirectoryWalk { entries: walkdir::WalkDir::new(root).follow_links(false).min_depth(1).into_iter() }
+    DirectoryWalk { entries: walk::WalkDir::new(root).follow_links(false).min_depth(1).into_iter() }
 }
 
 pub fn read_to_string(path: impl AsRef<Path>) -> std::io::Result<String> {
     retry_transient(|| fs::read_to_string(path.as_ref()))
 }
 pub fn write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
-    std::fs::write(path, bytes)
+    fs::write(path, bytes)
 }
 pub fn open(path: impl AsRef<Path>) -> std::io::Result<File> {
-    retry_transient(|| File::open(path.as_ref()))
+    retry_transient(|| fs::open(path.as_ref()))
 }
 
 pub fn fingerprint(path: impl AsRef<Path>) -> std::io::Result<u64> {
@@ -100,7 +104,7 @@ pub fn audiobook_fingerprint(folder: &Path, tracks: &[audiobook_archive::Track])
         hasher.update(&fingerprint(&track.path)?.to_le_bytes());
     }
     let mapping = folder.join(audiobook_folder::PATH_MAPPING_FILE);
-    if mapping.try_exists()? {
+    if fs::try_exists(&mapping)? {
         hasher.update(audiobook_folder::PATH_MAPPING_FILE.as_bytes());
         hasher.update(&fingerprint(mapping)?.to_le_bytes());
     }
@@ -143,8 +147,8 @@ fn place_entry(source: &Path, directory: &Path, occupied: &[String], moving: boo
     if !metadata.is_file() && !metadata.is_dir() {
         return Err(Error::other("only regular files and folders can be added to a library"));
     }
-    let source = source.canonicalize()?;
-    let directory = directory.canonicalize()?;
+    let source = fs::canonicalize(&source)?;
+    let directory = fs::canonicalize(&directory)?;
     if source.parent() == Some(directory.as_path()) {
         return Ok(source);
     }
@@ -156,10 +160,10 @@ fn place_entry(source: &Path, directory: &Path, occupied: &[String], moving: boo
     names.extend(fs::read_dir(&directory)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?);
     let candidates: Box<dyn Iterator<Item = String> + '_> =
         if metadata.is_dir() { Box::new(library_replica::folder_name_candidates(name, names.iter().map(String::as_str))) } else { Box::new(library_replica::file_name_candidates(name, names.iter().map(String::as_str))) };
-    let mut staging: Option<tempfile::TempDir> = None;
+    let mut staging: Option<temporary::TempDir> = None;
     for name in candidates {
         let destination = directory.join(name);
-        if destination.symlink_metadata().is_ok() {
+        if fs::symlink_metadata(&destination).is_ok() {
             continue;
         }
         before_publish(&destination)?;
@@ -176,7 +180,7 @@ fn place_entry(source: &Path, directory: &Path, occupied: &[String], moving: boo
         let temporary = match &mut staging {
             Some(temporary) => temporary,
             vacant @ None => {
-                let temporary = tempfile::Builder::new().prefix(".bokheim-copy-").tempdir_in(&directory)?;
+                let temporary = temporary::Builder::new().prefix(".bokheim-copy-").tempdir_in(&directory)?;
                 copy_entry(&source, &temporary.path().join("contents"))?;
                 vacant.insert(temporary)
             }
@@ -207,7 +211,7 @@ pub(crate) fn rename_entry(source: &Path, destination: &Path) -> io::Result<()> 
     {
         // Filename candidates and destination checks above handle conflicts.
         // Shared storage may reject RENAME_NOREPLACE, so use regular rename.
-        fs::rename(source, destination)
+        if fs::is_document_path(source) || fs::is_document_path(destination) { fs::rename_noclobber(source, destination) } else { fs::rename(source, destination) }
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -224,7 +228,7 @@ pub(crate) fn copy_entry(source: &Path, destination: &Path) -> io::Result<()> {
             copy_entry(&entry.path(), &destination.join(entry.file_name()))?;
         }
     } else if metadata.is_file() {
-        let mut reader = File::open(source)?;
+        let mut reader = fs::open(source)?;
         let mut writer = fs::OpenOptions::new().write(true).create_new(true).open(destination)?;
         io::copy(&mut reader, &mut writer)?;
         fs::set_permissions(destination, metadata.permissions())?;

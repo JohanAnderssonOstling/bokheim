@@ -1,9 +1,9 @@
 //! Account-backed book reads and playback authorization shared by native and web.
 //! Callers retain ownership of library admission and resource lifetimes.
-use operation_failure::OperationError;
-use account_client::{authenticated_request, AuthenticatedRequestError, RefreshPolicy};
+use account_client::{AuthenticatedRequestError, RefreshPolicy, authenticated_request};
 use book_access::{AsyncBookSource, FetchFuture, RemoteFile, RemoteFileError};
 use library_services::account::LibraryAccount;
+use operation_failure::OperationError;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -92,12 +92,12 @@ pub async fn direct_audio_source(client: &Client, account: &LibraryAccount, libr
         authenticated_file_request(account, |session| async move {
             let mut endpoint = sync_transport::blob_endpoint(session.server_url(), &library, &hash).map_err(|error| RemoteFileError::Failed(OperationError::operation(error)))?;
             endpoint.set_path(&format!("{}/playback", endpoint.path()));
-            let response = client.post(endpoint).bearer_auth(session.token()).header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE).send().await.map_err(RemoteFileError::transport)?;
+            let response = client.post(endpoint).bearer_auth(session.token()).header(reqwest::header::ACCEPT, sync_common::http::MEDIA_TYPE).send().await.map_err(RemoteFileError::transport)?;
             if !response.status().is_success() {
                 return Err(RemoteFileError::status(response.status()));
             }
             let bytes = response.bytes().await.map_err(RemoteFileError::transport)?;
-            let grant: sync_common::api::assets::PlaybackGrant = sync_common::transport::decode(&bytes, 16 * 1024).map_err(|_| RemoteFileError::Failed("Invalid playback grant".into()))?;
+            let grant: sync_common::api::assets::PlaybackGrant = sync_common::http::decode(&bytes, 16 * 1024).map_err(|_| RemoteFileError::Failed("Invalid playback grant".into()))?;
             let ticket = grant.path.strip_prefix("/api/playback/").ok_or("Invalid playback grant path")?;
             if ticket.len() != 64 || !ticket.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')) || grant.length == 0 || grant.expires_in_seconds == 0 {
                 return Err("Invalid playback grant".into());
@@ -122,8 +122,6 @@ fn file_auth_error(error: library_services::account::AccountSessionError) -> Rem
     }
 }
 
-/// Opening and reading books is interactive and always allowed on metered
-/// connections. Automatic transfer callers apply their own transfer policy.
 async fn authenticated_file_request<T, F: Future<Output = Result<T, RemoteFileError>>>(account: &LibraryAccount, request: impl FnMut(account_client::Session) -> F) -> Result<T, RemoteFileError> {
     account.while_authorized(authenticated_request(account, RefreshPolicy::BeforeRequest, request, |error| matches!(error, RemoteFileError::Unauthorized))).await.map_err(file_auth_error)?.map_err(|error| match error {
         AuthenticatedRequestError::Request(error) => error,

@@ -3,8 +3,8 @@ pub mod connectivity;
 pub mod executor;
 pub mod profiling;
 pub mod file_storage;
+pub mod filesystem;
 pub mod storage_queue;
-pub mod transfers;
 
 pub mod coordinator;
 

@@ -6,6 +6,10 @@ use book_access::BookReader;
 use client_platform_runtime::executor::run_blocking;
 #[cfg(target_arch = "wasm32")]
 use client_platform_runtime::executor::storage_call;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem as fs;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem::temporary;
 use content_address::ContentHash;
 use std::io::{self, Seek, Write};
 
@@ -23,7 +27,7 @@ impl AssetStore {
         let name = format!("text-cache-v1/{checksum}");
         #[cfg(not(target_arch = "wasm32"))]
         {
-            use std::{fs::File, io::ErrorKind};
+            use std::io::ErrorKind;
             let store = self.clone();
             let root = self.lock_root_shared().await;
             run_blocking(move || {
@@ -31,7 +35,7 @@ impl AssetStore {
                 if !store.root_available() {
                     return Ok(None);
                 }
-                let mut reader = match File::open(store.0.assets_root.join(name)) {
+                let mut reader = match fs::open(store.0.assets_root.join(name)) {
                     Ok(reader) => reader,
                     Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
                     Err(error) => return Err(error.into()),
@@ -60,7 +64,8 @@ impl AssetStore {
         let name = format!("text-cache-v1/{checksum}");
         #[cfg(not(target_arch = "wasm32"))]
         {
-            use std::{fs, io::ErrorKind};
+            use client_platform_runtime::filesystem as fs;
+            use std::io::ErrorKind;
             let store = self.clone();
             let root = self.lock_root_shared().await;
             run_blocking(move || {
@@ -91,7 +96,7 @@ impl AssetStore {
                         }
                     }
                 }
-                let mut staged = tempfile::Builder::new().prefix(&prefix).tempfile_in(directory)?;
+                let mut staged = temporary::Builder::new().prefix(&prefix).tempfile_in(directory)?;
                 if !write(staged.as_file_mut())? {
                     return Ok(());
                 }

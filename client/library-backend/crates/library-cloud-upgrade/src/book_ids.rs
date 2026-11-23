@@ -1,10 +1,10 @@
 //! Explicit migration of client-owned identities, including opaque state bodies.
 use super::{Result, convert, invalid};
 use content_address::ContentHash;
-use library_replica::{BookLifecycleState, LibraryStateEntry};
+use library_replica::{BookLifecycleState, LibraryStateEntry, storage};
 use sqlx::{Row, postgres::PgPoolOptions};
 use std::collections::{BTreeMap, BTreeSet};
-use sync_common::{BookId, transport};
+use sync_common::BookId;
 
 pub(super) async fn run(apply: bool) -> Result<()> {
     let pool = PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL")?).await?;
@@ -18,7 +18,7 @@ pub(super) async fn run(apply: bool) -> Result<()> {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await?;
     }
     let version: i32 = sqlx::query_scalar("SELECT version FROM bokheim_schema_version").fetch_one(&mut *tx).await?;
-    if version == 20 {
+    if matches!(version, 20 | 21 | 22) {
         println!("Global book identities are already installed.");
         tx.rollback().await?;
         return Ok(());
@@ -119,7 +119,7 @@ pub(super) async fn run(apply: bool) -> Result<()> {
              ON CONFLICT(library_id,kind,entity_key,entity_subkey) DO UPDATE SET content_hash=excluded.content_hash,value=excluded.value,changed_at=excluded.changed_at,version_rank=excluded.version_rank,replica_id=excluded.replica_id,replica_seq=excluded.replica_seq,server_seq=excluded.server_seq
              WHERE excluded.kind<>'book_add' AND (excluded.changed_at,excluded.version_rank,excluded.replica_id COLLATE \"C\",excluded.replica_seq)>(rekeyed_state.changed_at,rekeyed_state.version_rank,rekeyed_state.replica_id COLLATE \"C\",rekeyed_state.replica_seq)"
         ).bind(row.try_get::<String, _>("library_id")?).bind(address.kind).bind(address.entity_key.as_bytes()).bind(address.entity_subkey)
-            .bind(value.book().map(|book| book.storage_bytes())).bind(transport::encode(&value)?)
+            .bind(value.book().map(|book| book.storage_bytes())).bind(storage::encode(&value)?)
             .bind(row.try_get::<i64, _>("changed_at")?).bind(row.try_get::<i16, _>("version_rank")?).bind(row.try_get::<String, _>("replica_id")?)
             .bind(row.try_get::<i64, _>("replica_seq")?).bind(row.try_get::<i64, _>("server_seq")?).execute(&mut *tx).await?;
     }

@@ -2,8 +2,10 @@
 //! orders them for playback, and reads MP3 tags. A device keeps ordinary MP3
 //! files; `audiobook_archive` packs them for transfer and server storage.
 
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem::temporary;
+use client_platform_runtime::filesystem::{self as fs, File};
 use std::collections::HashSet;
-use std::fs::{self, File};
 use std::io;
 use std::path::Path;
 use symphonia::core::io::MediaSource;
@@ -341,7 +343,7 @@ fn read_track_numbers(path: &Path) -> io::Result<TrackNumbers> {
         }
     }
 
-    let source = MediaSourceStream::new(Box::new(File::open(path)?), MediaSourceStreamOptions::default());
+    let source = MediaSourceStream::new(Box::new(fs::open(path)?), MediaSourceStreamOptions::default());
     let mut hint = Hint::new();
     hint.with_extension("mp3");
     let mut probed = symphonia::default::get_probe().format(&hint, source, &FormatOptions::default(), &MetadataOptions::default()).map_err(io::Error::other)?;
@@ -468,7 +470,7 @@ fn discover_physical(folder: &Path) -> io::Result<Vec<Track>> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn folder_hash(folder: &Path) -> io::Result<blake3::Hash> {
     let tracks = discover(folder)?;
-    let archive = write_folder_archive(folder, tempfile::tempfile()?, &tracks)?;
+    let archive = write_folder_archive(folder, temporary::tempfile()?, &tracks)?;
     audiobook_archive::archive_hash(archive)
 }
 
@@ -484,7 +486,7 @@ pub fn folder_content_with_reader<R: io::Read>(folder: &Path, tracks: &[Track], 
 
 pub fn folder_content_hash(folder: &Path) -> io::Result<blake3::Hash> {
     let tracks = discover(folder)?;
-    Ok(folder_content_with_reader(folder, &tracks, |path| fs::File::open(path))?.checksum)
+    Ok(folder_content_with_reader(folder, &tracks, |path| fs::open(path))?.checksum)
 }
 
 /// Retain the original transport's metadata precedence for mapped downloads.
@@ -498,7 +500,7 @@ pub fn metadata_sidecars(folder: &Path) -> io::Result<Vec<Nfo>> {
 
 /// Use logical member names and source ZIP metadata for mapped native files.
 pub fn write_folder_archive<W: io::Write + io::Seek>(folder: &Path, writer: W, tracks: &[Track]) -> io::Result<W> {
-    write_folder_archive_with_reader(folder, writer, tracks, |path| fs::File::open(path))
+    write_folder_archive_with_reader(folder, writer, tracks, |path| fs::open(path))
 }
 
 /// Archive through caller-supplied member readers, preserving identical bytes.

@@ -10,7 +10,6 @@ pub enum BrowserDownloadPhase {
     Preparing,
     Downloading,
     Importing,
-    Waiting,
     Completed,
     /// Why it failed, when that is known; the UI words it.
     Failed(Option<Failure>),
@@ -33,7 +32,6 @@ pub struct BrowserDownloadUpdate {
 /// Source download observations before a catalog entry has a library book identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CatalogImportProgress {
-    Waiting,
     Downloading { downloaded_bytes: u64, total_bytes: Option<u64> },
     Importing,
 }

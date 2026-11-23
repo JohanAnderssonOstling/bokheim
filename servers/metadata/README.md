@@ -266,10 +266,20 @@ omitting redundant parents. With no mapped evidence, abstain. Exact ISBN
 classifications and a uniquely identified publisher/year edition retain priority.
 This agreement estimates support, not independent cataloging decisions.
 Subjects use `metadata:edition-subtree-consensus` with the `unified` authority,
-retain donor edition URLs, and include weighted percentages, donor counts, and
+store stable `concept:<id>` codes, retain donor edition URLs, and include weighted percentages, donor counts, and
 any highest-support fallback in their names. The API also exposes the weighted
-support fraction and whether the fallback was used.
+support fraction and whether the fallback was used. Each supported subject carries
+its `concept_id`; its `path` is display data. Older responses without an ID are
+still resolved through their legacy path when materialized.
 They never use the manual-assignment source or attach a donor ISBN to the book.
+
+Policy `books_v31` uses concept IDs and canonical navigation ancestry for subject
+corroboration, root support, and similarity grouping. Display labels and path
+separators do not establish subject identity or ancestry. The runtime keeps its
+existing navigation graph cache as ID edges and roots, materializing display paths
+only for returned subjects. Projection policy version 153 recomputes local assignments
+independently of prepared matcher format version 151. Existing caches labeled 151,
+152, or 153 share that format and remain readable without rebuilding.
 
 New answer builds include the separate declared-work lookup in `authority_title`.
 Before activating this policy over an existing full answer database, populate it
@@ -380,14 +390,19 @@ Policy `books_v13` additionally uses the 24 approved exact mappings in
 `shared/subject-projection/data/reviewed-source-headings.json`. This same table
 is part of ordinary subject projection, including new imports and library
 reprojection; it is not a catalog-only correction. Each complete raw heading
-selects one existing category path and concept ID. Only case and whitespace
+selects one existing concept ID. Destination paths in the rule file are optional
+authoring annotations; current navigation paths come from the active taxonomy.
+Only case and whitespace
 are normalized: punctuation, dates and subdivisions remain significant.
-Duplicate normalized inputs and destinations whose path/ID no longer agree
-remain unresolved. Unreviewed headings and unsupported raw LCC codes are not
+Duplicate normalized inputs and IDs absent from the active navigation graph
+remain unresolved. Competing subdivision mappings use taxonomy ancestry to
+retain a single most-specific concept, leaving unrelated candidates unresolved.
+Unreviewed headings and unsupported raw LCC codes are not
 given guessed destinations, and no taxonomy categories are added.
 Enrichment retains the original headings and returns derived `unified`
-subjects with `metadata:source-heading:` provenance. The matcher validates
-these derived subjects against the same approved heading/path/ID rule.
+subjects with `metadata:source-heading:` provenance and `concept:<id>` codes.
+The matcher validates these derived subjects against the approved heading and ID,
+and continues to accept older path-based codes when they resolve to that ID.
 The catalog's read-only `catalog DIR recover-source-headings` command uses the
 same subject constructor for backfills. It reads one JSON subject array per
 line and returns the approved derived subjects, without editing the catalog

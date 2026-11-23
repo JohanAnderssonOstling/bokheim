@@ -4,22 +4,19 @@ use super::*;
 use crate::projection::project_dirty;
 use crate::query_methods::query_rows;
 use crate::transactions::WriteOutcome::Commit;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use sync_common::{BookId, StateAddress, StateKey};
+use std::collections::{BTreeMap, HashMap};
+use sync_common::{StateAddress, StateKey};
 
 /// Changes accepted by a committed pull, excluding stale or repeated mutations.
 #[derive(Debug, Default)]
 pub struct SyncPullChanges {
     pub contents_changed: bool,
-    pub reading_progress: BTreeSet<BookId>,
 }
 
 impl SyncPullChanges {
     fn record(&mut self, entry: &LibraryStateEntry) {
         match entry {
-            LibraryStateEntry::ReadingPosition { book_id, .. } | LibraryStateEntry::ChapterReadStatus { book_id, .. } => {
-                self.reading_progress.insert(*book_id);
-            }
+            LibraryStateEntry::ReadingPosition { .. } | LibraryStateEntry::ChapterReadStatus { .. } => {}
             _ => self.contents_changed = true,
         }
     }
@@ -28,6 +25,8 @@ impl SyncPullChanges {
 impl Database {
     /// Acknowledges sent mutations and applies a page atomically. Wire decoding,
     /// batch planning and input-only serialization run before reserving the writer.
+    /// Invalid payloads are skipped without replacing existing values. The page's
+    /// cursor still advances with the valid changes; skipped versions are not retried.
     /// Returns the kinds of changes accepted by the merge for presentation updates.
     pub fn sync_commit_pull_response(&self, ids: &[ReplicaSeq], page: &PullStateResponse) -> Result<SyncPullChanges, DatabaseError> {
         if page.mutations.is_empty() && ids.is_empty() && read_pull_cursor(&self.connection)? == page.next_cursor {
@@ -35,10 +34,10 @@ impl Database {
         }
         let mut changes = Vec::with_capacity(page.mutations.len());
         for change in &page.mutations {
-            if let Some(state) = sync_common::state_encoding::decode_known::<LibraryStateEntry>(&change.state).map_err(DatabaseError::operation)? {
-                changes.push(state);
-            } else {
-                log::debug!("Skipping unknown synchronized state kind {}", change.state.value.address.kind);
+            match sync_common::state_encoding::decode_known::<LibraryStateEntry>(&change.state) {
+                Ok(Some(state)) => changes.push(state),
+                Ok(None) => log::debug!("Skipping unknown synchronized state kind {}", change.state.value.address.kind),
+                Err(error) => log::warn!("Skipping invalid synchronized state kind {} at revision {}: {}", change.state.value.address.kind, change.revision.get(), error),
             }
         }
         let acknowledgements = if ids.is_empty() { None } else { Some(serde_json::to_string(ids).map_err(DatabaseError::operation)?) };
@@ -51,7 +50,7 @@ impl Database {
                 // generations: old acknowledgements cannot confirm new edits.
                 let cells = query_rows(|callback| tx.pull_acknowledged_addresses(&(&payload), callback), |r| Ok(StateAddress { kind: r.get(0)?, entity_key: r.get(1)?, entity_subkey: r.get(2)? }))?;
                 for cell in cells {
-                    if let Some(version) = publication_version(tx, &cell.kind, &cell.entity_key, &cell.entity_subkey)? {
+                    if let Some(version) = read_version(tx, &cell.kind, &cell.entity_key, &cell.entity_subkey)? {
                         confirmed.insert(cell, version);
                     }
                 }
@@ -106,11 +105,10 @@ impl Database {
                     for state in changes {
                         let version = state.version;
                         let address = state.value.address();
-                        let immutable = records::is_record(&address.kind);
                         confirmed
                             .entry(address)
                             .and_modify(|old| {
-                                if immutable || version > *old {
+                                if version > *old {
                                     *old = version.clone();
                                 }
                             })
@@ -121,8 +119,8 @@ impl Database {
                             continue;
                         }
                         for cell in registers::book_fields(tx, &hash)? {
-                            let current = publication_version(tx, &cell.kind, &cell.entity_key, &cell.entity_subkey)?;
-                            if confirmed.get(&cell).is_some_and(|seen| if records::is_record(&cell.kind) { Some(seen) == current.as_ref() } else { Some(seen) >= current.as_ref() }) {
+                            let current = read_version(tx, &cell.kind, &cell.entity_key, &cell.entity_subkey)?;
+                            if confirmed.get(&cell).is_some_and(|seen| Some(seen) >= current.as_ref()) {
                                 continue;
                             }
                             registers::recover(tx, &cell)?;
@@ -138,7 +136,7 @@ impl Database {
 
 // Async access owns its arguments until the synchronous database call completes.
 database_methods! {
-    fn sync_commit_pull_response(ids: &[ReplicaSeq], page: &PullStateResponse) -> SyncPullChanges;
-    arguments (Vec<ReplicaSeq>, PullStateResponse,) = (ids.to_vec(), page.clone(),);
+    fn sync_commit_pull_response(ids: &[ReplicaSeq], page: PullStateResponse) -> SyncPullChanges;
+    arguments (Vec<ReplicaSeq>, PullStateResponse,) = (ids.to_vec(), page,);
     execute database, arguments => database.sync_commit_pull_response(&arguments.0, &arguments.1);
 }

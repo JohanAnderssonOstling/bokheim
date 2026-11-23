@@ -87,6 +87,15 @@ impl LibraryHandle {
         .await
     }
 
+    pub async fn evict_browse_downloads(&self, query: LibraryBrowseQuery) -> Result<usize, BackendError> {
+        self.run_io(async {
+            let storage = self.storage().await?;
+            let library = &self.owner.resources;
+            Ok(library.evict_browse_downloads(&storage, query).await?)
+        })
+        .await
+    }
+
     pub async fn book_storage(&self, for_download: bool) -> Result<crate::LibraryBookStorage, BackendError> {
         self.run_io(async {
             let _files = self.storage().await?;
@@ -133,7 +142,7 @@ impl LibraryResources {
 
         self.transfers.request_downloads(hashes).await.map_err(BackendError::operation)?;
         self.events.emit(LibraryEvent::RefreshFileActivity);
-        self.events.assets.wake();
+        self.events.downloads.wake();
         Ok(())
     }
 
@@ -147,11 +156,7 @@ impl LibraryResources {
     /// Evicts downloaded book files without deleting the library book,
     /// its placements, reading state, or relationships.
     pub(crate) async fn remove_local_book_copy(&self, storage: &LibraryState, book_id: BookId) -> Result<DownloadState, BackendError> {
-        if self.evict_local_book(storage, book_id).await? {
-            Ok(DownloadState::NotDownloaded)
-        } else {
-            persistent_download_state(storage.database(), storage.assets(), book_id).await
-        }
+        if self.evict_local_book(storage, book_id).await? { Ok(DownloadState::NotDownloaded) } else { persistent_download_state(storage.database(), storage.assets(), book_id).await }
     }
 
     /// Shared policy, completion, and notifications for single and bulk removal.

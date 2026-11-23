@@ -422,6 +422,18 @@ impl LibraryRegistry {
         self.run(move |registry| registry.remove(&library_id))
     }
 
+    pub fn write_value_member(&self, group: &str, member: &str, value: &[u8]) -> RegistryResult<()> {
+        let group = group.to_owned();
+        let member = member.to_owned();
+        let value = value.to_vec();
+        self.run(move |registry| registry.write_value_member(&group, &member, &value))
+    }
+
+    pub fn read_value_members(&self, group: &str) -> RegistryResult<Vec<Vec<u8>>> {
+        let group = group.to_owned();
+        self.run(move |registry| registry.read_value_members(&group))
+    }
+
     pub fn read_value(&self, key: &str) -> RegistryResult<Option<Vec<u8>>> {
         let key = key.to_owned();
         self.run(move |registry| registry.read_value(&key))

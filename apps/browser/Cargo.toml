@@ -4,13 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = []
+default = ["graph"]
+graph = ["ui-components/graph"]
 filesystem-libraries = []
-kobo = ["mobile", "app/kobo", "dep:gpui_kobo", "dep:kobo-device", "dep:kobo-update", "ui-components/kobo", "gpui-image-eviction/kobo"]
-mobile = ["ui-components/mobile"]
+kobo = ["mobile", "app/kobo", "dep:gpui_kobo", "dep:kobo-device", "dep:kobo-update", "ui-components/kobo", "ui-paginator/kobo", "gpui-image-eviction/kobo"]
+mobile = ["ui-components/mobile", "ui-paginator/mobile"]
 
 [dependencies]
 ui-html-components = { path = "../../client/ui/html-components" }
+ui-paginator = { path = "../../client/ui/paginator" }
 operation-failure = { path = "../../client/client-protocol/crates/operation-failure" }
 ui-text = { path = "../ui-text" }
 dictionary-settings = { path = "../dictionary-settings" }
@@ -24,7 +26,7 @@ account-client = { path = "../../client/account-client" }
 app-preferences = { path = "../../client/preferences", features = ["store"] }
 dictionary = { path = "../../client/dictionaries/core", features = ["store"] }
 app = { path = "../../client/app", default-features = false }
-ui-components = { path = "../components" }
+ui-components = { path = "../components", default-features = false }
 gpui.workspace = true
 gpui-image-eviction = { path = "../../../HtmlEngine/adapters/gpui-image-eviction" }
 gpui-component.workspace = true
@@ -45,6 +47,7 @@ zune-core = "0.5"
 zune-jpeg = "0.5"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+client-platform-runtime = { path = "../../client/platforms/runtime" }
 embedded-browser = { path = "../../client/embedded-browser" }
 
 [target.'cfg(target_os = "android")'.dependencies]

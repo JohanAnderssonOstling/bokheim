@@ -1,12 +1,14 @@
 //! Native book readers, filesystem availability, and playback resources.
 
 use super::*;
+use crate::DownloadState;
 use crate::asset_store::AssetStore;
-use crate::library::downloads::persistent_download_state;
 use crate::library::DocumentBook;
 use crate::library::ResolvedBook;
-use crate::DownloadState;
+use crate::library::downloads::persistent_download_state;
 use book_access::{FetchFuture, RemoteFileError};
+#[cfg(target_os = "android")]
+use client_platform_runtime::filesystem as fs;
 use library_database::DatabaseClient;
 use library_model::RelativeBookPath;
 use library_placement::LibraryState;
@@ -195,13 +197,13 @@ pub struct AudiobookBook {
     pub reader: crate::library::BoxedBookReader,
     pub stream_control: Option<crate::library::AudioStreamControl>,
     #[cfg(target_os = "android")]
-    pub playback_file: Option<std::fs::File>,
+    pub playback_file: Option<fs::File>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::{lifecycle::concurrency_tests::fixture, DocumentSource};
+    use crate::library::{DocumentSource, lifecycle::concurrency_tests::fixture};
     use book_inspection::InspectedBook;
     use book_model::BookRecord;
     use futures_util::io::AsyncReadExt;

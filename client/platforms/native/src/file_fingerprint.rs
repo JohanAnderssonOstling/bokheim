@@ -1,8 +1,7 @@
 //! Native file observation shared by ingestion and local reader opening.
-#[cfg(not(windows))]
-use std::fs;
+use client_platform_runtime::filesystem as fs;
 #[cfg(windows)]
-use std::fs::File;
+use client_platform_runtime::filesystem::File;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::{io, path::Path, time::UNIX_EPOCH};
@@ -13,11 +12,13 @@ pub fn file_fingerprint(path: impl AsRef<Path>) -> io::Result<u64> {
 
 fn fingerprint_once(path: &Path) -> io::Result<u64> {
     #[cfg(windows)]
-    let file = File::open(path)?;
+    let file = fs::open(path)?;
     #[cfg(windows)]
     let metadata = file.metadata()?;
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "android")))]
     let metadata = fs::metadata(path)?;
+    #[cfg(target_os = "android")]
+    let metadata = if fs::is_document_path(path) { fs::Metadata::Native(fs::open(path)?.metadata()?) } else { fs::metadata(path)? };
     let modified = metadata.modified()?.duration_since(UNIX_EPOCH).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(&modified.as_nanos().to_le_bytes());
@@ -39,9 +40,9 @@ fn fingerprint_once(path: &Path) -> io::Result<u64> {
 
 #[cfg(windows)]
 fn hash_windows_revision(file: &File, hasher: &mut blake3::Hasher) -> io::Result<()> {
-    use std::mem::{size_of, MaybeUninit};
+    use std::mem::{MaybeUninit, size_of};
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{FileBasicInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO};
+    use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandle, GetFileInformationByHandleEx};
 
     let mut basic = MaybeUninit::<FILE_BASIC_INFO>::uninit();
     // SAFETY: the live file owns the handle; the writable buffer has the size
@@ -126,6 +127,16 @@ mod tests {
 /// Stable file identity across renames, without timestamps or content revision.
 /// Used to prove ownership of a published file during interrupted-move recovery.
 pub fn file_identity(path: &Path) -> io::Result<[u64; 2]> {
+    #[cfg(target_os = "android")]
+    if fs::is_document_path(path) {
+        // Provider document IDs may contain the pathname. The owned descriptor
+        // supplies the underlying identity, which survives a local folder rename.
+        let metadata = fs::open(path)?.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::other("move recovery requires a regular file"));
+        }
+        return Ok([metadata.dev(), metadata.ino()]);
+    }
     #[cfg(unix)]
     {
         let metadata = fs::symlink_metadata(path)?;
@@ -138,11 +149,11 @@ pub fn file_identity(path: &Path) -> io::Result<[u64; 2]> {
     {
         use std::mem::MaybeUninit;
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
-        if !std::fs::symlink_metadata(path)?.is_file() {
+        use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+        if !fs::symlink_metadata(path)?.is_file() {
             return Err(io::Error::other("move recovery requires a regular file"));
         }
-        let file = File::open(path)?;
+        let file = fs::open(path)?;
         let mut identity = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
         // SAFETY: the live handle and correctly sized writable output remain
         // valid for the call; success initializes the complete structure.

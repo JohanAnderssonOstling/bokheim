@@ -8,13 +8,14 @@ use tempfile::TempDir;
 pub struct BrowserDownloads {
     library: LibraryClient,
     directory: TempDir,
+    moving: bool,
 }
 
 impl LibraryClient {
     /// Prepare a hidden download folder in this library's current root.
     pub async fn browser_downloads(&self) -> Result<BrowserDownloads, BackendError> {
-        let directory = self.prepare_browser_downloads().await?;
-        Ok(BrowserDownloads { library: self.clone(), directory })
+        let (directory, moving) = self.prepare_browser_downloads().await?;
+        Ok(BrowserDownloads { library: self.clone(), directory, moving })
     }
 }
 
@@ -30,11 +31,7 @@ impl BrowserDownloads {
         if path.parent() != Some(directory.as_path()) || !path.is_file() {
             return Err(BackendError::message("browser download is outside this library's staging folder"));
         }
-        let failures = self.library.import_paths(ROOT_DIR_ID, vec![path], true).await?;
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(BackendError::message(failures.into_iter().map(|failure| failure.diagnostic.unwrap_or_else(|| "book import failed".into())).collect::<Vec<_>>().join("; ")))
-        }
+        let failures = self.library.import_paths(ROOT_DIR_ID, vec![path], self.moving).await?;
+        if failures.is_empty() { Ok(()) } else { Err(BackendError::message(failures.into_iter().map(|failure| failure.diagnostic.unwrap_or_else(|| "book import failed".into())).collect::<Vec<_>>().join("; "))) }
     }
 }

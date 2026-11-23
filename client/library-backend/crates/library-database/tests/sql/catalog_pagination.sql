@@ -1,4 +1,6 @@
 CREATE TABLE snapshot(singleton INTEGER PRIMARY KEY CHECK(singleton=1),format_version INTEGER NOT NULL,release_id INTEGER NOT NULL) STRICT;
+CREATE TABLE taxonomy_requirement(singleton INTEGER PRIMARY KEY CHECK(singleton=1),minimum_release INTEGER NOT NULL CHECK(minimum_release>0)) STRICT;
+INSERT INTO taxonomy_requirement VALUES(1,1);
 CREATE TABLE source(id INTEGER PRIMARY KEY,name TEXT NOT NULL UNIQUE) STRICT;
 CREATE TABLE description(row_id INTEGER PRIMARY KEY,text TEXT NOT NULL) STRICT;
 CREATE TABLE book(

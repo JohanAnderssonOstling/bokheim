@@ -1,5 +1,4 @@
 //! Native startup ownership, configuration and binding to the shared UI worker.
-use update_client::UpdateError;
 use browser_ui::{UpdateAction, UpdateControls, UpdateEvent, UpdateView, bind_update_worker};
 use gpui::{App, Entity};
 use std::{
@@ -7,11 +6,14 @@ use std::{
     path::{Path, PathBuf},
 };
 use update_client::DiscoveryConfig;
+use update_client::UpdateError;
 
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 type CurrentHost = linux_update_host::Host;
 #[cfg(all(feature = "desktop", target_os = "windows"))]
 type CurrentHost = linux_update_host::windows::WindowsHost;
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+type CurrentHost = linux_update_host::TaxonomyHost;
 #[cfg(all(feature = "android", target_os = "android"))]
 type CurrentHost = linux_update_host::android::AndroidHost;
 
@@ -67,8 +69,20 @@ pub fn trial_pending() -> bool {
     HOST.with_borrow(|host| host.as_ref().is_some_and(CurrentHost::is_trial))
 }
 
+fn current_view(host: &CurrentHost) -> UpdateView {
+    #[cfg(all(feature = "desktop", target_os = "macos"))]
+    {
+        host.taxonomy_view()
+    }
+    #[cfg(not(all(feature = "desktop", target_os = "macos")))]
+    {
+        host.view()
+    }
+}
+
 pub(crate) fn bind(
-    restart: Option<PathBuf>, mut platform_action: impl FnMut(&mut CurrentHost, UpdateAction) -> Result<(), UpdateError> + Send + 'static, mut present: impl FnMut(UpdateView) -> Result<UpdateView, UpdateError> + Send + 'static, cx: &mut App,
+    restart: Option<PathBuf>, mut platform_action: impl FnMut(&mut CurrentHost, UpdateAction) -> Result<(), UpdateError> + Send + 'static, mut present: impl FnMut(UpdateView) -> Result<UpdateView, UpdateError> + Send + 'static,
+    cx: &mut App,
 ) -> Option<Entity<UpdateControls>> {
     if !HOST.with_borrow(|host| host.is_some()) {
         return None;
@@ -84,10 +98,11 @@ pub(crate) fn bind(
                 Some(UpdateAction::Update) => host.approve()?,
                 Some(action) => platform_action(host, action)?,
             }
-            publish(UpdateEvent::View(host.view()))?;
-            present(host.prepare()?)
+            publish(UpdateEvent::View(current_view(host)))?;
+            host.prepare()?;
+            present(current_view(host))
         },
-        CurrentHost::view,
+        current_view,
         |error| Some(ui_components::user_facing_error(error, ui_text::text!(browse::could_not_continue_update_try_again)).into()),
         cx,
     ))

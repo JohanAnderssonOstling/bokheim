@@ -2,7 +2,7 @@
 //! books its own way; these apply the page's filters and book order to them.
 use std::collections::BTreeSet;
 
-use super::{BooksSql, options::BrowseBookSort};
+use super::BooksSql;
 use crate::{Database, DatabaseError};
 
 /// The candidate books that pass the page's filters. The search is not one of
@@ -44,18 +44,6 @@ impl Database {
 
     /// `books` in the page's book order.
     pub(super) fn ordered_books(&self, books: &BTreeSet<i64>, options: &super::BrowseOptions) -> Result<Vec<i64>, DatabaseError> {
-        let mut ordered = Vec::with_capacity(books.len());
-        if !books.is_empty() {
-            let ids = serde_json::to_string(books).map_err(DatabaseError::operation)?;
-            let sort = match options.book_sort {
-                BrowseBookSort::Alphabetical | BrowseBookSort::DefaultOrder => 0,
-                BrowseBookSort::RecentlyRead => 1,
-            };
-            self.connection.ordered_books(&ids, sort, |row| {
-                ordered.push(row.get(0)?);
-                Ok(())
-            })?;
-        }
-        Ok(ordered)
+        self.author_query(None, options)?.selected_ordered(books)
     }
 }

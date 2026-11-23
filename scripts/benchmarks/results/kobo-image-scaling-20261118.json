@@ -1,0 +1,386 @@
+{
+  "captured_utc": "2026-11-18T03:45:24.070035+00:00",
+  "device": "Kobo Libra 2",
+  "source_dimensions": [
+    1540,
+    1183
+  ],
+  "method": "Pinned FBInk qSmoothScaleImage, existing ARM static library, CLOCK_PROCESS_CPUTIME_ID; eight rounds, first excluded. Synthetic grayscale pattern; no framebuffer/input opened or application changes.",
+  "cases": {
+    "gray_identity_rescale": {
+      "count": 7,
+      "median_cpu_ms": 29.224,
+      "min_cpu_ms": 29.187333,
+      "max_cpu_ms": 29.644666,
+      "output_bytes": 1821820,
+      "rgb_identity": true
+    },
+    "gray_to_bgra_reused_buffer": {
+      "count": 7,
+      "median_cpu_ms": 12.479334,
+      "min_cpu_ms": 12.447667,
+      "max_cpu_ms": 12.552666,
+      "output_bytes": 7287280,
+      "rgb_identity": true
+    },
+    "rgba_identity_rescale": {
+      "count": 7,
+      "median_cpu_ms": 30.511334,
+      "min_cpu_ms": 30.471,
+      "max_cpu_ms": 30.747331,
+      "output_bytes": 7287280,
+      "rgb_identity": true
+    },
+    "rgba_memcpy_reused_buffer": {
+      "count": 7,
+      "median_cpu_ms": 8.721,
+      "min_cpu_ms": 8.628334,
+      "max_cpu_ms": 8.732666,
+      "output_bytes": 7287280,
+      "rgb_identity": true
+    },
+    "rgba_resize_plus_one": {
+      "count": 7,
+      "median_cpu_ms": 91.339668,
+      "min_cpu_ms": 91.298666,
+      "max_cpu_ms": 93.421668,
+      "output_bytes": 7298176,
+      "rgb_identity": null
+    }
+  },
+  "raw": [
+    {
+      "case": "rgba_identity_rescale",
+      "round": "0",
+      "cpu_ms": "30.608000",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_resize_plus_one",
+      "round": "0",
+      "cpu_ms": "91.157000",
+      "bytes": "7298176",
+      "identity_rgb": "-1",
+      "checksum": "230807176"
+    },
+    {
+      "case": "gray_identity_rescale",
+      "round": "0",
+      "cpu_ms": "29.071666",
+      "bytes": "1821820",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_memcpy_reused_buffer",
+      "round": "0",
+      "cpu_ms": "18.508000",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "gray_to_bgra_reused_buffer",
+      "round": "0",
+      "cpu_ms": "12.575333",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_identity_rescale",
+      "round": "1",
+      "cpu_ms": "30.471000",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_resize_plus_one",
+      "round": "1",
+      "cpu_ms": "91.576999",
+      "bytes": "7298176",
+      "identity_rgb": "-1",
+      "checksum": "230807176"
+    },
+    {
+      "case": "gray_identity_rescale",
+      "round": "1",
+      "cpu_ms": "29.364667",
+      "bytes": "1821820",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_memcpy_reused_buffer",
+      "round": "1",
+      "cpu_ms": "8.700666",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "gray_to_bgra_reused_buffer",
+      "round": "1",
+      "cpu_ms": "12.447667",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_identity_rescale",
+      "round": "2",
+      "cpu_ms": "30.747331",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_resize_plus_one",
+      "round": "2",
+      "cpu_ms": "91.339668",
+      "bytes": "7298176",
+      "identity_rgb": "-1",
+      "checksum": "230807176"
+    },
+    {
+      "case": "gray_identity_rescale",
+      "round": "2",
+      "cpu_ms": "29.187333",
+      "bytes": "1821820",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_memcpy_reused_buffer",
+      "round": "2",
+      "cpu_ms": "8.703000",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "gray_to_bgra_reused_buffer",
+      "round": "2",
+      "cpu_ms": "12.479334",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_identity_rescale",
+      "round": "3",
+      "cpu_ms": "30.560000",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_resize_plus_one",
+      "round": "3",
+      "cpu_ms": "91.347333",
+      "bytes": "7298176",
+      "identity_rgb": "-1",
+      "checksum": "230807176"
+    },
+    {
+      "case": "gray_identity_rescale",
+      "round": "3",
+      "cpu_ms": "29.191667",
+      "bytes": "1821820",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_memcpy_reused_buffer",
+      "round": "3",
+      "cpu_ms": "8.728000",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "gray_to_bgra_reused_buffer",
+      "round": "3",
+      "cpu_ms": "12.552000",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_identity_rescale",
+      "round": "4",
+      "cpu_ms": "30.511334",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_resize_plus_one",
+      "round": "4",
+      "cpu_ms": "91.321001",
+      "bytes": "7298176",
+      "identity_rgb": "-1",
+      "checksum": "230807176"
+    },
+    {
+      "case": "gray_identity_rescale",
+      "round": "4",
+      "cpu_ms": "29.644666",
+      "bytes": "1821820",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_memcpy_reused_buffer",
+      "round": "4",
+      "cpu_ms": "8.628334",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "gray_to_bgra_reused_buffer",
+      "round": "4",
+      "cpu_ms": "12.458000",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_identity_rescale",
+      "round": "5",
+      "cpu_ms": "30.690667",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_resize_plus_one",
+      "round": "5",
+      "cpu_ms": "91.333999",
+      "bytes": "7298176",
+      "identity_rgb": "-1",
+      "checksum": "230807176"
+    },
+    {
+      "case": "gray_identity_rescale",
+      "round": "5",
+      "cpu_ms": "29.223333",
+      "bytes": "1821820",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_memcpy_reused_buffer",
+      "round": "5",
+      "cpu_ms": "8.731667",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "gray_to_bgra_reused_buffer",
+      "round": "5",
+      "cpu_ms": "12.552666",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_identity_rescale",
+      "round": "6",
+      "cpu_ms": "30.500334",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_resize_plus_one",
+      "round": "6",
+      "cpu_ms": "91.298666",
+      "bytes": "7298176",
+      "identity_rgb": "-1",
+      "checksum": "230807176"
+    },
+    {
+      "case": "gray_identity_rescale",
+      "round": "6",
+      "cpu_ms": "29.281334",
+      "bytes": "1821820",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_memcpy_reused_buffer",
+      "round": "6",
+      "cpu_ms": "8.721000",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "gray_to_bgra_reused_buffer",
+      "round": "6",
+      "cpu_ms": "12.470667",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_identity_rescale",
+      "round": "7",
+      "cpu_ms": "30.511000",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_resize_plus_one",
+      "round": "7",
+      "cpu_ms": "93.421668",
+      "bytes": "7298176",
+      "identity_rgb": "-1",
+      "checksum": "230807176"
+    },
+    {
+      "case": "gray_identity_rescale",
+      "round": "7",
+      "cpu_ms": "29.224000",
+      "bytes": "1821820",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "rgba_memcpy_reused_buffer",
+      "round": "7",
+      "cpu_ms": "8.732666",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    },
+    {
+      "case": "gray_to_bgra_reused_buffer",
+      "round": "7",
+      "cpu_ms": "12.497333",
+      "bytes": "7287280",
+      "identity_rgb": "1",
+      "checksum": "232281510"
+    }
+  ],
+  "limitations": [
+    "Isolated CPU benchmark, not end-to-end page-turn savings.",
+    "Single-pass conversion prototype writes an ordinary RAM buffer; actual framebuffer memory and hardware refresh are not included.",
+    "Reused-buffer memcpy and conversion avoid allocation, whereas rescale includes production allocation."
+  ],
+  "fbink_static_library_sha256": "b008a6b6a71277a03bc63212f7634f8bd867f1093991f5ca7f10b49fdd709491",
+  "same_size_scaling_allocation_analysis": {
+    "pixels": 1821820,
+    "current_converted_rgba_plus_scaled_rgba_bytes": 14574560,
+    "unscaled_converted_rgb_bytes": 5465460,
+    "intermediate_allocation_reduction_bytes": 9109100,
+    "note": "Derived from FBInk raw-data branch for a 32-bit framebuffer and ignore_alpha=true. Excludes grayscale source/scratch, framebuffer, allocator overhead, and scale tables; not a measured RSS reduction."
+  }
+}

@@ -30,11 +30,11 @@ impl LibraryService {
             None
         };
         let journal_key = key.clone();
-        let (entry, mut journal) = self
+        let (entry, journal) = self
             .run(move |this| {
                 let original = this.entry_on_storage(&source)?;
                 let journal: Option<StorageCopyJournal> = this.config.registry.read_value(&journal_key).map_err(BackendError::operation)?.map(|bytes| serde_json::from_slice(&bytes).map_err(BackendError::operation)).transpose()?;
-                if let Some(journal) = journal {
+                if let Some(mut journal) = journal {
                     if let Some(entry) = this.config.registry.entry(&journal.destination).map_err(BackendError::operation)? {
                         let expected = if bokheim { LibraryStorage::Bokheim } else { LibraryStorage::Local };
                         if this.config.registry.storage(&journal.destination).map_err(BackendError::operation)? != expected {
@@ -43,9 +43,16 @@ impl LibraryService {
                         if !bokheim {
                             this.config.registry.make_device_only(entry.library_id()).map_err(BackendError::operation)?;
                         }
+                        // Old journals retain their inline checkpoints. New
+                        // members override them when resumed copies replace a book.
+                        for bytes in this.config.registry.read_value_members(&journal_key).map_err(BackendError::operation)? {
+                            journal.progress.books.push(serde_json::from_slice(&bytes).map_err(BackendError::operation)?);
+                        }
                         return Ok((entry, journal));
                     }
                 }
+                // A removed destination must not inherit another copy's members.
+                this.config.registry.remove_value(&journal_key).map_err(BackendError::operation)?;
                 let name = format!("{} ({})", original.library_name(), if bokheim { "Bokheim copy" } else { "local copy" });
                 let entry = this.config.registry.create_with_asset_storage(&name, None, bokheim).map_err(BackendError::operation)?;
                 if bokheim {
@@ -65,14 +72,14 @@ impl LibraryService {
         let registry = self.config.registry.clone();
         let checkpoint_key = key.clone();
         destination
-            .copy_storage_from(original, journal.progress.clone(), move |progress| {
-                journal.progress = progress;
-                let bytes = serde_json::to_vec(&journal).map_err(BackendError::operation);
+            .copy_storage_from(original, journal.progress, move |copied| {
+                let member = format!("{}:{}", copied.source, copied.directory);
+                let bytes = serde_json::to_vec(&copied).map_err(BackendError::operation);
                 let key = checkpoint_key.clone();
                 let registry = registry.clone();
                 async move {
                     let bytes = bytes?;
-                    registry.access(move |registry| registry.write_value(&key, &bytes)).await.map_err(BackendError::operation)
+                    registry.access(move |registry| registry.write_value_member(&key, &member, &bytes)).await.map_err(BackendError::operation)
                 }
             })
             .await?;

@@ -86,6 +86,8 @@ pub const FONT_SIZE_MIN: f32 = 8.0;
 pub const FONT_SIZE_MAX: f32 = 64.0;
 pub const LINE_WIDTH_MIN: f64 = 200.0;
 pub const LINE_WIDTH_MAX: f64 = 1200.0;
+pub const LINE_WIDTH_CH_MIN: f64 = 20.0;
+pub const LINE_WIDTH_CH_MAX: f64 = 100.0;
 pub const ZOOM_MIN: f64 = 0.5;
 pub const ZOOM_MAX: f64 = 3.0;
 pub const LINE_HEIGHT_MIN: f32 = 1.0;
@@ -199,8 +201,6 @@ impl UiFontFamily {
 pub struct BrowsingPreferences {
     #[serde(deserialize_with = "deserialize_keyboard_shortcuts")]
     keyboard_shortcuts: KeyboardShortcuts,
-    allow_metered_transfers: bool,
-    text_search: bool,
     animations: bool,
     theme: ApplicationTheme,
     appearance_override: Option<ResolvedAppearance>,
@@ -209,6 +209,8 @@ pub struct BrowsingPreferences {
     custom_ui_font_family: Option<String>,
     custom_ui_font_enabled: bool,
     cover_text: CoverText,
+    #[serde(default)]
+    book_list_view: BookListView,
     /// Draw every book with its generated cover and never load cover art.
     /// Offered on Kobo, where decoding and holding cover images is the
     /// costliest part of a library page.
@@ -232,8 +234,6 @@ impl Default for BrowsingPreferences {
     fn default() -> Self {
         Self {
             keyboard_shortcuts: KeyboardShortcuts::new(),
-            allow_metered_transfers: false,
-            text_search: default_enabled(),
             animations: default_enabled(),
             theme: ApplicationTheme::default(),
             appearance_override: None,
@@ -242,6 +242,7 @@ impl Default for BrowsingPreferences {
             custom_ui_font_family: None,
             custom_ui_font_enabled: false,
             cover_text: CoverText::Always,
+            book_list_view: BookListView::default(),
             generated_covers_only: false,
             catalog_grouping: CatalogGrouping::default(),
             catalog_languages: None,
@@ -254,14 +255,8 @@ impl BrowsingPreferences {
     pub fn keyboard_shortcuts(&self) -> &KeyboardShortcuts {
         &self.keyboard_shortcuts
     }
-    pub fn text_search(&self) -> bool {
-        self.text_search
-    }
     pub fn animations(&self) -> bool {
         self.animations
-    }
-    pub fn allow_metered_transfers(&self) -> bool {
-        self.allow_metered_transfers
     }
     pub fn theme(&self) -> ApplicationTheme {
         self.theme
@@ -290,6 +285,10 @@ impl BrowsingPreferences {
         self.cover_text
     }
 
+    pub fn book_list_view(&self) -> BookListView {
+        self.book_list_view
+    }
+
     pub fn generated_covers_only(&self) -> bool {
         self.generated_covers_only
     }
@@ -304,6 +303,24 @@ impl BrowsingPreferences {
 
     pub fn keyboard_layouts(&self) -> &[String] {
         &self.keyboard_layouts
+    }
+}
+
+/// The book listing presentation shared across pages, libraries, and windows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BookListView {
+    #[default]
+    Cards,
+    Table,
+}
+
+impl BookListView {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Cards => text!(browse::cards_view),
+            Self::Table => text!(browse::table_view),
+        }
     }
 }
 
@@ -382,8 +399,6 @@ impl CoverText {
 #[serde(tag = "preference", content = "value", rename_all = "snake_case")]
 pub enum BrowsingPreferencePatch {
     KeyboardShortcuts(KeyboardShortcuts),
-    AllowMeteredTransfers(bool),
-    TextSearch(bool),
     Animations(bool),
     Theme(ApplicationTheme),
     Palette(ApplicationTheme, ResolvedAppearance),
@@ -391,6 +406,7 @@ pub enum BrowsingPreferencePatch {
     UiFontFamily(UiFontFamily),
     CustomUiFontFamily(String),
     CoverText(CoverText),
+    BookListView(BookListView),
     GeneratedCoversOnly(bool),
     CatalogGrouping(CatalogGrouping),
     CatalogLanguages(Option<Vec<String>>),
@@ -401,8 +417,6 @@ impl BrowsingPreferencePatch {
     pub fn apply(self, preferences: &mut BrowsingPreferences) -> Result<(), PreferenceValueError> {
         match self {
             Self::KeyboardShortcuts(value) => preferences.keyboard_shortcuts = normalize_keyboard_shortcuts(value),
-            Self::AllowMeteredTransfers(value) => preferences.allow_metered_transfers = value,
-            Self::TextSearch(value) => preferences.text_search = value,
             Self::Animations(value) => preferences.animations = value,
             Self::Theme(value) => preferences.theme = value,
             Self::Palette(theme, appearance) => {
@@ -419,6 +433,7 @@ impl BrowsingPreferencePatch {
                 preferences.custom_ui_font_enabled = true;
             }
             Self::CoverText(value) => preferences.cover_text = value,
+            Self::BookListView(value) => preferences.book_list_view = value,
             Self::GeneratedCoversOnly(value) => preferences.generated_covers_only = value,
             Self::CatalogGrouping(value) => preferences.catalog_grouping = value,
             Self::CatalogLanguages(value) => preferences.catalog_languages = value,
@@ -479,6 +494,10 @@ pub enum ReaderTextAlignment {
 pub struct ReaderPreferences {
     font_size_px: FontSize,
     max_line_width_px: LineWidth,
+    #[serde(default = "default_min_line_width_ch")]
+    min_line_width_ch: LineWidthCh,
+    #[serde(default = "default_max_line_width_ch")]
+    max_line_width_ch: LineWidthCh,
     zoom: Zoom,
     line_height: LineHeight,
     /// Keep the last custom value when publisher line spacing is selected.
@@ -541,6 +560,14 @@ const fn default_override_line_height() -> bool {
     true
 }
 
+const fn default_min_line_width_ch() -> LineWidthCh {
+    LineWidthCh(30.0)
+}
+
+const fn default_max_line_width_ch() -> LineWidthCh {
+    LineWidthCh(70.0)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreferenceValueError(&'static str);
 
@@ -598,6 +625,7 @@ macro_rules! bounded_float {
 
 bounded_float!(FontSize, f32, "font size", FONT_SIZE_MIN, FONT_SIZE_MAX);
 bounded_float!(LineWidth, f64, "line width", LINE_WIDTH_MIN, LINE_WIDTH_MAX);
+bounded_float!(LineWidthCh, f64, "line width in ch", LINE_WIDTH_CH_MIN, LINE_WIDTH_CH_MAX);
 bounded_float!(Zoom, f64, "zoom", ZOOM_MIN, ZOOM_MAX);
 bounded_float!(LineHeight, f32, "line height", LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
 bounded_float!(WordSpacingPercent, f32, "word spacing", WORD_SPACING_MIN_PERCENT, WORD_SPACING_MAX_PERCENT);
@@ -668,6 +696,8 @@ impl Default for ReaderPreferences {
         Self {
             font_size_px: FontSize(20.0),
             max_line_width_px: LineWidth(600.0),
+            min_line_width_ch: default_min_line_width_ch(),
+            max_line_width_ch: default_max_line_width_ch(),
             zoom: Zoom(1.0),
             line_height: LineHeight(1.5),
             override_line_height: default_override_line_height(),
@@ -714,6 +744,8 @@ impl ReaderPreferences {
         }
         changed!(font_size_px, FontSizePx);
         changed!(max_line_width_px, MaxLineWidthPx);
+        changed!(min_line_width_ch, MinLineWidthCh);
+        changed!(max_line_width_ch, MaxLineWidthCh);
         changed!(zoom, Zoom);
         changed!(line_height, LineHeight);
         changed!(override_line_height, OverrideLineHeight);
@@ -796,6 +828,12 @@ impl ReaderPreferences {
     pub fn max_line_width_px(self) -> f64 {
         self.max_line_width_px.get()
     }
+    pub fn min_line_width_ch(self) -> f64 {
+        self.min_line_width_ch.get()
+    }
+    pub fn max_line_width_ch(self) -> f64 {
+        self.max_line_width_ch.get()
+    }
     pub fn zoom(self) -> f64 {
         self.zoom.get()
     }
@@ -869,6 +907,22 @@ impl ReaderPreferences {
     }
     pub fn set_max_line_width_px(&mut self, value: f64) -> Result<(), PreferenceValueError> {
         self.max_line_width_px = LineWidth::new(value)?;
+        Ok(())
+    }
+    pub fn set_min_line_width_ch(&mut self, value: f64) -> Result<(), PreferenceValueError> {
+        let value = LineWidthCh::new(value)?;
+        if value.get() > self.max_line_width_ch.get() {
+            self.max_line_width_ch = value;
+        }
+        self.min_line_width_ch = value;
+        Ok(())
+    }
+    pub fn set_max_line_width_ch(&mut self, value: f64) -> Result<(), PreferenceValueError> {
+        let value = LineWidthCh::new(value)?;
+        if value.get() < self.min_line_width_ch.get() {
+            self.min_line_width_ch = value;
+        }
+        self.max_line_width_ch = value;
         Ok(())
     }
     pub fn set_zoom(&mut self, value: f64) -> Result<(), PreferenceValueError> {
@@ -988,6 +1042,8 @@ pub enum ReaderPreferencePatch {
     FirstLineIndent(ReaderFirstLineIndent),
     FontWeight(ReaderFontWeight),
     WordSpacingPercent(f32),
+    MinLineWidthCh(f64),
+    MaxLineWidthCh(f64),
 }
 
 impl ReaderPreferencePatch {
@@ -995,6 +1051,8 @@ impl ReaderPreferencePatch {
         match self {
             Self::FontSizePx(value) => preferences.set_font_size_px(value),
             Self::MaxLineWidthPx(value) => preferences.set_max_line_width_px(value),
+            Self::MinLineWidthCh(value) => preferences.set_min_line_width_ch(value),
+            Self::MaxLineWidthCh(value) => preferences.set_max_line_width_ch(value),
             Self::Zoom(value) => preferences.set_zoom(value),
             Self::LineHeight(value) => preferences.set_line_height(value),
             Self::OverrideLineHeight(value) => {
@@ -1216,16 +1274,6 @@ mod tests {
         assert_eq!(restored.keyboard_shortcuts(), &super::normalize_keyboard_shortcuts(shortcuts));
         BrowsingPreferencePatch::KeyboardShortcuts(Default::default()).apply(&mut preferences).unwrap();
         assert!(preferences.keyboard_shortcuts().is_empty());
-    }
-
-    #[test]
-    fn metered_transfer_preference_defaults_off_and_round_trips() {
-        let mut preferences = BrowsingPreferences::default();
-        assert!(!preferences.allow_metered_transfers());
-        BrowsingPreferencePatch::AllowMeteredTransfers(true).apply(&mut preferences).unwrap();
-        let restored: BrowsingPreferences = serde_json::from_slice(&serde_json::to_vec(&preferences).unwrap()).unwrap();
-        assert!(restored.allow_metered_transfers());
-        assert_eq!(restored, preferences);
     }
 
     #[test]

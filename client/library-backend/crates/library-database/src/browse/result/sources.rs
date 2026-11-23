@@ -1,6 +1,7 @@
 //! Source adapters prepare identities and navigation without hydrating cards.
 use super::*;
 use crate::browse::{FoldersSql, parse_uuid_column};
+use crate::query_methods::text_column;
 use library_model::{BrowseBookSort, HomeShelf};
 use std::collections::HashSet;
 
@@ -108,6 +109,7 @@ impl Database {
                         path: None,
                         book_count: found.books.len(),
                         downloaded_book_count: found.books.iter().filter(|id| prepared.matching.downloaded.contains(id)).count(),
+                        size_bytes: None,
                     };
                     metadata.contents.children.push(parent.clone());
                     section_orders.insert(parent.id, Arc::new(found.books.iter().copied().map(Item::from).collect()));
@@ -129,17 +131,17 @@ impl Database {
     }
 
     fn prepare_folder_selection(&self, directory: DirId, options: &BrowseOptions) -> Result<Selection, DatabaseError> {
-        let tree = self.folder_tree(&directory.to_string(), options)?;
+        let tree = self.folder_tree(directory, options)?;
         let scope = tree.scope(options);
         let mut metadata = LibraryBrowseData::default();
         metadata.contents.children = self.folder_children(scope, &tree.counts, options)?;
-        let mut directories = scope.iter().cloned().collect::<BTreeSet<_>>();
+        let mut directories = scope.iter().copied().collect::<BTreeSet<_>>();
         if options.search.is_empty() {
-            directories.extend(metadata.contents.children.iter().filter_map(|row| row.id.folder()).map(|id| id.to_string()));
+            directories.extend(metadata.contents.children.iter().filter_map(|row| row.id.folder()));
         }
         let mut placements = HashMap::<DirId, Vec<Item>>::new();
         self.connection.folder_placements(&serde_json::to_string(&directories).map_err(DatabaseError::operation)?, |row| {
-            let directory = parse_uuid_column(row.get(1)?, 1)?;
+            let directory = parse_uuid_column(text_column(row, 1)?, 1)?;
             placements.entry(directory).or_default().push(Item { book: row.get(0)?, directory: Some(directory), text_offsets: None });
             Ok(())
         })?;
@@ -153,7 +155,7 @@ impl Database {
             items.retain(|item| selected.contains(&item.book));
             items.sort_unstable_by_key(|item| (positions[&item.book], item.directory));
         }
-        let scope = scope.iter().map(|id| id.parse::<DirId>().map_err(DatabaseError::operation)).collect::<Result<HashSet<_>, _>>()?;
+        let scope = scope.iter().copied().collect::<HashSet<_>>();
         let mut direct = placements.iter().filter(|(directory, _)| scope.contains(directory)).flat_map(|(_, items)| items.iter().cloned()).collect::<Vec<_>>();
         direct.sort_unstable_by_key(|item| (positions[&item.book], item.directory));
         let mut sections = Vec::new();
@@ -162,7 +164,7 @@ impl Database {
         if options.search.is_empty() {
             for parent in &metadata.contents.children {
                 let Some(directory) = parent.id.folder() else { continue };
-                let children = self.folder_children(&[directory.to_string()], &tree.counts, options)?;
+                let children = self.folder_children(&[directory], &tree.counts, options)?;
                 let items = placements.remove(&directory).unwrap_or_default();
                 let books = items.iter().map(|item| item.book).collect();
                 section_orders.insert(parent.id, Arc::new(items));

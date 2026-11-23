@@ -2,9 +2,9 @@
 
 use std::future::Future;
 
+use crate::BookId;
 use crate::library::PlaybackLocation::Direct;
 use crate::library::{DirectPlayback, DocumentFormat, PdfBook, PlaybackSource, RemoteFile, ResolvedBook};
-use crate::BookId;
 pub use book_access::remote_file::BrowserReader as Reader;
 use book_access::{FetchFuture, SparseBookSource};
 use book_model::BookFormat;
@@ -54,8 +54,7 @@ async fn audiobook<T: BookTransport>(source: crate::library::PlaybackSource, lea
             let library = renewal_library.clone();
             async move {
                 let direct = library.renew_remote_audio(book_id).await.map_err(|error| OperationError::from_classified(&error).into_js())?;
-                let json = serde_json::to_string(&direct).map_err(|error| OperationError::operation(error).context("Invalid direct playback configuration").into_js())?;
-                js_sys::JSON::parse(&json)
+                client_platform_web::audiobook::playback_config(&direct).map_err(|error| error.context("Invalid direct playback configuration").into_js())
             }
         })
     });

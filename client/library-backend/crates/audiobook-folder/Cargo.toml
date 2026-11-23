@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+client-platform-runtime = { path = "../../../platforms/runtime" }
 audiobook-archive = { path = "../../../../shared/audiobook-archive" }
 blake3 = "1"
 encoding_rs = "0.8"

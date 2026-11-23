@@ -1,12 +1,12 @@
 //! Device-local preference documents using the shared native/OPFS file layer.
 use crate::{BrowsingPreferencePatch, BrowsingPreferences, ReaderPreferencePatch, ReaderPreferences};
-use client_platform_runtime::{file_storage as files, text_search, transfers};
+use client_platform_runtime::file_storage as files;
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Error, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
-use tokio::sync::{watch, Mutex as AsyncMutex};
+use tokio::sync::Mutex as AsyncMutex;
 
 const READER: &str = "reader.json";
 const BROWSING: &str = "browsing.json";
@@ -17,6 +17,7 @@ static STORES: std::sync::LazyLock<Mutex<HashMap<PathBuf, Weak<PreferenceStore>>
 #[derive(Debug)]
 struct Snapshot {
     reader: ReaderPreferences,
+    browsing: BrowsingPreferences,
     export_folder: Option<String>,
 }
 
@@ -25,7 +26,6 @@ struct Snapshot {
 pub struct PreferenceStore {
     root: PathBuf,
     snapshot: Mutex<Snapshot>,
-    browsing: watch::Sender<BrowsingPreferences>,
     writes: AsyncMutex<()>,
 }
 
@@ -58,7 +58,7 @@ impl PreferenceStore {
         let reader = decode(files::read_sync(&root.join(READER))?)?;
         let browsing = recoverable(files::read_sync(&root.join(BROWSING))?, "browsing")?;
         let export_folder = recoverable(files::read_sync(&root.join(EXPORT_FOLDER))?, "annotation export")?;
-        let store = Arc::new(Self::new(root.clone(), Snapshot { reader, export_folder }, browsing));
+        let store = Arc::new(Self::new(root.clone(), Snapshot { reader, browsing, export_folder }));
         stores.insert(root, Arc::downgrade(&store));
         Ok(store)
     }
@@ -76,13 +76,13 @@ impl PreferenceStore {
         if let Some(store) = stores.get(&root).and_then(Weak::upgrade) {
             return Ok(store);
         }
-        let store = Arc::new(Self::new(root.clone(), Snapshot { reader, export_folder }, browsing));
+        let store = Arc::new(Self::new(root.clone(), Snapshot { reader, browsing, export_folder }));
         stores.insert(root, Arc::downgrade(&store));
         Ok(store)
     }
 
-    fn new(root: PathBuf, snapshot: Snapshot, browsing: BrowsingPreferences) -> Self {
-        Self { root, snapshot: Mutex::new(snapshot), browsing: watch::channel(browsing).0, writes: AsyncMutex::new(()) }
+    fn new(root: PathBuf, snapshot: Snapshot) -> Self {
+        Self { root, snapshot: Mutex::new(snapshot), writes: AsyncMutex::new(()) }
     }
 
     pub fn reader(&self) -> ReaderPreferences {
@@ -90,12 +90,7 @@ impl PreferenceStore {
     }
 
     pub fn browsing(&self) -> BrowsingPreferences {
-        self.browsing.borrow().clone()
-    }
-
-    /// Observe browsing preferences after they have been successfully saved.
-    pub fn subscribe_browsing(&self) -> watch::Receiver<BrowsingPreferences> {
-        self.browsing.subscribe()
+        self.snapshot.lock().unwrap_or_else(PoisonError::into_inner).browsing.clone()
     }
 
     pub fn annotation_export_folder(&self) -> Option<String> {
@@ -122,17 +117,9 @@ impl PreferenceStore {
     pub(crate) async fn update_browsing(&self, patch: BrowsingPreferencePatch) -> io::Result<BrowsingPreferences> {
         let _write = self.writes.lock().await;
         let mut preferences = self.browsing();
-        let text_search_changed = matches!(patch, BrowsingPreferencePatch::TextSearch(_));
-        let metered_transfers_changed = matches!(patch, BrowsingPreferencePatch::AllowMeteredTransfers(_));
         patch.apply(&mut preferences).map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
         self.write(BROWSING, &preferences).await?;
-        if text_search_changed {
-            text_search::set_enabled(preferences.text_search());
-        }
-        if metered_transfers_changed {
-            transfers::POLICY.set_allow_metered(preferences.allow_metered_transfers());
-        }
-        self.browsing.send_replace(preferences.clone());
+        self.snapshot.lock().unwrap_or_else(PoisonError::into_inner).browsing = preferences.clone();
         Ok(preferences)
     }
 

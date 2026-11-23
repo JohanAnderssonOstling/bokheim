@@ -95,7 +95,7 @@ python3 scripts/linux/toolchain.py --env-file .tmp/desktop-sdk-env.sh
 source .tmp/desktop-sdk-env.sh
 python3 apps/reader/crates/speech/build_native.py --env-file .tmp/desktop-speech-env.sh
 source .tmp/desktop-speech-env.sh
-cargo desktop-app --release --timings
+python3 scripts/ci/build-native.py cargo desktop-app --release --timings
 python3 scripts/linux/browser-toolchain.py --env-file .tmp/desktop-browser-env.sh
 (
   source .tmp/desktop-browser-env.sh
@@ -170,7 +170,7 @@ packages), omit the browser environment preparation, `cargo desktop-browser`
 and helper audit above. After preparing the app's SDK and runtime assets, use:
 
 ```sh
-cargo desktop-app --release --timings
+python3 scripts/ci/build-native.py cargo desktop-app --release --timings
 BOKHEIM_BROWSER=disabled DESKTOP_BINARY="$CARGO_TARGET_DIR/release/bokheim" apps/desktop-gpui/linux/appimage/build-appimage.sh
 ```
 
@@ -248,13 +248,7 @@ The link context menu omits “Download Linked File”. Opening a link in a new
 window creates another GPUI browser window with the same profile, preferences,
 and download handling; the original page stays open.
 
-Settings → Transfers has one "Allow automatic transfers on metered connections"
-setting, off by default. Automatic uploads and cover/catalog updates wait
-and resume when allowed. Opening and reading books,
-explicit downloads from the library, catalog or browser, and approved app
-updates proceed on metered connections. Pending user-requested downloads retain
-this exemption across retries and restarts. Linux uses NetworkManager's reported
-cost; unavailable cost information is treated as unknown and allowed.
+Automatic transfers are allowed on metered connections.
 
 Browser windows share the profile under `browser/profile` in the application's
 data directory. Cookies and website storage persist between launches. On Linux,
@@ -333,7 +327,7 @@ archive available to Cargo without network access:
 ```sh
 python3 shared/pdfium/prepare.py --target x86_64-unknown-linux-gnu \
   --archive /run/build/bokheim/pdfium-linux-x64.tgz --offline
-python3 scripts/linux/toolchain.py --offline -- cargo build --locked --release -p desktop-gpui --features flatpak
+python3 scripts/linux/toolchain.py --offline -- python3 scripts/ci/build-native.py cargo build --locked --release -p desktop-gpui --features flatpak
 cargo build --locked --release -p embedded-browser-ui
 ```
 

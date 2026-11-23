@@ -8,8 +8,12 @@ publish = false
 workspace = true
 
 [features]
-default = ["authoritative-taxonomy"]
-authoritative-taxonomy = []
+compiler = []
+
+[[bin]]
+name = "compile-taxonomy"
+path = "src/bin/compile-taxonomy.rs"
+required-features = ["compiler"]
 
 [dependencies]
 operation-failure = { path = "../../client/client-protocol/crates/operation-failure", features = ["sqlite"] }
@@ -35,4 +39,4 @@ serde_json = "1"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 blake3 = "1"
 subject-taxonomy = { path = "../subject-taxonomy" }
-rusqlite = { version = "0.40.0", features = ["bundled"] }
+rusqlite = { version = "0.40.0", features = ["bundled", "backup"] }

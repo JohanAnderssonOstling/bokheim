@@ -108,7 +108,7 @@ impl ReaderView {
     pub(super) fn render_annotation_popup(&self, entity: &Entity<Self>, sidebar_visible: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let annotation = self.marks.selected()?.clone();
         let sidebar_width = chrome::sidebar_width(sidebar_visible, window, cx);
-        let viewport = window.viewport_size();
+        let viewport = window.input_viewport().size;
         let column_count = match &self.load_state {
             LoadState::Ready(renderer) => renderer.read(cx).layout_geometry().map_or(1, |geometry| usize::from(geometry.column_count)),
             LoadState::Loading | LoadState::Error(_) => 1,
@@ -183,8 +183,11 @@ impl ReaderView {
     pub(super) fn render_image_preview(&self, entity: &Entity<Self>, window: &Window, _cx: &mut Context<Self>) -> Option<AnyElement> {
         let (_, image) = self.image_preview.clone()?;
         let close_image = entity.clone();
+        let popup = components::ReaderImagePopup::new(image, window.viewport_size());
+        #[cfg(all(feature = "image-zoom", not(feature = "kobo")))]
+        let popup = popup.with_canvas(self.image_canvas.clone());
         Some(
-            components::ReaderImagePopup::new(image, window.viewport_size(), self.image_canvas.clone())
+            popup
                 .on_dismiss(move |_, cx| {
                     close_image.update(cx, |this, cx| {
                         this.image_preview = None;

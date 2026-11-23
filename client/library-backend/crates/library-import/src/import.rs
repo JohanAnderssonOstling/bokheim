@@ -3,6 +3,8 @@
 
 use book_model::BookFormat;
 use client_protocol::BackendError;
+#[cfg(target_arch = "wasm32")]
+use cpu_contract::{as_cpu_reader, submit_book, Inspect};
 use library_database::DatabaseClient;
 use library_files::AssetStore;
 use library_files::asset_store::{CopiedBook, StagedBook};
@@ -65,16 +67,16 @@ impl LibraryImport<'_> {
             } else {
                 let reader = staged.open_reader().await.map_err(BackendError::operation)?;
                 Some(
-                    cpu_host::submit_book(
+                    submit_book(
                         &*self.cpu,
-                        cpu_host::Inspect {
+                        Inspect {
                             source_name: import.file_name.clone(),
                             format: import.format,
                             book_id: Some(staged.book_id()),
                             declared_pdf: None,
                             cached_pdf: if import.format == BookFormat::Pdf { self.storage.database().cached_pdf_reader(staged.book_id()).await.map_err(BackendError::operation)? } else { None },
                         },
-                        cpu_host::as_cpu_reader(reader),
+                        as_cpu_reader(reader),
                     )
                     .await
                     .map_err(|error| error.context(format!("invalid {} book", import.format.canonical_extension().to_ascii_uppercase())))?,

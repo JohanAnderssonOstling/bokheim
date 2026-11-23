@@ -1,7 +1,9 @@
-//! Protobuf codec for HTTP and WebSocket transport only.
+//! Protobuf codecs for network contracts and client-owned sync payloads.
 //!
-//! Persisted BLOBs use the separate `wire` storage crate. Synchronization
-//! values serialize their domain types through this same codec.
+//! HTTP and WebSocket boundaries use [`typed`], never the generic Serde tree.
+//! Sync payloads also use typed messages with an independent version. The
+//! generic Serde codec below remains for legacy migration and domain adapters.
+//! Local persisted BLOBs use the separate `wire` storage crate.
 
 use prost::Message;
 use serde::Serialize;
@@ -18,13 +20,14 @@ mod legacy_serializer;
 mod serialization;
 mod serializer;
 mod size_serializer;
+pub mod typed;
 mod value_serializer;
 
 include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
 pub const MAX_DECODED_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DECODED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
-/// The protobuf protocol version written into every envelope.
+/// The HTTP protocol version. Persisted payloads select their own version.
 pub const fn version() -> u32 {
     VERSION
 }
@@ -54,6 +57,7 @@ pub enum WireError {
     InvalidHeader,
     UnsupportedVersion(u32),
     TooLarge { limit: usize },
+    LimitExceeded(String),
 }
 
 impl fmt::Display for WireError {
@@ -63,6 +67,7 @@ impl fmt::Display for WireError {
             Self::Decode(reason) => write!(formatter, "cannot decode Bokheim body: {reason}"),
             Self::InvalidHeader => formatter.write_str("Bokheim body has an invalid wire header"),
             Self::UnsupportedVersion(version) => write!(formatter, "Bokheim wire version {version} is unsupported"),
+            Self::LimitExceeded(reason) => write!(formatter, "Bokheim body exceeds a protocol limit: {reason}"),
             Self::TooLarge { limit } => write!(formatter, "decoded Bokheim body exceeds the {limit}-byte limit"),
         }
     }
@@ -71,21 +76,29 @@ impl fmt::Display for WireError {
 impl std::error::Error for WireError {}
 
 pub fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, WireError> {
+    encode_versioned(value, VERSION)
+}
+
+/// Encode an envelope with a caller-owned format version. Persisted contracts
+/// must keep this version independent of the HTTP protocol version.
+pub fn encode_versioned<T: Serialize + ?Sized>(value: &T, version: u32) -> Result<Vec<u8>, WireError> {
     let value = serializer::to_value(value).map_err(|error| WireError::Encode(error.to_string()))?;
-    encode_envelope(value)
+    encode_envelope(value, version)
 }
 
 // Share framing and allocation across all serialized domain types.
 #[inline(never)]
-fn encode_envelope(value: protobuf::Value) -> Result<Vec<u8>, WireError> {
-    let envelope = protobuf::Envelope { version: VERSION, value: Some(value) };
+fn encode_envelope(value: protobuf::Value, version: u32) -> Result<Vec<u8>, WireError> {
+    let envelope = protobuf::Envelope { version, value: Some(value) };
     let mut body = Vec::with_capacity(envelope.encoded_len());
     envelope.encode(&mut body).map_err(|error| WireError::Encode(error.to_string()))?;
     Ok(body)
 }
 
-/// Exact encoded length without encoding a temporary message or copying byte
-/// payloads. Uses the same adapters and map duplicate rules as `encode`.
+/// Exact legacy encoded length using a counting Serde traversal.
+/// This does not build the outer protobuf message, but custom serialization
+/// adapters can allocate, copy payloads, or encode their own temporary buffers.
+/// Typed contracts use `typed::encoded_len` for borrowed sizing instead.
 pub fn encoded_len<T: Serialize + ?Sized>(value: &T) -> Result<usize, WireError> {
     size_serializer::encoded_len(value).map_err(|error| WireError::Encode(error.to_string()))
 }
@@ -98,24 +111,30 @@ pub fn representation<S: Serialize + ?Sized, D: DeserializeOwned>(value: &S) -> 
 }
 
 pub fn decode<T: DeserializeOwned>(body: &[u8], decoded_limit: usize) -> Result<T, WireError> {
-    decode_value(body, decoded_limit, false)
+    decode_value(body, decoded_limit, false, VERSION)
 }
 
 /// For contracts whose byte fields use `serde_bytes`. Keeps protobuf bytes
 /// compact through deserialization instead of allocating one Value per byte.
 /// The wire representation and strict version checks are unchanged.
 pub fn decode_byte_fields<T: DeserializeOwned>(body: &[u8], decoded_limit: usize) -> Result<T, WireError> {
-    decode_value(body, decoded_limit, true)
+    decode_value(body, decoded_limit, true, VERSION)
 }
 
-fn decode_value<T: DeserializeOwned>(body: &[u8], decoded_limit: usize, byte_fields: bool) -> Result<T, WireError> {
-    let value = decode_envelope(body, decoded_limit)?;
+/// Decode a caller-versioned envelope with the same size, canonical encoding
+/// and value validation as HTTP decoding. Only the expected version differs.
+pub fn decode_versioned<T: DeserializeOwned>(body: &[u8], decoded_limit: usize, version: u32) -> Result<T, WireError> {
+    decode_value(body, decoded_limit, false, version)
+}
+
+fn decode_value<T: DeserializeOwned>(body: &[u8], decoded_limit: usize, byte_fields: bool, version: u32) -> Result<T, WireError> {
+    let value = decode_envelope(body, decoded_limit, version)?;
     T::deserialize(deserializer::Deserializer { value, byte_fields }).map_err(|error| WireError::Decode(error.to_string()))
 }
 
 // Keep parsing and validation out of every type-specific deserializer.
 #[inline(never)]
-fn decode_envelope(body: &[u8], decoded_limit: usize) -> Result<protobuf::Value, WireError> {
+fn decode_envelope(body: &[u8], decoded_limit: usize, version: u32) -> Result<protobuf::Value, WireError> {
     if body.len() > decoded_limit {
         return Err(WireError::TooLarge { limit: decoded_limit });
     }
@@ -123,7 +142,7 @@ fn decode_envelope(body: &[u8], decoded_limit: usize) -> Result<protobuf::Value,
     if !canonical::matches(&envelope, body) {
         return Err(WireError::Decode("non-canonical or trailing protobuf data".to_owned()));
     }
-    if envelope.version != VERSION {
+    if envelope.version != version {
         return Err(WireError::UnsupportedVersion(envelope.version));
     }
     let value = envelope.value.ok_or(WireError::InvalidHeader)?;
@@ -186,9 +205,9 @@ fn domain_value(value: protobuf::Value, byte_fields: bool) -> Result<serde_value
         Kind::OptionValue(value) => Value::Option(value.value.map(|value| domain_value(*value, byte_fields).map(Box::new)).transpose()?),
         Kind::NewtypeValue(value) => Value::Newtype(Box::new(domain_value(*value, byte_fields)?)),
         Kind::Sequence(value) => Value::Seq(value.values.into_iter().map(|value| domain_value(value, byte_fields)).collect::<Result<_, _>>()?),
-        Kind::Map(value) => Value::Map(
-            value.entries.into_iter().map(|entry| Ok((domain_value(entry.key.ok_or(WireError::InvalidHeader)?, byte_fields)?, domain_value(entry.value.ok_or(WireError::InvalidHeader)?, byte_fields)?))).collect::<Result<_, WireError>>()?,
-        ),
+        Kind::Map(value) => {
+            Value::Map(deserializer::ordered_entries(value, byte_fields).map_err(|error| WireError::Decode(error.to_string()))?.into_iter().map(|(key, value)| Ok((key, domain_value(value, byte_fields)?))).collect::<Result<_, WireError>>()?)
+        }
         // The established encoder also represents empty sequences as bytes.
         // Keep those deserializable as lists (e.g. no rejections or mutations).
         Kind::BytesValue(value) if byte_fields && !value.is_empty() => Value::Bytes(value),
@@ -235,7 +254,7 @@ mod tests {
 
     #[test]
     fn version_and_decoded_size_are_bounded() {
-        assert_eq!(version(), 31);
+        assert_eq!(version(), 34);
         let mut unsupported = encode(&example(1)).unwrap();
         unsupported[1] = (VERSION + 1) as u8;
         assert!(matches!(decode::<Example>(&unsupported, MAX_DECODED_REQUEST_BYTES), Err(WireError::UnsupportedVersion(version)) if version == VERSION + 1));

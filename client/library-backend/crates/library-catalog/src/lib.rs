@@ -1,14 +1,15 @@
 //! Shared catalog snapshots, hosted books checked against their hashes,
 //! and retained cover images. Downloads need no account.
-use client_platform_runtime::{executor::run_blocking, transfers};
+use client_platform_runtime::executor::run_blocking;
 use client_protocol::{BackendError, Failure};
 use content_address::BookId;
 use futures_util::StreamExt;
 use library_model::{CardKey, CatalogImportProgress};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use thumbnail_contract::{card_thumbnail_suffix, BROWSE_THUMBNAIL_WIDTH, THUMBNAIL_WIDTH};
 use web_time::Instant;
 
 mod cover_cache;
@@ -44,10 +45,10 @@ pub fn evict_cover_caches() {
 /// Cache finished server artwork by density.
 pub async fn card_cover(key: CardKey, width: u32) -> Option<Vec<u8>> {
     let generation = COVER_GENERATION.load(Ordering::SeqCst);
-    if ![thumbnail::BROWSE_THUMBNAIL_WIDTH, thumbnail::THUMBNAIL_WIDTH].contains(&width) {
+    if ![BROWSE_THUMBNAIL_WIDTH, THUMBNAIL_WIDTH].contains(&width) {
         return None;
     }
-    fetch_cover_at(key, &thumbnail::card_thumbnail_suffix(width), generation).await.ok().flatten()
+    fetch_cover_at(key, &card_thumbnail_suffix(width), generation).await.ok().flatten()
 }
 
 /// Where the catalog's files are served. `BOKHEIM_CATALOG_ORIGIN` points a
@@ -77,31 +78,93 @@ pub async fn download_book_with_progress(hash: BookId, progress: &impl Fn(Catalo
             return Err(BackendError::classified(Failure::UnreadableBook, "the downloaded book differs from the catalog's"));
         }
         Ok(bytes)
-    }).await.map_err(BackendError::operation)?
+    })
+    .await
+    .map_err(BackendError::operation)?
 }
 
-/// An external audiobook from the archive its source offers, repacked as the
-/// library's MP3 audiobook archive. Track bytes and source artwork are
-/// preserved; catalog artwork is fetched separately for thumbnail generation.
-/// The URL
-/// comes from the catalog, never the caller; the source's bytes carry no
-/// catalog hash to check.
-pub async fn download_audiobook(entry: CardKey) -> Result<Vec<u8>, BackendError> {
-    download_audiobook_with_progress(entry, &|_| {}).await
-}
-
-pub async fn download_audiobook_with_progress(entry: CardKey, progress: &impl Fn(CatalogImportProgress)) -> Result<Vec<u8>, BackendError> {
+/// Browser acquisitions use private OPFS generations, never whole-archive buffers.
+#[cfg(target_arch = "wasm32")]
+pub async fn download_audiobook_reader_with_progress(entry: CardKey, temporary_name: &str, progress: &impl Fn(CatalogImportProgress)) -> Result<client_platform_web::web_storage::FileReader, BackendError> {
+    use client_platform_web::web_storage;
     let url = run_blocking(move || library_database::catalog::audiobook_url(entry))
         .await
         .map_err(BackendError::operation)?
         .map_err(BackendError::operation)?
         .ok_or_else(|| BackendError::classified(Failure::NotFound, "the audiobook is not offered for download"))?;
-    let bytes = download_with_progress(&url, progress).await?;
+    let mut source = web_storage::begin_write(temporary_name).await.map_err(BackendError::operation)?;
+    progress(CatalogImportProgress::Downloading { downloaded_bytes: 0, total_bytes: None });
+    let response = http_response::get(&url).await.and_then(|response| response.error_for_status()).map_err(|error| BackendError::http("could not download the audiobook", error))?;
+    let total_bytes = response.content_length().filter(|size| *size > 0);
+    let mut stream = response.bytes_stream();
+    let mut last_report = Instant::now();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| BackendError::http("could not download the audiobook", error))?;
+        source.write_all(&chunk).await.map_err(BackendError::operation)?;
+        if last_report.elapsed() >= Duration::from_millis(100) {
+            progress(CatalogImportProgress::Downloading { downloaded_bytes: source.length(), total_bytes });
+            last_report = Instant::now();
+        }
+    }
+    progress(CatalogImportProgress::Downloading { downloaded_bytes: source.length(), total_bytes });
     progress(CatalogImportProgress::Importing);
-    client_platform_runtime::executor::run_blocking(move || audiobook_archive::repack_zip(std::io::Cursor::new(bytes), None))
+    let reader = source.open_reader().await.map_err(BackendError::operation)?;
+    web_storage::stage_file_with(temporary_name, move |writer| {
+        let _source = source;
+        audiobook_archive::repack_zip_into(reader, writer, None).map(|_| ())
+    })
+    .await
+    .map_err(|error| BackendError::classified(Failure::UnreadableBook, format!("could not prepare the downloaded audiobook: {error}")))
+}
+
+/// Stream both archives through hidden temporary files. Ownership removes them
+/// on failure or cancellation, including while the blocking repacker is running.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn download_audiobook_file_with_progress(entry: CardKey, root: &Path, progress: &impl Fn(CatalogImportProgress)) -> Result<tempfile::NamedTempFile, BackendError> {
+    use tokio::io::AsyncWriteExt;
+    let url = run_blocking(move || library_database::catalog::audiobook_url(entry))
         .await
-        .map_err(|error| BackendError::message(format!("could not prepare the downloaded audiobook: {error}")))?
-        .map_err(|error| BackendError::classified(Failure::UnreadableBook, format!("could not read the downloaded audiobook: {error}")))
+        .map_err(BackendError::operation)?
+        .map_err(BackendError::operation)?
+        .ok_or_else(|| BackendError::classified(Failure::NotFound, "the audiobook is not offered for download"))?;
+
+    let root = root.to_owned();
+    let (source, output) = run_blocking(move || Ok::<_, std::io::Error>((tempfile::Builder::new().prefix(".catalog-source-").tempfile_in(&root)?, tempfile::Builder::new().prefix(".catalog-audiobook-").tempfile_in(&root)?)))
+        .await
+        .map_err(BackendError::operation)?
+        .map_err(BackendError::operation)?;
+    progress(CatalogImportProgress::Downloading { downloaded_bytes: 0, total_bytes: None });
+    let response = http_response::get(&url).await.and_then(|response| response.error_for_status()).map_err(|error| BackendError::http("could not download the audiobook", error))?;
+    let total_bytes = response.content_length().filter(|size| *size > 0);
+    let mut stream = response.bytes_stream();
+    let mut file = tokio::fs::OpenOptions::new().write(true).open(source.path()).await.map_err(BackendError::operation)?;
+    let mut downloaded_bytes = 0u64;
+    let mut last_report = Instant::now();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| BackendError::http("could not download the audiobook", error))?;
+        file.write_all(&chunk).await.map_err(BackendError::operation)?;
+        downloaded_bytes += chunk.len() as u64;
+        if last_report.elapsed() >= Duration::from_millis(100) {
+            progress(CatalogImportProgress::Downloading { downloaded_bytes, total_bytes });
+            last_report = Instant::now();
+        }
+    }
+    file.flush().await.map_err(BackendError::operation)?;
+    drop(file);
+    progress(CatalogImportProgress::Downloading { downloaded_bytes, total_bytes });
+    progress(CatalogImportProgress::Importing);
+    run_blocking(move || {
+        let reader = source.reopen()?;
+        let writer = output.reopen()?;
+        use std::io::Write;
+        let mut writer = audiobook_archive::repack_zip_into(std::io::BufReader::new(reader), std::io::BufWriter::new(writer), None)?;
+        writer.flush()?;
+        drop(writer);
+        Ok::<_, std::io::Error>(output)
+    })
+    .await
+    .map_err(BackendError::operation)?
+    .map_err(|error| BackendError::classified(Failure::UnreadableBook, format!("could not prepare the downloaded audiobook: {error}")))
 }
 
 async fn download_with_progress(url: &str, progress: &impl Fn(CatalogImportProgress)) -> Result<Vec<u8>, BackendError> {
@@ -144,14 +207,14 @@ pub async fn fresh_catalog_cover(entry: CardKey) -> Result<Option<Vec<u8>>, Back
     let generation = COVER_GENERATION.load(Ordering::SeqCst);
     let origin = origin();
     let cache = COVERS.get_or_init(Default::default);
-    let result = fetch_cover_asset_allowed(&origin, entry, "detail").await;
+    let result = fetch_cover_asset(&origin, entry, "detail").await;
     if let Ok(Some(cover)) = &result {
         cache.replace((origin, entry, "detail".into()), Some(cover.clone()), generation).await;
         return result;
     }
     // Browsing may have cached only a card. It still preserves the selected
     // artwork better than falling back to a different embedded cover.
-    for suffix in ["detail".to_owned(), thumbnail::card_thumbnail_suffix(thumbnail::THUMBNAIL_WIDTH), thumbnail::card_thumbnail_suffix(thumbnail::BROWSE_THUMBNAIL_WIDTH)] {
+    for suffix in ["detail".to_owned(), card_thumbnail_suffix(THUMBNAIL_WIDTH), card_thumbnail_suffix(BROWSE_THUMBNAIL_WIDTH)] {
         if let Some(Some(cover)) = cache.get(&(origin.clone(), entry, suffix)).await {
             return Ok(Some(cover));
         }
@@ -160,7 +223,7 @@ pub async fn fresh_catalog_cover(entry: CardKey) -> Result<Option<Vec<u8>>, Back
 }
 
 async fn fetch_cover(key: CardKey, high_density: bool) -> Option<Vec<u8>> {
-    let suffix = if high_density { "detail".to_owned() } else { thumbnail::card_thumbnail_suffix(thumbnail::BROWSE_THUMBNAIL_WIDTH) };
+    let suffix = if high_density { "detail".to_owned() } else { card_thumbnail_suffix(BROWSE_THUMBNAIL_WIDTH) };
     fetch_cover_at(key, &suffix, COVER_GENERATION.load(Ordering::SeqCst)).await.ok().flatten()
 }
 
@@ -176,13 +239,6 @@ async fn fetch_cover_at(key: CardKey, suffix: &str, generation: u64) -> Result<O
 }
 
 async fn fetch_cover_asset(origin: &str, key: CardKey, suffix: &str) -> Result<Option<Vec<u8>>, BackendError> {
-    // A paused cover must not occupy the library's bounded reader slots.
-    // Failed fetches are not cached; the policy observer refreshes the view
-    // when automatic transfers become available again.
-    transfers::try_run(fetch_cover_asset_allowed(origin, key, suffix)).await.map_err(BackendError::operation)?
-}
-
-async fn fetch_cover_asset_allowed(origin: &str, key: CardKey, suffix: &str) -> Result<Option<Vec<u8>>, BackendError> {
     let url = format!("{origin}/covers/{key}-{suffix}.jpg");
     let request = http_response::client().get(&url);
     // A manually supplied Cache-Control header triggers a CORS preflight.

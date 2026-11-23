@@ -19,6 +19,7 @@ pub struct Checkbox {
     label: Option<Text>,
     children: Vec<AnyElement>,
     checked: bool,
+    indeterminate: bool,
     disabled: bool,
     size: Size,
     tab_stop: bool,
@@ -37,6 +38,7 @@ impl Checkbox {
             label: None,
             children: Vec::new(),
             checked: false,
+            indeterminate: false,
             disabled: false,
             size: Size::default(),
             on_click: None,
@@ -61,6 +63,12 @@ impl Checkbox {
     /// Set the checked state for the checkbox.
     pub fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
+        self
+    }
+
+    /// Show a mixed state. Clicking it requests the checked state.
+    pub fn indeterminate(mut self, indeterminate: bool) -> Self {
+        self.indeterminate = indeterminate;
         self
     }
 
@@ -199,7 +207,8 @@ pub(crate) fn checkbox_check_icon(
 
 impl RenderOnce for Checkbox {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let checked = self.checked;
+        let checked = self.checked && !self.indeterminate;
+        let marked = checked || self.indeterminate;
 
         let focus_handle = window
             .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
@@ -207,7 +216,7 @@ impl RenderOnce for Checkbox {
             .clone();
         let is_focused = focus_handle.is_focused(window);
 
-        let border_color = if checked {
+        let border_color = if marked {
             cx.theme().primary
         } else {
             cx.theme().input
@@ -218,11 +227,18 @@ impl RenderOnce for Checkbox {
             border_color
         };
         let radius = cx.theme().radius.min(px(4.));
+        let mark_color = if self.disabled {
+            cx.theme().primary_foreground.opacity(0.5)
+        } else {
+            cx.theme().primary_foreground
+        };
 
         self.base
             .id(self.id.clone())
             .role(Role::CheckBox)
-            .aria_toggled(if checked {
+            .aria_toggled(if self.indeterminate {
+                Toggled::Mixed
+            } else if checked {
                 Toggled::True
             } else {
                 Toggled::False
@@ -270,19 +286,27 @@ impl RenderOnce for Checkbox {
                     .border_1()
                     .border_color(color)
                     .rounded(radius)
-                    .map(|this| match checked {
+                    .map(|this| match marked {
                         false => this.bg(cx.theme().input_background()),
                         true if self.disabled => this.bg(color),
                         true => this.bg(cx.theme().tokens.primary),
                     })
-                    .child(checkbox_check_icon(
-                        self.id,
-                        self.size,
-                        checked,
-                        self.disabled,
-                        window,
-                        cx,
-                    )),
+                    .when(self.indeterminate, |this| {
+                        this.flex()
+                            .items_center()
+                            .justify_center()
+                            .child(div().w(rems(0.625)).h(px(2.)).bg(mark_color))
+                    })
+                    .when(!self.indeterminate, |this| {
+                        this.child(checkbox_check_icon(
+                            self.id,
+                            self.size,
+                            checked,
+                            self.disabled,
+                            window,
+                            cx,
+                        ))
+                    }),
             )
             .when(self.label.is_some() || !self.children.is_empty(), |this| {
                 this.child(

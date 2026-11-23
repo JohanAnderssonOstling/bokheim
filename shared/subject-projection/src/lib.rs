@@ -3,11 +3,14 @@
 
 mod bisac;
 mod bisac_database;
+#[cfg(all(feature = "compiler", not(target_arch = "wasm32")))]
+pub mod compiler;
 mod ddc;
 mod lcc_recovery;
 mod matcher_storage;
 mod pruning;
 mod runtime;
+pub mod runtime_format;
 mod source_headings;
 mod sqlite_matcher;
 mod taxonomy_sqlite;
@@ -18,7 +21,7 @@ pub mod installed;
 pub use book_model::BookSubject;
 pub use lcc_recovery::{LccMatchAssignment, LccMatchEvidence, LccMatchMethod, LccMatchReport};
 pub use pruning::redundant_lcc_exact_selectors;
-pub use source_headings::{reviewed_source_heading_path, reviewed_source_heading_subject};
+pub use source_headings::{reviewed_source_heading_concept, reviewed_source_heading_path, reviewed_source_heading_subject};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use bisac::{SubjectAssignment, bisac_code_for_path, match_bisac_subjects, match_bisac_subjects_with_minimum_adjacent};
@@ -27,8 +30,9 @@ pub use lcc::canonical_lcc_notation;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod bundled;
 pub use runtime::{
-    BUNDLED_UNIFIED_TAXONOMY_REVISION_ID, UnifiedConceptDefinition, UnifiedConceptRoute, UnifiedTaxonomy, install_unified_taxonomy_concepts, lcc_subject_sort_orders, loaded_unified_taxonomy_revision_id, most_specific_concept_ids,
-    unified_concept_id, unified_lcc_has_numeric_coverage, unified_lcc_match_report, unified_subject_paths, unified_subject_similarity_keys, unified_taxonomy_revision_id, unified_taxonomy_routes,
+    BUNDLED_UNIFIED_TAXONOMY_REVISION_ID, UnifiedConceptDefinition, UnifiedConceptRoute, UnifiedTaxonomy, UnifiedTaxonomyNavigation, has_unified_subjects, install_unified_taxonomy_concepts, lcc_subject_sort_orders,
+    loaded_unified_taxonomy_revision_id, most_specific_concept_ids, resolve_concept_identity, unified_concept_exists, unified_concept_id, unified_concept_paths, unified_lcc_has_numeric_coverage, unified_lcc_match_report,
+    unified_subject_concept_ids, unified_subject_paths, unified_subject_routes, unified_subject_similarity_keys, unified_taxonomy_navigation, unified_taxonomy_revision_id, unified_taxonomy_routes,
 };
 pub use taxonomy_sqlite::{read_unified_taxonomy_connection, read_unified_taxonomy_sqlite};
 
@@ -38,7 +42,9 @@ pub const DDC_SYSTEM_ID: &str = "ddc";
 pub const DDC_MATCHER_VERSION: i64 = 1;
 pub use runtime_index::{LCC_SYSTEM_ID, ROOT_SUBJECT_PATH, UNIFIED_VERSION};
 pub const UNIFIED_SYSTEM_ID: &str = "unified";
-pub use matcher_storage::UNIFIED_MATCHER_VERSION;
+pub use matcher_storage::UNIFIED_MATCHER_FORMAT_VERSION;
+/// Subject assignment policy. Bump to recompute projections without rebuilding taxonomy indexes.
+pub const UNIFIED_PROJECTION_VERSION: i64 = runtime_format::PROJECTION_VERSION;
 pub const EDITION_SUBTREE_CONSENSUS_SOURCE: &str = "metadata:edition-subtree-consensus";
 /// Automatic catalog assignments retain taxonomy identities through label and parent changes.
 pub const CATALOG_CONCEPT_SOURCE: &str = "catalog:concept";
@@ -49,7 +55,7 @@ pub const MANUAL_SUBJECT_EXCLUSION_SOURCE: &str = "manual:subject:exclude";
 const LITERATURE_GENRES_CONCEPT_ID: i64 = 5583;
 
 pub fn is_broad_literature_classification(system_id: &str, code: &str) -> bool {
-    let concepts = runtime::resolved_subject_concepts(system_id, code);
+    let concepts = unified_subject_concept_ids(system_id, code);
     concepts.len() == 1 && concepts.contains(&LITERATURE_GENRES_CONCEPT_ID)
 }
 
@@ -71,8 +77,8 @@ pub fn is_specific_lcc_code(code: &str) -> bool {
         return false;
     }
     let letters = canonical.chars().take_while(char::is_ascii_alphabetic).collect::<String>();
-    let broad = unified_subject_paths(LCC_SYSTEM_ID, &letters);
-    unified_subject_paths(LCC_SYSTEM_ID, &canonical).iter().any(|path| !broad.contains(path))
+    let broad = unified_subject_concept_ids(LCC_SYSTEM_ID, &letters);
+    unified_subject_concept_ids(LCC_SYSTEM_ID, &canonical).into_iter().any(|id| !broad.contains(&id) && runtime::unified_concept_exists(id))
 }
 
 impl ProjectedSubjectCode {
@@ -94,8 +100,9 @@ pub fn project_subject_codes(subjects: &[BookSubject]) -> Vec<ProjectedSubjectCo
     for assignment in match_bisac_subjects(subjects) {
         let Some(code) = bisac_code_for_path(assignment.node_path()) else { continue };
         if is_broad_literature_classification(BISAC_SYSTEM_ID, &code) {
-            if unified_concept_id(source_headings::GENERAL_FICTION_PATH) == Some(source_headings::GENERAL_FICTION_CONCEPT_ID) {
-                projected.entry((UNIFIED_SYSTEM_ID.to_owned(), source_headings::GENERAL_FICTION_PATH.to_owned())).or_default().extend(assignment.evidence_positions());
+            let concept_id = source_headings::GENERAL_FICTION_CONCEPT_ID;
+            if runtime::unified_concept_exists(concept_id) {
+                projected.entry((UNIFIED_SYSTEM_ID.to_owned(), format!("concept:{concept_id}"))).or_default().extend(assignment.evidence_positions());
             }
             continue;
         }
@@ -123,8 +130,8 @@ pub fn project_subject_codes(subjects: &[BookSubject]) -> Vec<ProjectedSubjectCo
         }
     }
     for (position, subject) in subjects.iter().enumerate() {
-        if let Some(path) = (!preferred_lcc).then(|| reviewed_source_heading_path(subject)).flatten() {
-            projected.entry((UNIFIED_SYSTEM_ID.to_owned(), path.to_owned())).or_default().insert(position);
+        if let Some(concept_id) = (!preferred_lcc).then(|| reviewed_source_heading_concept(subject)).flatten() {
+            projected.entry((UNIFIED_SYSTEM_ID.to_owned(), format!("concept:{concept_id}"))).or_default().insert(position);
             continue;
         }
         if subject.authority() == Some(UNIFIED_SYSTEM_ID) && matches!(subject.source(), "manual:subject" | EDITION_SUBTREE_CONSENSUS_SOURCE | CATALOG_CONCEPT_SOURCE) {
@@ -140,7 +147,7 @@ pub fn project_subject_codes(subjects: &[BookSubject]) -> Vec<ProjectedSubjectCo
     let concepts = projected
         .keys()
         .map(|key| {
-            let ids = runtime::resolved_subject_concepts(&key.0, &key.1);
+            let ids = unified_subject_concept_ids(&key.0, &key.1);
             (key.clone(), ids)
         })
         .collect::<BTreeMap<_, _>>();
@@ -153,11 +160,8 @@ pub fn project_subject_codes(subjects: &[BookSubject]) -> Vec<ProjectedSubjectCo
 /// Only real taxonomy ancestry shadows an assignment; sharing an LCC prefix or
 /// being deeper in a different branch is not enough.
 pub fn project_subject_concepts(codes: &[ProjectedSubjectCode]) -> Vec<(usize, i64)> {
-    let mut concepts = codes
-        .iter()
-        .enumerate()
-        .flat_map(|(index, code)| runtime::resolved_subject_concepts(code.system_id(), code.code()).into_iter().map(move |id| (index, id)).filter(|(_, id)| !code.excluded_concept_ids.contains(id)))
-        .collect::<Vec<_>>();
+    let mut concepts =
+        codes.iter().enumerate().flat_map(|(index, code)| unified_subject_concept_ids(code.system_id(), code.code()).into_iter().map(move |id| (index, id)).filter(|(_, id)| !code.excluded_concept_ids.contains(id))).collect::<Vec<_>>();
     let retained = most_specific_concept_ids(concepts.iter().map(|(_, concept)| *concept));
     concepts.retain(|(_, concept)| retained.contains(concept));
     concepts
@@ -171,13 +175,13 @@ pub fn has_lcc_classification(subjects: &[BookSubject]) -> bool {
 
 /// LCC takes precedence over automatic fallback schemes and heading inference only when
 /// it resolves to navigation. Sibling consensus is also LCC evidence, although
-/// its supported subtree is stored as a unified path rather than a raw code.
+/// its supported subtree is stored as a unified concept reference.
 pub fn has_usable_lcc_classification(subjects: &[BookSubject]) -> bool {
     subjects.iter().any(|subject| {
         if subject.authority().is_some_and(|authority| authority.eq_ignore_ascii_case(UNIFIED_SYSTEM_ID)) && subject.source() == EDITION_SUBTREE_CONSENSUS_SOURCE {
-            return subject.code().is_some_and(|path| path != ROOT_SUBJECT_PATH && unified_concept_id(path).is_some());
+            return subject.code().is_some_and(|code| runtime::has_usable_subjects(UNIFIED_SYSTEM_ID, code));
         }
-        subject_lcc_code(subject).is_some_and(|code| unified_subject_paths(LCC_SYSTEM_ID, &code).iter().any(|path| path != ROOT_SUBJECT_PATH))
+        subject_lcc_code(subject).is_some_and(|code| runtime::has_usable_subjects(LCC_SYSTEM_ID, &code))
     })
 }
 

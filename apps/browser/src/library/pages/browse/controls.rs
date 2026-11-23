@@ -53,6 +53,16 @@ impl BrowseOptionsSelection {
         match event {
             BrowseOptionsEvent::SelectChipSort(sort) => controls.collection_sorts.contains(&sort) && std::mem::replace(&mut self.chip_sort, sort) != sort,
             BrowseOptionsEvent::SelectBookSort(sort) => controls.book_sorts.contains(&sort) && std::mem::replace(&mut self.book_sort, sort) != sort,
+            BrowseOptionsEvent::SelectTableSort(sort) => {
+                if !controls.book_sorts.contains(&sort) {
+                    return false;
+                }
+                let mut changed = std::mem::replace(&mut self.book_sort, sort) != sort;
+                if let Some(chip_sort) = BrowseChipSort::for_book_sort(sort).filter(|sort| controls.collection_sorts.contains(sort)) {
+                    changed |= std::mem::replace(&mut self.chip_sort, chip_sort) != chip_sort;
+                }
+                changed
+            }
             BrowseOptionsEvent::ToggleFormat(format) => toggle(&mut self.formats, format, &controls.formats),
             BrowseOptionsEvent::ToggleLanguage(language) => toggle(&mut self.languages, language, &controls.languages),
             BrowseOptionsEvent::ToggleHideFinished => {
@@ -100,6 +110,7 @@ fn toggle<T: PartialEq>(selected: &mut Vec<T>, choice: Option<T>, offered: &[Fac
 pub(crate) enum BrowseOptionsEvent {
     SelectChipSort(BrowseChipSort),
     SelectBookSort(BrowseBookSort),
+    SelectTableSort(BrowseBookSort),
     ToggleFormat(Option<LibraryFileTypeFilter>),
     ToggleLanguage(Option<String>),
     ToggleHideFinished,
@@ -280,7 +291,7 @@ impl BrowseControls {
     fn option(&self, event: BrowseOptionsEvent, selection: &BrowseOptionsSelection) -> OptionRow {
         use BrowseOptionsEvent::*;
         let (id, label, checked) = match event.clone() {
-            SelectBookSort(sort) => (format!("sheet-book-sort-{}", sort.label()), sort.label().into(), sort == selection.book_sort),
+            SelectBookSort(sort) | SelectTableSort(sort) => (format!("sheet-book-sort-{}", sort.label()), sort.label().into(), sort == selection.book_sort),
             SelectChipSort(sort) => (format!("sheet-chip-sort-{}", sort.label()), sort.label().into(), sort == selection.chip_sort),
             ToggleFormat(None) => ("sheet-format-All".into(), text!(browse::all).into(), selection.formats.is_empty()),
             ToggleFormat(Some(format)) => (format!("sheet-format-{}", format.label()), facet_label(&self.formats, format), selection.formats.contains(&format)),

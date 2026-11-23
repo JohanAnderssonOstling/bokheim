@@ -1,0 +1,125 @@
+Thu Nov 19 16:15:07 UTC 2026
+label=bokheim-idle duration=120 interval=10 battery=/sys/class/power_supply/mc13892_bat
+POWER_SUPPLY_NAME=mc13892_bat
+POWER_SUPPLY_STATUS=Discharging
+POWER_SUPPLY_PRESENT=1
+POWER_SUPPLY_VOLTAGE_NOW=4162300
+POWER_SUPPLY_CURRENT_NOW=1311
+POWER_SUPPLY_CAPACITY=100
+POWER_SUPPLY_TEMP=284
+POWER_SUPPLY_TIME_TO_EMPTY_NOW=71520
+POWER_SUPPLY_TIME_TO_FULL_NOW=3932100
+POWER_SUPPLY_TECHNOLOGY=Li-ion
+POWER_SUPPLY_HEALTH=Good
+POWER_SUPPLY_VOLTAGE_MIN_DESIGN=3520
+PID   USER     TIME  COMMAND
+    1 root      0:00 init
+    2 root      0:00 [kthreadd]
+    3 root      0:01 [ksoftirqd/0]
+    5 root      0:00 [kworker/0:0H]
+    7 root      0:05 [rcu_preempt]
+    8 root      0:00 [rcu_sched]
+    9 root      0:00 [rcu_bh]
+   10 root      0:00 [migration/0]
+   11 root      0:00 [khelper]
+   12 root      0:00 [kdevtmpfs]
+   13 root      0:00 [perf]
+   14 root      0:00 [writeback]
+   15 root      0:00 [crypto]
+   16 root      0:00 [bioset]
+   17 root      0:00 [kblockd]
+   18 root      0:01 [irq/147-ricoh61]
+   20 root      0:00 [cfg80211]
+   21 root      0:00 [SY7636_INT]
+   22 root      0:02 [kswapd0]
+   23 root      0:00 [fsnotify_mark]
+   42 root      0:00 [kapmd]
+   43 root      0:00 [spi0]
+   44 root      0:00 [ci_otg]
+   45 root      0:00 [elan_wq]
+   48 root      0:00 [kionix_accel]
+   49 root      0:00 [ricoh61x_factor]
+   50 root      0:00 [ricoh61x_batter]
+   51 root      0:00 [r5t61x_charger_]
+   56 root      0:00 [btfwwork]
+   57 root      0:00 [cfinteractive]
+   58 root      0:00 [irq/249-mmc0]
+   60 root      0:00 [irq/250-mmc1]
+   61 root      0:00 [krfcommd]
+   62 root      0:13 [mmcqd/0]
+   64 root      0:00 [EPDC Submit]
+   65 root      0:00 [EPDC Interrupt]
+   66 root      0:00 [pxp_dispatch]
+   67 root      0:00 [deferwq]
+   68 root      0:00 [kworker/0:1H]
+   69 root      0:00 [jbd2/mmcblk0p1-]
+   70 root      0:00 [ext4-rsv-conver]
+  107 root      0:08 /sbin/udevd -d
+  213 messageb  0:04 /bin/dbus-daemon --system
+  214 root      0:00 /bin/dbus-daemon --session --print-address --fork
+  220 root      0:00 {kobo_getty.sh} /bin/sh /sbin/kobo_getty.sh
+  222 root      0:00 /sbin/getty -L ttymxc0 115200 vt100
+ 1366 root      0:00 {fontickel-launc} /bin/sh /usr/local/Kobo/fontickel-launcher.sh
+ 1367 root      0:00 /usr/local/Kobo/fontickel -skipFontLoad -platform kobo:noscreen
+ 1464 root      0:00 {strickel-launch} /bin/sh /usr/local/Kobo/strickel-launcher.sh
+ 1465 root      0:00 /usr/local/Kobo/strickel -skipFontLoad -platform kobo:noscreen
+ 1475 root      0:37 /libexec/dhcpcd-dbus
+ 1526 root      0:00 dhcpcd -d -z wlan0
+ 1584 root      0:00 /mnt/onboard/.adds/bokheim/ssh/dropbear -F -r /etc/bokheim-ssh/hostkey -D /etc/bokheim-ssh -p 2222 -P /var/run/bokheim-ssh.pid -j -k -W 1048576 -K 30 -I 600
+ 1875 root      0:00 [irq/121-kx122]
+ 1876 root      0:00 [irq/152-elan_kt]
+ 6411 root      0:15 [ksdioirqd/mmc1]
+ 6419 root      0:04 [RTW_XMIT_THREAD]
+ 6420 root      0:05 [RTW_RECV_THREAD]
+ 6421 root      0:05 [RTW_CMD_THREAD]
+ 6422 root      0:03 [RTWHALXT]
+ 6430 root      0:10 wpa_supplicant -B -D wext -i wlan0 -c /etc/wpa_supplicant/wpa_supplicant.conf -C /var/run/wpa_supplicant
+ 6490 root      0:00 [kworker/u3:2]
+ 6618 root      0:03 [kworker/u2:0]
+ 7797 root      0:00 [kworker/0:2]
+ 7885 root      0:03 [kworker/u2:1]
+ 9001 root      0:00 syslogd -C500 -S
+ 9005 root      0:00 /bin/sh /mnt/onboard/.adds/bokheim/run.sh
+ 9037 root      0:16 /mnt/onboard/.adds/bokheim/desktop-gpui-kobo
+ 9090 root      0:00 [kworker/0:0]
+ 9096 root      0:00 [kworker/u3:0]
+ 9123 root      0:00 [kworker/u3:1]
+ 9129 root      0:00 {default.script} /bin/sh /etc/udhcpc.d/default.script deconfig
+ 9135 root      0:00 {default.script} /bin/sh /etc/udhcpc.d/default.script bound
+ 9188 root      0:00 [kworker/u2:2]
+ 9252 root      0:00 {ac} /bin/sh /usr/local/Kobo/udev/ac
+ 9313 root      0:00 [kworker/0:1]
+ 9335 root      0:00 sh /tmp/bokheim-power-sampler.sh record bokheim-idle 120 10 /tmp/bokheim-power-quick-20261119T161506Z-bokheim.tsv
+ 9340 root      0:00 ps
+Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE
+ face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22
+ wlan0: 0000   96.   66.    0.       0      0      0      0      0        0
+/sys/class/backlight/lm3630a_led/brightness
+0
+/sys/class/backlight/lm3630a_leda/brightness
+0
+/sys/class/backlight/lm3630a_ledb/brightness
+0
+/sys/class/backlight/mxc_msp430.0/brightness
+0
+/sys/class/backlight/lm3630a_led/color
+10/sys/class/leds/GLED/brightness
+0
+/sys/class/leds/mmc0::/brightness
+0
+/sys/class/leds/mmc1::/brightness
+0
+/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+interactive
+Bokheim shared GPUI UI for Kobo
+Version: 0.1.15
+Built: 2026-11-19T15:52:56Z
+Target: armv7-unknown-linux-gnueabihf
+PDFium: 7961 (ARM glibc)
+Runtime: glibc 2.23 (Linux 2.6.32 baseline)
+CPU profile: generic
+LTO: thin
+Codegen units: 1
+UI crate codegen units: 16
+Local working tree build: complete mockup A Wi-Fi panel with network/security/status rows, password validation and Enter submit, retained retry input, per-network progress, cancellation and static power toggle; compact 112px steppers, equal Book/Off/custom choices and grouped margins
+Executable SHA256: 29016271fed5be4002bb30412dedb4090d3c6bdf796b1cd7295dd27a879d2cea

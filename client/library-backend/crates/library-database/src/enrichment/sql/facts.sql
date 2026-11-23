@@ -2,20 +2,7 @@
 
 -- name: facts_metadata_body?
 -- param: content_hash: &BookId
-SELECT body FROM local_book_draft WHERE content_hash=:content_hash;
-
--- name: facts_inputs_batch?
--- param: hashes: &str
-SELECT unhex(requested.value),draft.body,record.body,record.publication
-FROM json_each(:hashes) requested
-LEFT JOIN local_book_draft draft ON draft.content_hash=unhex(requested.value)
-LEFT JOIN sync_book_record record ON record.content_hash=unhex(requested.value) AND record.state_kind='book_add';
-
--- name: facts_record_failures_batch!
--- param: hashes: &str
--- param: retry_at: i64
-UPDATE local_book_draft SET retry_at=:retry_at
-WHERE content_hash IN (SELECT unhex(value) FROM json_each(:hashes));
+SELECT body FROM sync_state_version WHERE state_kind='book_add' AND state_key=:content_hash AND state_subkey='' AND body IS NOT NULL;
 
 -- name: facts_filenames_batch?
 -- param: hashes: &str
@@ -35,49 +22,45 @@ WHERE filename_rank <= 8
 ORDER BY candidate_index, filename_rank;
 
 -- name: facts_candidates?
--- param: scope: &str
 -- param: now: i64
-SELECT b.content_hash, b.format, draft.body
-FROM json_each(:scope) member
-JOIN book b ON b.content_hash = unhex(member.value)
-JOIN local_book_draft draft ON draft.content_hash = b.content_hash
-WHERE b.deleted_at IS NULL AND (draft.retry_at IS NULL OR draft.retry_at <= :now)
-ORDER BY b.content_hash;
-
--- name: facts_record_failure!
--- param: content_hash: &BookId
--- param: retry_at: i64
-UPDATE local_book_draft SET retry_at=:retry_at WHERE content_hash=:content_hash;
+-- param: after: Option<&BookId>
+SELECT b.content_hash, b.format, record.body
+FROM book b
+JOIN sync_state_version record ON record.state_key=b.content_hash AND record.state_kind='book_add' AND record.state_subkey='' AND record.body IS NOT NULL
+JOIN book_transfer transfer ON transfer.content_hash=b.content_hash
+WHERE b.deleted_at IS NULL AND transfer.enrichment_retry_at <= :now AND b.content_hash>COALESCE(:after,x'')
+ORDER BY b.content_hash LIMIT 256;
 
 -- name: facts_next_retry ->
-SELECT MIN(draft.retry_at) FROM local_book_draft draft JOIN book b USING(content_hash) WHERE b.deleted_at IS NULL;
+SELECT MIN(transfer.enrichment_retry_at) FROM book_transfer transfer JOIN book b USING(content_hash) WHERE b.deleted_at IS NULL;
 
 -- name: facts_cover_candidates?
--- param: scope: &str
+-- param: after: Option<&BookId>
 SELECT b.content_hash
-FROM json_each(:scope) member
-JOIN book b ON b.content_hash = unhex(member.value)
+FROM book b
 JOIN book_transfer t ON t.content_hash = b.content_hash
 WHERE t.cover_checked=0 AND t.cover_state='no_cover' AND b.deleted_at IS NULL
-  AND EXISTS(SELECT 1 FROM sync_book_record s WHERE s.content_hash=b.content_hash AND s.state_kind='book_add')
-ORDER BY b.content_hash;
+  AND b.content_hash>COALESCE(:after,x'')
+  AND EXISTS(SELECT 1 FROM sync_state_version s WHERE s.state_key=b.content_hash AND s.state_subkey='' AND s.state_kind='book_add' AND s.body IS NOT NULL)
+ORDER BY b.content_hash LIMIT 256;
 
 -- name: facts_mark_cover_checked!
 -- param: content_hash: &BookId
 INSERT INTO book_transfer(content_hash,cover_checked) SELECT content_hash,1 FROM book WHERE content_hash=:content_hash
 ON CONFLICT(content_hash) DO UPDATE SET cover_checked=1;
 
--- name: facts_cover_inputs_batch?
--- param: hashes: &str
-SELECT unhex(requested.value),record.body,record.publication,transfer.cover_state
-FROM json_each(:hashes) requested
-LEFT JOIN sync_book_record record ON record.content_hash=unhex(requested.value) AND record.state_kind='book_add'
-LEFT JOIN book_transfer transfer ON transfer.content_hash=unhex(requested.value);
+-- name: facts_cover_input ->
+-- param: hash: &BookId
+SELECT record.body,transfer.cover_state FROM book b
+JOIN book_transfer transfer ON transfer.content_hash=b.content_hash
+LEFT JOIN sync_state_version record ON record.state_key=b.content_hash AND record.state_kind='book_add' AND record.state_subkey=''
+WHERE b.content_hash=:hash AND b.deleted_at IS NULL;
 
--- name: facts_mark_covers_checked_batch!
--- param: hashes: &str
+-- name: facts_mark_cover_checked_if_current!
+-- param: hash: &BookId
+-- param: body: Option<&[u8]>
 INSERT INTO book_transfer(content_hash,cover_checked)
-SELECT b.content_hash,1 FROM json_each(:hashes) requested
-JOIN book b ON b.content_hash=unhex(requested.value)
-WHERE true
+SELECT b.content_hash,1 FROM book b
+LEFT JOIN sync_state_version record ON record.state_key=b.content_hash AND record.state_kind='book_add' AND record.state_subkey=''
+WHERE b.content_hash=:hash AND b.deleted_at IS NULL AND record.body IS :body
 ON CONFLICT(content_hash) DO UPDATE SET cover_checked=1 WHERE book_transfer.cover_checked=0;

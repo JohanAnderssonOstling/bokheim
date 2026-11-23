@@ -2,7 +2,7 @@ use std::{cell::Cell, rc::Rc};
 
 use gpui::{Context, KeyDownEvent, KeyLocation, KeyUpEvent, Keystroke, Modifiers, Render, TestAppContext, VisualTestContext, Window, div, point, prelude::*, px};
 use gpui_component::{Disableable, IconName};
-use ui_components::{BrowserTheme, Button, NavigationIcon, compact_hierarchy_item};
+use ui_components::{BrowserTheme, Button, NavigationIcon, hierarchy_item_content};
 
 struct ButtonFixture {
     disabled: bool,
@@ -67,7 +67,16 @@ impl Render for ChipFixture {
             downloads.set(downloads.get() + 1);
         });
         div().w(px(180.0)).h(px(40.0)).child(
-            compact_hierarchy_item("chip", NavigationIcon::Folder, "A folder with a long name", Some("Library/Parent folder".into()), Some(42), Some(download.into_any_element()), false, false, false, BrowserTheme::default())
+            Button::new("chip")
+                .ghost()
+                .size_full()
+                .p_0()
+                .border_0()
+                .child(
+                    hierarchy_item_content(NavigationIcon::Folder, "A folder with a long name", Some("Library/Parent folder".into()), BrowserTheme::default())
+                        .child(div().flex_none().child("42"))
+                        .child(div().size(gpui::rems(ui_components::DOWNLOAD_ACTION_SIZE_REM)).flex_none().flex().items_center().justify_center().child(download)),
+                )
                 .debug_selector(|| "chip".into())
                 .on_click(move |_, _, _| opens.set(opens.get() + 1)),
         )

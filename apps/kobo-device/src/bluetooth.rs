@@ -1,6 +1,8 @@
 //! Bluetooth adapter control through the Kobo firmware's BlueZ service.
 
+use crate::{process::kill_group, radio};
 use std::io::{self, Read};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,31 +42,49 @@ pub enum Request {
 }
 
 pub fn request(request: Request) -> io::Result<Status> {
+    check_cancelled(true)?;
+    let radio = radio::lock();
     let _controller = CONTROLLER.lock().unwrap_or_else(PoisonError::into_inner);
-    if SLEEPING.load(Ordering::Acquire) {
-        return Err(io::Error::other("Bluetooth is unavailable while the device is asleep"));
-    }
+    check_cancelled(true)?;
 
-    match request {
-        Request::Status => status(),
+    let result = match request {
+        Request::Status => {
+            drop(radio);
+            status(true)
+        }
         Request::Power(enabled) => {
             if enabled {
-                ensure_controller()?;
+                ensure_controller(true)?;
             }
-            let _ = run(&["power", if enabled { "on" } else { "off" }])?;
-            status()
+            let _ = run_with_timeout(&["power", if enabled { "on" } else { "off" }], TIMEOUT, true)?;
+            if !enabled
+                && let Some(helper) = std::env::var_os("BOKHEIM_KOBO_WIFI_HELPER")
+                && !wifi_enabled()?
+            {
+                run_external(Command::new("/bin/sh").arg(helper).arg("off"), Duration::from_secs(15), "power down unused Wi-Fi/Bluetooth radio", true)?;
+                crate::wifi::radio_changed();
+            }
+            drop(radio);
+            status(true)
         }
-        Request::Scan => scan(),
+        Request::Scan => {
+            drop(radio);
+            scan(true)
+        }
         Request::Connect(address) => {
-            ensure_controller()?;
-            let current = status()?;
-            if !current.powered {
-                let _ = run(&["power", "on"])?;
+            ensure_controller(true)?;
+            if !controller_power_with(|args| run_with_timeout(args, TIMEOUT, true))? {
+                let _ = run_with_timeout(&["power", "on"], TIMEOUT, true)?;
             }
-            let _ = run_with_timeout(&["connect", &address], CONNECT_TIMEOUT)?;
-            status()
+            // Keep power transitions serialized, but let Wi-Fi operations and
+            // sleep preparation proceed while BlueZ connects or lists devices.
+            drop(radio);
+            let _ = run_with_timeout(&["connect", &address], CONNECT_TIMEOUT, true)?;
+            status(true)
         }
-    }
+    };
+    check_cancelled(true)?;
+    result
 }
 
 /// Owned by the serialized radio worker across the entire logical sleep.
@@ -133,7 +153,7 @@ impl Drop for SleepGuard {
         let _controller = CONTROLLER.lock().unwrap_or_else(PoisonError::into_inner);
         if self.restore_power {
             // Wi-Fi has already finished restoring shared hardware on this worker.
-            if let Err(error) = ensure_controller().and_then(|_| run(&["power", "on"]).map(|_| ())) {
+            if let Err(error) = ensure_controller(false).and_then(|_| run(&["power", "on"]).map(|_| ())) {
                 eprintln!("Kobo Bluetooth recovery failed: {error}");
             }
         }
@@ -141,7 +161,9 @@ impl Drop for SleepGuard {
     }
 }
 
-fn status() -> io::Result<Status> {
+fn status(cancellable: bool) -> io::Result<Status> {
+    check_cancelled(cancellable)?;
+    let run = |arguments: &[&str]| run_with_timeout(arguments, TIMEOUT, cancellable);
     // Some Kobo BlueZ versions intermittently return a non-zero status for
     // `show` even though the controller is present. `list` is a reliable
     // controller-presence probe, so use it as a fallback instead of turning a
@@ -152,6 +174,7 @@ fn status() -> io::Result<Status> {
             (text.lines().any(|line| line.trim() == "Powered: yes"), text.lines().any(|line| line.starts_with("Controller ")))
         }
         Err(show_error) => {
+            check_cancelled(cancellable)?;
             let controllers = run(&["list"]);
             match controllers {
                 Ok(output) => {
@@ -180,15 +203,34 @@ fn status() -> io::Result<Status> {
     // BlueZ keeps known/paired devices in its controller cache. Read that
     // cache even while the adapter is powered off so previously connected
     // devices remain remembered and visible after an app restart.
-    let devices = list_devices()?;
+    let devices = list_devices(cancellable)?;
+    check_cancelled(cancellable)?;
     Ok(Status { available: true, powered, devices })
 }
 
 fn hardware_present() -> bool {
-    cfg!(target_arch = "arm") && Path::new("/sbin/rtk_hciattach").is_file() && Path::new("/dev/ttymxc1").exists() && Path::new("/sys/module/8723ds").exists()
+    cfg!(target_arch = "arm") && Path::new("/sbin/rtk_hciattach").is_file() && Path::new("/dev/ttymxc1").exists()
 }
 
-fn ensure_controller() -> io::Result<()> {
+/// Called while the shared radio lock is held, before Wi-Fi powers it down.
+pub(crate) fn powered() -> io::Result<bool> {
+    if !Path::new("/sys/class/bluetooth/hci0").exists() {
+        return Ok(false);
+    }
+    controller_power_with(run)
+}
+
+fn wifi_enabled() -> io::Result<bool> {
+    let interface = std::env::var_os("INTERFACE").ok_or_else(|| io::Error::other("Wi-Fi interface is missing while checking shared radio power"))?;
+    match std::fs::read_to_string(Path::new("/sys/class/net").join(interface).join("flags")) {
+        Ok(flags) => Ok(u32::from_str_radix(flags.trim().trim_start_matches("0x"), 16).map_err(io::Error::other)? & libc::IFF_UP as u32 != 0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn ensure_controller(cancellable: bool) -> io::Result<()> {
+    check_cancelled(cancellable)?;
     if Path::new("/sys/class/bluetooth/hci0").exists() {
         return Ok(());
     }
@@ -200,16 +242,31 @@ fn ensure_controller() -> io::Result<()> {
     if let Some(helper) = std::env::var_os("BOKHEIM_KOBO_WIFI_HELPER") {
         let interface = std::env::var_os("INTERFACE").ok_or_else(|| io::Error::other("Wi-Fi interface is missing while initializing Bluetooth"))?;
         let module = std::env::var_os("WIFI_MODULE").ok_or_else(|| io::Error::other("Wi-Fi driver is missing while initializing Bluetooth"))?;
-        let result = (|| {
-            run_external(Command::new("/bin/sh").env("INTERFACE", &interface).env("WIFI_MODULE", &module).arg(&helper).arg("off"), Duration::from_secs(15), "power-cycle Wi-Fi/Bluetooth radio")?;
-            run_external(Command::new("/bin/sh").env("INTERFACE", &interface).env("WIFI_MODULE", &module).arg(&helper).arg("on"), Duration::from_secs(15), "restore Wi-Fi/Bluetooth radio")
-        })();
+        let wifi_enabled = wifi_enabled()?;
+        let stopped = run_external(Command::new("/bin/sh").env("INTERFACE", &interface).env("WIFI_MODULE", &module).arg(&helper).arg("off"), Duration::from_secs(15), "power-cycle Wi-Fi/Bluetooth radio", cancellable);
+        if let Err(error) = check_cancelled(cancellable) {
+            // Sleep now owns recovery of the partially changed hardware.
+            // Do not turn it back on while sleep is waiting to turn it off.
+            crate::wifi::radio_changed();
+            return Err(error);
+        }
+        // A failed stop can still have removed supplicant or part of the
+        // driver stack. Always attempt restoration before reporting failure.
+        let restored = run_external(Command::new("/bin/sh").env("INTERFACE", &interface).env("WIFI_MODULE", &module).arg(&helper).arg(if wifi_enabled { "on" } else { "radio-on" }), Duration::from_secs(15), "restore Wi-Fi/Bluetooth radio", cancellable);
+        if stopped.is_err()
+            && let Err(error) = &restored
+        {
+            eprintln!("Kobo shared radio rollback failed: {error}");
+        }
         crate::wifi::radio_changed();
-        result?;
+        stopped.and(restored)?;
     }
 
+    check_cancelled(cancellable)?;
     let mut attach = Command::new("/sbin/rtk_hciattach")
         .args(["-n", "-s", "115200", "/dev/ttymxc1", "rtk_h5"])
+        .process_group(0)
+        .env_remove("LD_LIBRARY_PATH")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -217,22 +274,32 @@ fn ensure_controller() -> io::Result<()> {
         .map_err(|error| io::Error::new(error.kind(), format!("Could not initialize Bluetooth controller: {error}")))?;
 
     for _ in 0..40 {
+        if let Err(error) = check_cancelled(cancellable) {
+            kill_group(&mut attach);
+            return Err(error);
+        }
         if Path::new("/sys/class/bluetooth/hci0").exists() {
-            let _ = run_external(Command::new("/bin/hciconfig").arg("hci0").arg("up"), Duration::from_secs(3), "bring Bluetooth controller up");
+            if let Err(error) = run_external(Command::new("/bin/hciconfig").arg("hci0").arg("up"), Duration::from_secs(3), "bring Bluetooth controller up", cancellable) {
+                kill_group(&mut attach);
+                return Err(error);
+            }
             return Ok(());
         }
-        if attach.try_wait()?.is_some() {
-            return Err(io::Error::other("Bluetooth controller initialization failed; see rtk_hciattach"));
+        match attach.try_wait() {
+            Ok(None) => {}
+            result => {
+                kill_group(&mut attach);
+                return Err(result.err().unwrap_or_else(|| io::Error::other("Bluetooth controller initialization failed; see rtk_hciattach")));
+            }
         }
         thread::sleep(Duration::from_millis(100));
     }
-    let _ = attach.kill();
-    let _ = attach.wait();
+    kill_group(&mut attach);
     Err(io::Error::new(io::ErrorKind::TimedOut, "Bluetooth controller initialization timed out"))
 }
 
-fn scan() -> io::Result<Status> {
-    let current = status()?;
+fn scan(cancellable: bool) -> io::Result<Status> {
+    let current = status(cancellable)?;
     if !current.available {
         return Ok(current);
     }
@@ -243,19 +310,20 @@ fn scan() -> io::Result<Status> {
     // bluetoothctl keeps the scan command open while discovery is active.
     // Its own timeout lets the command finish cleanly, after which the
     // adapter's device cache can be read with `devices`.
-    let _ = run_with_timeout(&["--timeout", "8", "scan", "on"], SCAN_TIMEOUT)?;
-    status()
+    let _ = run_with_timeout(&["--timeout", "8", "scan", "on"], SCAN_TIMEOUT, cancellable)?;
+    status(cancellable)
 }
 
-fn list_devices() -> io::Result<Vec<Device>> {
-    let output = run(&["devices"])?;
+fn list_devices(cancellable: bool) -> io::Result<Vec<Device>> {
+    let output = run_with_timeout(&["devices"], TIMEOUT, cancellable)?;
     let mut devices = parse_devices(&String::from_utf8_lossy(&output));
     for device in &mut devices {
+        check_cancelled(cancellable)?;
         // This firmware's bluetoothctl does not support the newer
         // `devices Connected` filter and returns "Too many arguments".
         // Query each known device through the BlueZ Device API exposed by
         // `info`, which also works for devices paired before Bokheim started.
-        device.connected = run_with_timeout(&["info", &device.address], INFO_TIMEOUT).ok().map(|output| String::from_utf8_lossy(&output).lines().any(|line| line.trim() == "Connected: yes")).unwrap_or(false);
+        device.connected = run_with_timeout(&["info", &device.address], INFO_TIMEOUT, cancellable).ok().map(|output| String::from_utf8_lossy(&output).lines().any(|line| line.trim() == "Connected: yes")).unwrap_or(false);
     }
     devices.sort_by(|left, right| right.connected.cmp(&left.connected).then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase())).then_with(|| left.address.cmp(&right.address)));
     Ok(devices)
@@ -295,38 +363,70 @@ fn controller_address(line: &str) -> Option<String> {
 }
 
 fn run(arguments: &[&str]) -> io::Result<Vec<u8>> {
-    run_with_timeout(arguments, TIMEOUT)
+    run_with_timeout(arguments, TIMEOUT, false)
 }
 
-fn run_external(command: &mut Command, timeout: Duration, operation: &str) -> io::Result<()> {
-    let mut child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|error| io::Error::new(error.kind(), format!("Could not start {operation}: {error}")))?;
+fn check_cancelled(cancellable: bool) -> io::Result<()> {
+    if cancellable && (radio::sleep_requested() || SLEEPING.load(Ordering::Acquire)) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "Bluetooth operation interrupted for sleep"));
+    }
+    Ok(())
+}
+
+fn run_external(command: &mut Command, timeout: Duration, operation: &str, cancellable: bool) -> io::Result<()> {
+    check_cancelled(cancellable)?;
+    let mut child = command.process_group(0).env_remove("LD_LIBRARY_PATH").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|error| io::Error::new(error.kind(), format!("Could not start {operation}: {error}")))?;
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(status) = child.try_wait()? {
-            if status.success() {
-                return Ok(());
+        if let Err(error) = check_cancelled(cancellable) {
+            kill_group(&mut child);
+            return Err(error);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                kill_group(&mut child);
+                if status.success() {
+                    return Ok(());
+                }
+                return Err(io::Error::other(format!("{operation} failed ({status})")));
             }
-            return Err(io::Error::other(format!("{operation} failed ({status})")));
+            Ok(None) => {}
+            Err(error) => {
+                kill_group(&mut child);
+                return Err(error);
+            }
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_group(&mut child);
             return Err(io::Error::new(io::ErrorKind::TimedOut, format!("{operation} timed out")));
         }
         thread::sleep(Duration::from_millis(20));
     }
 }
 
-fn run_with_timeout(arguments: &[&str], timeout: Duration) -> io::Result<Vec<u8>> {
-    let mut child = Command::new(COMMAND).args(arguments).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|error| io::Error::new(error.kind(), format!("Bluetooth control unavailable: {error}")))?;
+fn run_with_timeout(arguments: &[&str], timeout: Duration, cancellable: bool) -> io::Result<Vec<u8>> {
+    check_cancelled(cancellable)?;
+    let mut child = Command::new(COMMAND).args(arguments).process_group(0).env_remove("LD_LIBRARY_PATH").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|error| io::Error::new(error.kind(), format!("Bluetooth control unavailable: {error}")))?;
     let deadline = Instant::now() + timeout;
     loop {
-        if child.try_wait()?.is_some() {
+        if let Err(error) = check_cancelled(cancellable) {
+            kill_group(&mut child);
+            return Err(error);
+        }
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                kill_group(&mut child);
+                return Err(error);
+            }
+        };
+        if let Some(status) = status {
+            kill_group(&mut child);
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             child.stdout.take().map(|mut pipe| pipe.read_to_end(&mut stdout));
             child.stderr.take().map(|mut pipe| pipe.read_to_end(&mut stderr));
-            if child.wait()?.success() {
+            if status.success() {
                 return Ok(stdout);
             }
             // bluetoothctl commonly writes connection failures to stdout on
@@ -340,8 +440,7 @@ fn run_with_timeout(arguments: &[&str], timeout: Duration) -> io::Result<Vec<u8>
             return Err(io::Error::other(if detail.is_empty() { format!("Bluetooth command failed: bluetoothctl {}", arguments.join(" ")) } else { detail }));
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_group(&mut child);
             return Err(io::Error::new(io::ErrorKind::TimedOut, "Bluetooth command timed out"));
         }
         thread::sleep(Duration::from_millis(20));

@@ -1,5 +1,5 @@
 -- name: activity_set_last_successful_sync_at!
--- param: value: &str
+-- param: value: i64
 INSERT INTO sync_metadata(singleton, last_successful_sync_at) VALUES (1, :value)
 ON CONFLICT(singleton) DO UPDATE SET last_successful_sync_at = excluded.last_successful_sync_at;
 

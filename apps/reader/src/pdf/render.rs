@@ -16,7 +16,7 @@ use gpui_component::menu::{ContextMenuExt, OpenContextMenu};
 use gpui_component::tree::TreeState;
 use library_backend::LibraryClient;
 use library_model::BookLocator;
-use pdf_view_gpui::{PdfSelectionSnapshot, PdfView};
+use pdf_view_gpui::{PdfDocumentSelectionSnapshot, PdfView};
 use ui_components as components;
 
 use std::rc::Rc;
@@ -152,7 +152,6 @@ impl Render for PdfReaderView {
             pdf.set_selection_handles_visible(selection_handles_visible, cx);
             pdf.set_reading_ruler(ruler_style, ruler_lines, theme.accent, cx);
             pdf.set_page_gap(page_gap, cx);
-            pdf.set_available_width((available_width - 2.0 * horizontal_margin).max(1.0), cx);
         });
         let (visible_page_range, visible_column_count) = {
             let pdf = self.pdf.read(cx);
@@ -191,7 +190,7 @@ impl Render for PdfReaderView {
         };
         let mut body = components::reader_document_body().id("pdf-reader-document-surface").child(pdf_document);
         if let Some(annotation) = self.marks.selected().cloned() {
-            let viewport = window.viewport_size();
+            let viewport = window.input_viewport().size;
             // The passage as the page columns drew it, so the panel is placed
             // clear of the whole highlight rather than of the pointer that made
             // it — which is on its last line, and would leave the panel over
@@ -205,7 +204,16 @@ impl Render for PdfReaderView {
             let mut insets = window.insets().effective();
             insets.bottom = (insets.bottom - px(dock_height)).max(px(0.0));
             let toolbar_height = if mobile { 0.0 } else { components::reader_toolbar_size_px(window) };
-            let geometry = annotation_editor::geometry(passage, f32::from(viewport.width), f32::from(viewport.height) - dock_height, toc_width, toolbar_height, visible_column_count, insets, f32::from(window.rem_size()) * components::ANNOTATION_EDITOR_WIDTH_REM);
+            let geometry = annotation_editor::geometry(
+                passage,
+                f32::from(viewport.width),
+                f32::from(viewport.height) - dock_height,
+                toc_width,
+                toolbar_height,
+                visible_column_count,
+                insets,
+                f32::from(window.rem_size()) * components::ANNOTATION_EDITOR_WIDTH_REM,
+            );
             body = body.child(self.render_annotation_popup(annotation, geometry, window, cx));
         }
         self.chrome.sync_system_bars(chrome_visible, cx);
@@ -295,11 +303,11 @@ pub(crate) fn bind_pdf_keys(cx: &mut App) {
 }
 
 impl PdfReaderView {
-    fn lookup_selection(&mut self, selection: PdfSelectionSnapshot, window: &mut Window, cx: &mut Context<Self>) {
+    fn lookup_selection(&mut self, selection: PdfDocumentSelectionSnapshot, window: &mut Window, cx: &mut Context<Self>) {
         self.open_selection_popup(selection, false, window, cx);
     }
 
-    fn open_selection_popup(&mut self, selection: PdfSelectionSnapshot, translate: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_selection_popup(&mut self, selection: PdfDocumentSelectionSnapshot, translate: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !translate && !can_lookup(&selection.text) {
             return;
         }

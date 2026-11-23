@@ -1,72 +1,25 @@
--- Asset transfer pages and guarded settlements. The database owns pending work.
+-- Asset transfer pages. The database owns pending work.
 
 -- name: transfer_upload_intent?
 -- param: content_hash: &BookId
 SELECT upload_id, upload_size, upload_checksum FROM book_transfer WHERE content_hash=:content_hash AND upload_id IS NOT NULL;
 
--- name: transfer_matching_manifest?
--- param: intents: &str
-SELECT MIN(requested.key) AS request_index
-FROM json_each(:intents) requested
-JOIN book_transfer transfer ON transfer.content_hash=unhex(json_extract(requested.value,'$[0]'))
-WHERE transfer.upload_id=json_extract(requested.value,'$[1]')
-  AND transfer.upload_size=json_extract(requested.value,'$[2]')
-  AND transfer.upload_checksum IS unhex(json_extract(requested.value,'$[3]'))
-GROUP BY transfer.content_hash ORDER BY request_index;
+-- name: transfer_upload_snapshot_intent?
+-- param: content_hash: &BookId
+SELECT upload_id, upload_size, upload_checksum
+FROM book_transfer WHERE content_hash=:content_hash AND upload_id IS NOT NULL;
 
--- name: transfer_record_manifest_books!
--- param: intents: &str
-INSERT INTO book_transfer(content_hash,server_has_book)
-SELECT b.content_hash,1 FROM json_each(:intents) requested
-JOIN book b ON b.content_hash=unhex(json_extract(requested.value,'$[0]'))
-WHERE true
-ON CONFLICT(content_hash) DO UPDATE SET server_has_book=1 WHERE book_transfer.server_has_book=0;
+-- name: transfer_download_metadata?
+-- param: content_hash: &BookId
+SELECT format,duration_ms,CAST(toc_json AS BLOB),CAST(tracks_json AS BLOB)
+FROM book WHERE content_hash=:content_hash AND deleted_at IS NULL;
 
--- name: transfer_complete_manifest!
--- param: intents: &str
-UPDATE book_transfer SET upload_id=NULL,upload_size=NULL
-WHERE (content_hash,upload_id) IN (
-    SELECT unhex(json_extract(value,'$[0]')),json_extract(value,'$[1]') FROM json_each(:intents)
-);
-
--- Hash-level transfer snapshot reads. Each query returns only rows for the
--- requested hashes; one-to-many values are grouped by the Rust assembler.
--- name: transfer_snapshot_versions?
--- param: hashes: &str
-SELECT b.content_hash, bd.dir_id, bd.file_name, bd.local_hash
-FROM json_each(:hashes) requested
-JOIN book b ON b.content_hash = unhex(requested.value)
-JOIN book_dir bd ON bd.book_row_id = b.row_id AND bd.deleted_at IS NULL
-WHERE b.deleted_at IS NULL
-ORDER BY b.content_hash, bd.dir_id, bd.file_name;
-
--- name: transfer_snapshot_intents?
--- param: hashes: &str
-SELECT transfer.content_hash, transfer.upload_id, transfer.upload_size, transfer.upload_checksum
-FROM json_each(:hashes) requested
-JOIN book_transfer transfer ON transfer.content_hash = unhex(requested.value)
-WHERE transfer.upload_id IS NOT NULL
-  AND NOT EXISTS(SELECT 1 FROM local_book_draft draft WHERE draft.content_hash=transfer.content_hash);
-
--- name: transfer_snapshot_projection_paths?
--- param: hashes: &str
--- Where each requested book was last materialized on disk.
-SELECT unhex(requested.value), projection.relative_path
-FROM json_each(:hashes) requested
-JOIN local_file_projection projection ON projection.content_hash = unhex(requested.value)
-ORDER BY requested.value;
-
--- name: transfer_snapshot_books?
--- param: hashes: &str
-SELECT b.content_hash,b.format,b.duration_ms,CAST(b.toc_json AS BLOB),CAST(b.tracks_json AS BLOB)
-FROM json_each(:hashes) requested JOIN book b ON b.content_hash=unhex(requested.value)
-WHERE b.deleted_at IS NULL;
-
--- name: transfer_snapshot_occupied_names?
--- param: directories: &str
+-- name: transfer_download_occupied_names?
+-- param: content_hash: &BookId
 SELECT occupied.dir_id,occupied.file_name
-FROM json_each(:directories) requested
-JOIN book_dir occupied ON occupied.dir_id=requested.value AND occupied.deleted_at IS NULL
+FROM book b JOIN book_dir placement ON placement.book_row_id=b.row_id
+JOIN book_dir occupied ON occupied.dir_id=placement.dir_id AND occupied.deleted_at IS NULL
+WHERE b.content_hash=:content_hash AND b.deleted_at IS NULL AND placement.deleted_at IS NULL
 ORDER BY occupied.dir_id,occupied.book_row_id;
 
 -- name: transfer_pending_book_uploads?
@@ -76,7 +29,6 @@ SELECT transfer.upload_id, transfer.content_hash, transfer.upload_size, transfer
 FROM book_transfer transfer
 JOIN book b ON b.content_hash = transfer.content_hash AND b.deleted_at IS NULL
 WHERE transfer.upload_id > :after AND transfer.upload_prepared = transfer.upload_id
-  AND NOT EXISTS(SELECT 1 FROM local_book_draft draft WHERE draft.content_hash=transfer.content_hash)
   AND EXISTS(SELECT 1 FROM book_dir bd WHERE bd.book_row_id = b.row_id AND bd.deleted_at IS NULL)
 ORDER BY transfer.upload_id LIMIT :limit;
 
@@ -87,14 +39,8 @@ ORDER BY transfer.upload_id LIMIT :limit;
 -- param: after: Option<&BookId>
 -- param: limit: i64
 SELECT content_hash FROM uploadable_covers
-WHERE NOT EXISTS(SELECT 1 FROM local_book_draft draft WHERE draft.content_hash=uploadable_covers.content_hash) AND content_hash > COALESCE(:after,X'')
+WHERE content_hash > COALESCE(:after,X'')
 ORDER BY content_hash LIMIT :limit;
-
--- name: transfer_complete_upload!
--- param: id: i64
--- param: content_hash: &BookId
-UPDATE book_transfer SET upload_id=NULL=NULL, upload_size=NULL
-WHERE content_hash=:content_hash AND upload_id=:id;
 
 -- name: pending_thumbnail_downloads?
 -- param: after: Option<&BookId>
@@ -233,7 +179,7 @@ WHERE book_transfer.cover_state IS NOT 'ready';
 
 -- name: asset_clear_downloaded_placements !
 -- param: content_hash: &SqlParam<'_>
-UPDATE book_dir SET is_downloaded=0,local_hash='',size_bytes=NULL WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash);
+UPDATE book_dir SET is_downloaded=0,local_hash=NULL,size_bytes=NULL WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash);
 
 -- name: asset_clear_book_paths !
 -- param: content_hash: &SqlParam<'_>

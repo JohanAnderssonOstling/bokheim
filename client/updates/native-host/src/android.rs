@@ -1,8 +1,8 @@
 //! Android owns APK replacement. This host owns the approved data transaction.
 //! The migration callback must run prepare_candidate in a fresh private process;
 //! it must return only after that process has exited and all SQLite handles close.
-use update_client::UpdateError;
 use super::*;
+use update_client::UpdateError;
 
 #[derive(Clone, Serialize)]
 pub struct InstallRequest {
@@ -139,6 +139,7 @@ mod tests {
         digest::{SHA256, digest},
         signature::{Ed25519KeyPair, KeyPair},
     };
+    use subject_projection::runtime_format::{DOWNLOAD_FORMATS, FORMAT_VERSION};
     use update_client::{ApplicationRelease, Artifact, Manifest, SIGNATURE_CONTEXT, SignedManifest};
 
     fn hex(bytes: &[u8]) -> String {
@@ -178,7 +179,7 @@ mod tests {
                     version: "2.0.0".parse().unwrap(),
                     name: "Test".into(),
                     schema_version: library_database::LIBRARY_SCHEMA_VERSION as u32,
-                    taxonomy_format_versions: vec![1],
+                    taxonomy_format_versions: DOWNLOAD_FORMATS.to_vec(),
                     artifacts: [("android-aarch64-apk".into(), Artifact { url: "https://example.org/releases/2/app.apk".into(), bytes: 3, sha256: hex(digest(&SHA256, b"apk").as_ref()) })].into(),
                 }),
             };
@@ -225,7 +226,7 @@ mod tests {
         use update_client::TaxonomyRelease;
 
         let f = Fixture::new();
-        let snapshot = f.dir.path().join("taxonomy-source.sqlite3");
+        let snapshot = f.dir.path().join("taxonomy-runtime.sqlite3");
         activation::copy_file(&subject_projection::bundled::path().unwrap(), &snapshot).unwrap();
         let release = subject_projection::bundled::RELEASE_ID + 1;
         let db = rusqlite::Connection::open(&snapshot).unwrap();
@@ -242,7 +243,7 @@ mod tests {
             catalog: None,
             taxonomy: Some(TaxonomyRelease {
                 release_id: release,
-                format_version: 1,
+                format_version: FORMAT_VERSION,
                 minimum_application_version: "1.0.0".parse().unwrap(),
                 minimum_schema_version: library_database::LIBRARY_SCHEMA_VERSION as u32,
                 artifact: Artifact { url: "https://example.org/taxonomy".into(), bytes: bytes.len() as u64, sha256: hex(digest(&SHA256, &bytes).as_ref()) },
@@ -274,7 +275,7 @@ mod tests {
         host.prepare().unwrap();
         let active = active(&host.root).unwrap().unwrap();
         assert_eq!(active.release, release);
-        assert_eq!(subject_projection::installed::metadata(&active.path).unwrap(), (release, 1));
+        assert_eq!(subject_projection::installed::metadata(&active.path).unwrap(), (release, FORMAT_VERSION));
         assert!(host.coordinator.record().approved.is_none());
         assert!(Journal::load(&host.root).unwrap().is_none());
         assert_eq!(fs::read(&library).unwrap(), b"unrelated library");
@@ -334,7 +335,7 @@ mod tests {
         assert!(trial);
         rusqlite::Connection::open(f.dir.path().join("app-state-v1.sqlite3")).unwrap().execute_batch("UPDATE setting SET v='trial change'").unwrap();
         let root = f.dir.path().join("updates");
-        let trial_taxonomy = ActiveTaxonomy { path: root.join("uncommitted-taxonomy.sqlite3"), release: 99 };
+        let trial_taxonomy = Selection::new(Reference { path: root.join("uncommitted-taxonomy.sqlite3").to_str().unwrap().into(), release: 99, format: subject_projection::runtime_format::FORMAT_VERSION, artifact: None });
         activation::write_json(&root.join("active-taxonomy.json"), &Some(trial_taxonomy)).unwrap();
         drop(host);
         let (host, trial) = f.startup("2.0.0");

@@ -13,15 +13,6 @@ use std::io::SeekFrom;
 use std::io::Cursor;
 use std::io::{Read, Seek};
 
-/// Covers are displayed at `LARGE_BOOK_COVER_WIDTH_PX` *logical* pixels, so the
-/// stored asset has to carry the device pixel ratio too: 200 logical at DPR 3
-/// is 600 real pixels. Anything smaller is upscaled on HiDPI displays and on
-/// phones.
-///
-/// The 600px asset remains the synchronized source of truth. The 300px browse
-/// bucket is cached on the server and device, and can be rebuilt from it.
-pub const BROWSE_THUMBNAIL_WIDTH: u32 = 300;
-pub const THUMBNAIL_WIDTH: u32 = 600;
 const MAX_COVER_IMAGE_BYTES: usize = 24 * 1024 * 1024;
 const MAX_COVER_IMAGE_PIXELS: u64 = 24_000_000;
 const MAX_COVER_IMAGE_DIMENSION: u32 = 20_000;
@@ -35,9 +26,9 @@ pub type ThumbnailResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>
 mod card;
 #[cfg(all(test, feature = "book-extractors"))]
 mod format_tests;
-pub use card::{card_thumbnail_geometry, card_thumbnail_suffix, encode_card_thumbnail_at_width, CardThumbnailGeometry, CARD_MAX_HORIZONTAL_CROP, CARD_MAX_VERTICAL_STRETCH, CARD_TARGET_HEIGHT_RATIO, CARD_THUMBNAIL_VERSION};
+pub use card::{card_thumbnail_geometry, encode_card_thumbnail_at_width, CardThumbnailGeometry, CARD_MAX_HORIZONTAL_CROP, CARD_MAX_VERTICAL_STRETCH, CARD_TARGET_HEIGHT_RATIO};
 
-pub use thumbnail_contract::ThumbnailVersions;
+pub use thumbnail_contract::{card_thumbnail_suffix, ThumbnailVersions, BROWSE_THUMBNAIL_WIDTH, CARD_THUMBNAIL_VERSION, THUMBNAIL_WIDTH};
 
 /// Build each thumbnail independently from the decoded original.
 pub fn thumbnail_versions_from_image(image: &RgbImage) -> ThumbnailResult<ThumbnailVersions> {

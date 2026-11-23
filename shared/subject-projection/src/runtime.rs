@@ -1,12 +1,11 @@
 use super::lcc::{canonical_lcc_notation, compare_lcc_key, lcc_match_keys, parse_lcc_call};
-use super::runtime_index::{build_runtime, LccSelector};
-use super::runtime_index::{compare_cutter_endpoint, compare_upper_cutters, cutter_components, UnifiedTaxonomyRuntime};
-pub use super::runtime_index::{lcc_subject_sort_orders, UnifiedConceptDefinition, UnifiedConceptRoute};
-use super::{compact_whitespace, DDC_SYSTEM_ID, LCC_SYSTEM_ID};
-use crate::sqlite_matcher::SqliteTaxonomy;
+use super::runtime_index::{LccSelector, build_runtime};
+pub use super::runtime_index::{UnifiedConceptDefinition, UnifiedConceptRoute, lcc_subject_sort_orders};
+use super::runtime_index::{UnifiedTaxonomyRuntime, compare_cutter_endpoint, compare_upper_cutters, cutter_components};
+use super::{DDC_SYSTEM_ID, LCC_SYSTEM_ID, compact_whitespace};
 use crate::LccMatchReport;
+use crate::sqlite_matcher::SqliteTaxonomy;
 use rusqlite::Connection;
-use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
@@ -17,26 +16,38 @@ pub const BUNDLED_UNIFIED_TAXONOMY_REVISION_ID: &str = include_str!(concat!(env!
 
 static RUNTIME: OnceLock<Mutex<SqliteTaxonomy>> = OnceLock::new();
 
-#[derive(Deserialize)]
-struct ReviewedPathAliases {
-    aliases: Vec<ReviewedPathAlias>,
+/// Canonical navigation identities and edges, without materialized display paths.
+pub struct UnifiedTaxonomyNavigation {
+    pub revision_id: String,
+    /// Every navigable identity has an entry, including roots with no parents.
+    pub parents: BTreeMap<i64, BTreeSet<i64>>,
+    /// Identities with at least one top-level navigation route.
+    pub roots: BTreeSet<i64>,
 }
 
-#[derive(Deserialize)]
-struct ReviewedPathAlias {
-    path: String,
-    concept_id: i64,
+impl UnifiedTaxonomyNavigation {
+    pub fn ancestors_including_self(&self, concept_id: i64) -> BTreeSet<i64> {
+        let mut ancestors = BTreeSet::new();
+        let mut pending = vec![concept_id];
+        while let Some(id) = pending.pop() {
+            if ancestors.insert(id) {
+                if let Some(parents) = self.parents.get(&id) {
+                    pending.extend(parents);
+                }
+            }
+        }
+        ancestors
+    }
 }
 
-pub(super) fn reviewed_path_aliases() -> &'static BTreeMap<String, i64> {
+#[cfg(test)]
+fn reviewed_path_aliases() -> &'static BTreeMap<String, i64> {
     static ALIASES: OnceLock<BTreeMap<String, i64>> = OnceLock::new();
     ALIASES.get_or_init(|| {
-        let reviewed: ReviewedPathAliases = serde_json::from_str(include_str!("../data/reviewed-literature-path-aliases.json")).expect("reviewed path aliases must be valid");
-        let mut aliases = BTreeMap::new();
-        for alias in reviewed.aliases {
-            assert!(aliases.insert(alias.path, alias.concept_id).is_none(), "reviewed path aliases must be unique");
-        }
-        aliases
+        let path = crate::installed::path().expect("selected runtime policy reference");
+        let db = crate::installed::open_read_only(&path).expect("open bundled runtime policy");
+        let mut statement = db.prepare("SELECT path,concept_id FROM taxonomy_path_alias").expect("prepare reviewed taxonomy aliases");
+        statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).expect("read reviewed taxonomy aliases").collect::<Result<_, _>>().expect("valid reviewed taxonomy aliases")
     })
 }
 
@@ -50,7 +61,8 @@ fn concept_for_path(runtime: &UnifiedTaxonomyRuntime, path: &str) -> Option<i64>
 
 /// Retired IDs can have the same reviewed redirects as former display paths.
 /// An ID still present in an older selected snapshot keeps its original meaning.
-pub(super) fn reviewed_concept_reference(path: &str, mut contains: impl FnMut(i64) -> bool) -> Option<i64> {
+#[cfg(test)]
+fn reviewed_concept_reference(path: &str, mut contains: impl FnMut(i64) -> bool) -> Option<i64> {
     if let Some(identity) = path.strip_prefix("concept:").and_then(|value| value.parse::<i64>().ok()) {
         if contains(identity) {
             return Some(identity);
@@ -139,6 +151,10 @@ pub(crate) fn install_from_connection(db: Connection) -> Result<(), String> {
     install_runtime(SqliteTaxonomy::from_connection(db)?)
 }
 
+pub(super) fn source_heading_policy() -> String {
+    current().policy("source_headings")
+}
+
 pub fn unified_taxonomy_revision_id() -> String {
     current().revision_id.clone()
 }
@@ -152,7 +168,7 @@ pub fn loaded_unified_taxonomy_revision_id() -> Option<String> {
 pub fn unified_subject_paths(system_id: &str, code: &str) -> Vec<String> {
     let runtime = current();
     if system_id == crate::UNIFIED_SYSTEM_ID {
-        if runtime.find_path(code).is_some() {
+        if !code.starts_with("concept:") && runtime.find_path(code).is_some() {
             return vec![code.to_owned()];
         }
         return runtime.concept_for_path(code).map(|id| runtime.paths_for_concept(id)).unwrap_or_default();
@@ -160,12 +176,39 @@ pub fn unified_subject_paths(system_id: &str, code: &str) -> Vec<String> {
     matching_concepts(&*runtime, system_id, code).into_iter().flat_map(|id| runtime.paths_for_concept(id)).collect::<BTreeSet<_>>().into_iter().collect()
 }
 
-pub(super) fn resolved_subject_concepts(system_id: &str, code: &str) -> BTreeSet<i64> {
+/// Resolve source evidence directly to identities without constructing display paths.
+/// Matched concepts can lack canonical navigation routes; navigation consumers
+/// must check route availability before presenting them.
+pub fn unified_subject_concept_ids(system_id: &str, code: &str) -> BTreeSet<i64> {
     let runtime = current();
     if system_id == crate::UNIFIED_SYSTEM_ID {
         return runtime.concept_for_path(code).into_iter().collect();
     }
     matching_concepts(&*runtime, system_id, code)
+}
+
+/// Whether source evidence resolves to any current navigation route.
+pub fn has_unified_subjects(system_id: &str, code: &str) -> bool {
+    let runtime = current();
+    if system_id == crate::UNIFIED_SYSTEM_ID {
+        return runtime.concept_for_path(code).is_some();
+    }
+    matching_concepts(&*runtime, system_id, code).into_iter().any(|id| runtime.contains_concept(id))
+}
+
+/// Current navigation routes as root-to-leaf concept-ID sequences.
+pub fn unified_subject_routes(system_id: &str, code: &str) -> Vec<Vec<i64>> {
+    let runtime = current();
+    let concepts = if system_id == crate::UNIFIED_SYSTEM_ID { runtime.concept_for_path(code).into_iter().collect() } else { matching_concepts(&*runtime, system_id, code) };
+    runtime.concept_routes(&concepts)
+}
+
+pub(super) fn has_usable_subjects(system_id: &str, code: &str) -> bool {
+    let runtime = current();
+    if system_id == crate::UNIFIED_SYSTEM_ID {
+        return runtime.concept_for_path(code).is_some_and(|id| runtime.contains_usable_concept(id));
+    }
+    matching_concepts(&*runtime, system_id, code).into_iter().any(|id| runtime.contains_usable_concept(id))
 }
 
 /// Remove only assigned ancestors of other assignments. Sibling branches and
@@ -192,15 +235,7 @@ fn has_exact_source_code(runtime: &impl MatchSource, system_id: &str, code: &str
 /// third distinguishes branches such as Classical Greek & Latin Literatures
 /// from Romance-Language Literatures.
 pub fn unified_subject_similarity_keys(system_id: &str, code: &str) -> Vec<String> {
-    unified_subject_paths(system_id, code)
-        .into_iter()
-        .filter_map(|path| {
-            let components = path.split(" / ").take(3).collect::<Vec<_>>();
-            (components.len() == 3).then(|| components.join(" / "))
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+    unified_subject_routes(system_id, code).into_iter().filter(|route| route.len() >= 3).map(|route| format!("concept:{}:{}:{}", route[0], route[1], route[2])).collect::<BTreeSet<_>>().into_iter().collect()
 }
 
 /// Returns the ID assigned in the immutable taxonomy; unknown paths have no ID.
@@ -208,8 +243,25 @@ pub fn unified_concept_id(path: &str) -> Option<i64> {
     current().concept_for_path(path)
 }
 
+/// Resolve stored catalog identities even when their concepts have no owned display route.
+pub fn resolve_concept_identity(id: i64) -> Option<i64> {
+    current().reference_identity(&format!("concept:{id}"))
+}
+
+pub fn unified_concept_exists(concept_id: i64) -> bool {
+    current().contains_concept(concept_id)
+}
+
+pub fn unified_concept_paths(concept_id: i64) -> Vec<String> {
+    current().paths_for_concept(concept_id)
+}
+
 pub fn unified_taxonomy_routes() -> Vec<UnifiedConceptRoute> {
     current().routes()
+}
+
+pub fn unified_taxonomy_navigation() -> UnifiedTaxonomyNavigation {
+    current().navigation()
 }
 /// Whether the class number has numeric coverage in the local taxonomy.
 /// A bare letter prefix (or a range spanning different subclasses) cannot
@@ -255,11 +307,7 @@ pub(super) fn matching_concepts(runtime: &impl MatchSource, system_id: &str, cod
 
 fn strict_matching_concepts(runtime: &impl MatchSource, system_id: &str, code: &str) -> BTreeSet<i64> {
     let candidates = matching_candidates(runtime, system_id, code);
-    if candidates.len() > 1 {
-        BTreeSet::new()
-    } else {
-        candidates
-    }
+    if candidates.len() > 1 { BTreeSet::new() } else { candidates }
 }
 
 fn matching_candidates(runtime: &impl MatchSource, system_id: &str, code: &str) -> BTreeSet<i64> {
@@ -389,7 +437,7 @@ fn default_runtime() -> SqliteTaxonomy {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 fn default_concepts() -> Vec<UnifiedConceptDefinition> {
-    crate::taxonomy_sqlite::read_bundled_unified_taxonomy().expect("bundled unified taxonomy SQLite must be readable")
+    crate::taxonomy_sqlite::read_unified_taxonomy_sqlite(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/data/unified-taxonomy-v2.sqlite3"))).expect("authoring taxonomy fixture must be readable")
 }
 
 #[cfg(test)]
@@ -504,7 +552,7 @@ mod tests {
     fn sqlite_matches_compiled_taxonomy_selectors_ranges_and_navigation() {
         let rebuilt = build_runtime(default_concepts()).expect("compile bundled definitions");
         let sqlite = default_runtime();
-        assert_eq!(sqlite.revision_id, rebuilt.revision_id);
+        assert_eq!(sqlite.revision_id, BUNDLED_UNIFIED_TAXONOMY_REVISION_ID);
         assert_eq!(sqlite.routes(), rebuilt.routes.values().collect::<Vec<_>>());
         let mut checked = 0;
         for (system, index) in rebuilt.selectors.iter() {
@@ -671,7 +719,6 @@ mod tests {
         eprintln!("Compared {checked} numeric coverage probes across {} subclasses", index.lcc_subclasses.len());
     }
 
-    #[cfg(feature = "authoritative-taxonomy")]
     #[test]
     fn bundled_computer_science_calls_do_not_fall_through_to_mathematics() {
         let taxonomy = UnifiedTaxonomy::from_concepts(default_concepts()).unwrap();

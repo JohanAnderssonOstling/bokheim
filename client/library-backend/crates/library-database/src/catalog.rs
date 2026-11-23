@@ -26,7 +26,7 @@ pub fn import_record(hash: BookId, format: BookFormat) -> Result<Option<BookReco
 }
 
 /// The latest catalog snapshot layout.
-pub const FORMAT_VERSION: u32 = 12;
+pub const FORMAT_VERSION: u32 = 13;
 
 /// One catalog book, with what browsing filters, sorts and shows, and the
 /// record a library adding it records as its enrichment answer.
@@ -90,11 +90,13 @@ fn read_sources_for(db: &Connection, key: &[u8; 32]) -> Result<Vec<String>, Data
 }
 
 fn visit_sources(db: &Connection, key: Option<&[u8; 32]>, mut receive: impl FnMut([u8; 32], String)) -> Result<(), DatabaseError> {
-    let mut statement = db.prepare("SELECT book.key,name FROM book_source credit JOIN book ON book.row_id=credit.book_row_id JOIN source ON source.id=credit.source_id WHERE (?1 IS NULL OR book.key=?1)
-        UNION SELECT entry_key,name FROM external_book JOIN source ON source.id=external_book.source_id WHERE (?1 IS NULL OR entry_key=?1)
-        UNION SELECT book.key,source.name FROM source_entry_source credit JOIN source_entry entry USING(source_id,entry_id) JOIN book ON book.row_id=entry.hosted_row_id JOIN source ON source.id=credit.original_source_id WHERE (?1 IS NULL OR book.key=?1)
-        UNION SELECT book.key,source.name FROM source_entry_source credit JOIN source_entry entry USING(source_id,entry_id) JOIN book ON book.row_id=entry.external_row_id JOIN source ON source.id=credit.original_source_id WHERE (?1 IS NULL OR book.key=?1)
-        ORDER BY 1,2")?;
+    let book_filter = if key.is_some() { "book.key=?1" } else { "?1 IS NULL" };
+    let external_filter = if key.is_some() { "entry_key=?1" } else { "?1 IS NULL" };
+    let mut statement = db.prepare_cached(&format!("SELECT book.key,name FROM book_source credit JOIN book ON book.row_id=credit.book_row_id JOIN source ON source.id=credit.source_id WHERE {book_filter}
+        UNION SELECT entry_key,name FROM external_book JOIN source ON source.id=external_book.source_id WHERE {external_filter}
+        UNION SELECT book.key,source.name FROM source_entry_source credit JOIN source_entry entry USING(source_id,entry_id) JOIN book ON book.row_id=entry.hosted_row_id JOIN source ON source.id=credit.original_source_id WHERE {book_filter}
+        UNION SELECT book.key,source.name FROM source_entry_source credit JOIN source_entry entry USING(source_id,entry_id) JOIN book ON book.row_id=entry.external_row_id JOIN source ON source.id=credit.original_source_id WHERE {book_filter}
+        ORDER BY 1,2"))?;
     for row in statement.query_map([key.map(|key| key.as_slice())], |row| Ok((row.get::<_, [u8; 32]>(0)?, row.get::<_, String>(1)?)))? {
         let (identity, source) = row?;
         receive(identity, source);
@@ -200,13 +202,28 @@ fn normalize_author_list(book: &mut CatalogBook, named: &BTreeMap<String, Contri
 pub fn store(image: &[u8], path: &Path, expected: (u64, u32)) -> Result<(), DatabaseError> {
     let mut source = Connection::open_in_memory()?;
     source.deserialize_read_exact("main", image, image.len(), true)?;
-    if !matches!(expected.1, 11 | FORMAT_VERSION) {
+    if expected.1 != FORMAT_VERSION {
         return Err(DatabaseError::message("unsupported catalog snapshot format"));
     }
     if release(&source)? != expected {
         return Err(DatabaseError::message("catalog release differs from the signed manifest"));
     }
     storage::store_snapshot(&source, path)
+}
+
+/// A catalog may arrive before its required taxonomy. Retain it without changing live rows.
+pub fn stage(image: &[u8], path: &Path, expected: (u64, u32)) -> Result<bool, DatabaseError> {
+    let mut source = Connection::open_in_memory()?;
+    source.deserialize_read_exact("main", image, image.len(), true)?;
+    if release(&source)? != expected || expected.1 != FORMAT_VERSION {
+        return Err(DatabaseError::message("catalog differs from the signed release"));
+    }
+    storage::stage_snapshot(&source, path)?;
+    storage::apply_pending(path)
+}
+
+pub fn apply_pending(path: &Path) -> Result<bool, DatabaseError> {
+    storage::apply_pending(path)
 }
 
 fn release(db: &Connection) -> rusqlite::Result<(u64, u32)> {

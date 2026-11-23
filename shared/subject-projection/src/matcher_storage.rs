@@ -1,11 +1,12 @@
 //! Prepare indexed SQLite lookups once, when packaging or installing a taxonomy.
 //! This module also runs in build.rs; clients never deserialize the compiled matcher.
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::collections::{BTreeMap, BTreeSet};
 use subject_taxonomy::lcc::compare_lcc_key;
 use subject_taxonomy::runtime_index::{SelectorIndex, UnifiedTaxonomyRuntime};
 
-pub const UNIFIED_MATCHER_VERSION: i64 = 151;
+/// Prepared SQLite index format, independent of subject projection policy.
+pub const UNIFIED_MATCHER_FORMAT_VERSION: i64 = 151;
 
 pub fn prepare(db: &Connection, runtime: &UnifiedTaxonomyRuntime) -> Result<(), String> {
     // Installation must not fsync once per selector. Reuse a caller's existing
@@ -59,7 +60,7 @@ pub fn prepare(db: &Connection, runtime: &UnifiedTaxonomyRuntime) -> Result<(), 
         route_insert.execute(params![id as i64, route.concept_id, parent, path_hash(&route.path)]).map_err(|e| e.to_string())?;
         sort_order.execute(params![route.concept_id, route.sort_order]).map_err(|e| e.to_string())?;
     }
-    db.execute("INSERT INTO taxonomy_meta(key,value) VALUES('client_revision',?1),('client_matcher_version',?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![runtime.revision_id, UNIFIED_MATCHER_VERSION.to_string()])
+    db.execute("INSERT INTO taxonomy_meta(key,value) VALUES('client_revision',?1),('client_matcher_version',?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![runtime.revision_id, UNIFIED_MATCHER_FORMAT_VERSION.to_string()])
         .map_err(|e| e.to_string())?;
     if let Some(transaction) = transaction {
         transaction.commit().map_err(|e| e.to_string())?;

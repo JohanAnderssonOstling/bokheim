@@ -6,11 +6,11 @@ use library_management::account::account_error;
 use library_management::management::StorageCopyJournal;
 use library_registry::LibraryEntry;
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use sync_common::ROOT_DIR_ID;
-use sync_common::{storage::LibraryStorage, LibraryId};
+use sync_common::{LibraryId, storage::LibraryStorage};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const LOCAL_EPUB: &[u8] = include_bytes!("../../../../library-backend/tests/fixtures/cloud-cover.epub");
@@ -51,7 +51,7 @@ async fn cloud_storage_changes_preserve_identity_and_retry_failed_downloads() {
             let (status, extra_headers, body) = if method == "DELETE" {
                 server_deletions.fetch_add(1, Ordering::SeqCst);
                 let id = path.rsplit('/').next().unwrap().parse().unwrap();
-                ("200 OK", format!("Content-Type: {}\r\n", sync_common::transport::MEDIA_TYPE), sync_common::transport::encode(&sync_common::api::libraries::DeleteLibraryResponse { library_id: id }).unwrap())
+                ("200 OK", format!("Content-Type: {}\r\n", sync_common::http::MEDIA_TYPE), sync_common::http::encode(&sync_common::api::libraries::DeleteLibraryResponse { library_id: id }).unwrap())
             } else if method == "GET" && path == "/api/account/snapshot" {
                 let response = account_contract::AccountSnapshotResponse {
                     libraries: Vec::new(),
@@ -59,21 +59,21 @@ async fn cloud_storage_changes_preserve_identity_and_retry_failed_downloads() {
                     storage: account_contract::StorageUsageResponse { used_bytes: 0, reserved_bytes: 0, quota_bytes: u64::MAX },
                     library_storage: Vec::new(),
                 };
-                ("200 OK", format!("Content-Type: {}\r\n", sync_common::transport::MEDIA_TYPE), sync_common::transport::encode(&response).unwrap())
+                ("200 OK", format!("Content-Type: {}\r\n", sync_common::http::MEDIA_TYPE), sync_common::http::encode(&response).unwrap())
             } else if method == "POST" && path == "/api/libraries" {
-                let request: sync_common::api::libraries::LibraryNameRequest = sync_common::transport::decode(&request_body, 8 * 1024 * 1024).unwrap();
+                let request: sync_common::api::libraries::LibraryNameRequest = sync_common::http::decode(&request_body, 8 * 1024 * 1024).unwrap();
                 (
                     "200 OK",
-                    format!("Content-Type: {}\r\n", sync_common::transport::MEDIA_TYPE),
-                    sync_common::transport::encode(&sync_common::api::libraries::LibrarySummary { library_id: request.library_id, library_name: request.library_name, storage: request.storage }).unwrap(),
+                    format!("Content-Type: {}\r\n", sync_common::http::MEDIA_TYPE),
+                    sync_common::http::encode(&sync_common::api::libraries::LibrarySummary { library_id: request.library_id, library_name: request.library_name, storage: request.storage }).unwrap(),
                 )
             } else if method == "POST" && path == "/api/sync/exchange" {
-                let request: sync_common::SyncExchangeRequest = sync_common::transport::decode(&request_body, 8 * 1024 * 1024).unwrap();
+                let request: sync_common::SyncExchangeRequest = sync_common::http::decode(&request_body, 8 * 1024 * 1024).unwrap();
                 let response = sync_common::SyncExchangeResponse {
                     push: sync_common::PushMutationsResponse { rejected: Vec::new() },
                     pull: sync_common::PullStateResponse { mutations: Vec::new(), next_cursor: sync_common::SyncCursor { generation: Some(sync_common::SyncGeneration::from_u128(1)), ..request.cursor }, has_more: false },
                 };
-                ("200 OK", format!("Content-Type: {}\r\n", sync_common::transport::MEDIA_TYPE), sync_common::transport::encode(&response).unwrap())
+                ("200 OK", format!("Content-Type: {}\r\n", sync_common::http::MEDIA_TYPE), sync_common::http::encode(&response).unwrap())
             } else if server_fail_reads.load(Ordering::SeqCst) || method != "GET" || !path.contains("/blobs/") {
                 ("503 Service Unavailable", String::new(), Vec::new())
             } else {

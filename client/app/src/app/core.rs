@@ -1,10 +1,10 @@
 use super::data::{BackendContext, LibraryRegistry};
-use crate::executor::{BackendExecutor, BackendTask};
 use crate::AppStartupState;
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "kobo")))]
-use app_preferences::BrowsingPreferences;
+use crate::executor::BackendExecutor;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::executor::BackendTask;
 use app_preferences::PreferenceStore;
-use client_platform_runtime::{text_search, transfers};
+use client_platform_runtime::text_search;
 use cpu_host::CpuHost;
 use library_management::account::{Service as AccountService, SessionStorage};
 use library_management::management::{LibraryService, LibraryServiceConfig};
@@ -24,9 +24,6 @@ pub(crate) struct AppBackend {
     pub(super) registry: LibraryRegistry,
     pub(crate) preferences: Arc<PreferenceStore>,
     pub(crate) executor: BackendExecutor,
-    _text_index_cleanup: BackendTask<()>,
-    #[cfg(all(not(target_arch = "wasm32"), not(feature = "kobo")))]
-    _transfer_preferences: BackendTask<()>,
     /// Shared registration and opening policy for every library kind.
     pub(crate) library_service: Arc<LibraryService>,
     /// Coalesces requests for a full account-maintenance pass.
@@ -100,25 +97,7 @@ impl AppBackend {
             root_failures,
         });
         let preferences = context.preferences;
-        text_search::set_enabled(preferences.browsing().text_search());
-        transfers::POLICY.set_allow_metered(preferences.browsing().allow_metered_transfers());
-        #[cfg(all(not(target_arch = "wasm32"), not(feature = "kobo")))]
-        let transfer_preferences = transfers::mirror_allow_metered(&app_storage_root, preferences.subscribe_browsing(), BrowsingPreferences::allow_metered_transfers, &executor).map_err(BackendError::operation)?;
-        let mut text_search_changes = text_search::subscribe();
-        let libraries = library_service.clone();
-        let text_index_cleanup = executor.spawn(async move {
-            loop {
-                text_search_changes.borrow_and_update();
-                if !text_search::enabled() {
-                    if let Err(error) = libraries.cleanup_text_search_indexes().await {
-                        log::warn!("could not finish removing text search indexes: {error}");
-                    }
-                }
-                if text_search_changes.changed().await.is_err() {
-                    return;
-                }
-            }
-        });
+        text_search::set_enabled(true);
         let account_service = AccountService::new(account, library_service.clone(), executor.clone(), account_requests);
         #[cfg(not(target_arch = "wasm32"))]
         let root_task = library_service.start_root_recovery(root_requests);
@@ -131,9 +110,6 @@ impl AppBackend {
             registry: context.registry,
             preferences,
             executor: executor.clone(),
-            _text_index_cleanup: text_index_cleanup,
-            #[cfg(all(not(target_arch = "wasm32"), not(feature = "kobo")))]
-            _transfer_preferences: transfer_preferences,
             library_service,
             account_wake,
         });

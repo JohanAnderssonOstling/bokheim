@@ -5,6 +5,7 @@
 -- json_each keys are array positions.
 SELECT book.content_hash,book.title,book.subtitle,book.author,
        book.read_progress AS progress,book.format,book.added_at,
+       COALESCE((SELECT size_bytes FROM book_content WHERE book_id=book.content_hash),(SELECT upload_size FROM book_transfer WHERE content_hash=book.content_hash),(SELECT max(size_bytes) FROM book_dir WHERE book_row_id=book.row_id AND deleted_at IS NULL)) AS size_bytes,
        COALESCE((SELECT downloaded FROM library_book_presence WHERE book_row_id=book.row_id),0) AS downloaded,
        COALESCE(transfer.book_download IS NOT NULL, 0) AS download_requested,
        book.duration_ms AS audiobook_duration_ms

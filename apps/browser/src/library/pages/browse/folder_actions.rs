@@ -16,7 +16,7 @@ use library_model::BrowseLocation;
 use crate::services::{BookCommand, notify_error};
 
 use gpui::prelude::*;
-use gpui::{Anchor, AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, Focusable, IntoElement, SharedString, Subscription, Task, Window, div, px, rems};
+use gpui::{Anchor, AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, Focusable, IntoElement, SharedString, Subscription, Task, Window, div, px};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenu};
 use gpui_component::{Disableable, IconName};
@@ -335,8 +335,8 @@ impl FolderActions {
             return;
         }
         let name = dialog.input.read(cx).value().trim().to_owned();
-        if name.is_empty() {
-            dialog.error = Some(text!(browse::enter_a_folder_name).into());
+        if let Some(message) = crate::services::name_error(&name, text!(browse::enter_a_folder_name)) {
+            dialog.error = Some(message.into());
             cx.notify();
             return;
         }
@@ -350,11 +350,11 @@ impl FolderActions {
                 None => library.create_directory(target_id, name).await,
                 Some(_) => library.rename_directory(target_id, name).await.map(|_| ()),
             };
-            if result.is_ok()
-                && let Some(previous) = previous_name
-            {
-                let _ = session.update(cx, |session, _| session.push_undo(UndoEntry::new(format!(text!(browse::renamed), previous = previous)).with(UndoStep::RenameDirectory { directory: target_id, name: previous })));
-            }
+            let undo_label = previous_name.filter(|_| result.is_ok()).map(|previous| {
+                let label = format!(text!(browse::renamed), previous = previous);
+                let _ = session.update(cx, |session, _| session.push_undo(UndoEntry::new(label.clone()).with(UndoStep::RenameDirectory { directory: target_id, name: previous })));
+                label
+            });
             let _ = actions.update(cx, |actions, cx| {
                 match result {
                     Ok(()) => actions.dialog = None,
@@ -364,6 +364,10 @@ impl FolderActions {
                             dialog.error = Some(user_facing_error(&error, text!(browse::could_not_save_the_folder_name_please_try_again)).into());
                         }
                     }
+                }
+                if let Some(label) = undo_label {
+                    let owner = cx.entity_id();
+                    cx.with_window(owner, |window, cx| crate::services::notify_undoable("folder-rename", label, window, cx));
                 }
                 cx.notify();
             });
@@ -406,7 +410,9 @@ impl FolderActions {
                         actions.dialog = Some(FolderDialog::Move(MoveFolderDialog { placement, targets, picker, _subscription: subscription }));
                         cx.notify();
                     }
-                    Err(error) => log::error!("failed to load folder destinations: {error}"),
+                    Err(error) => {
+                        cx.with_window(cx.entity_id(), |window, cx| notify_error("folder-destinations-error", user_facing_error(&error, text!(browse::could_not_finish_the_library_action_please_try_again)), window, cx));
+                    }
                 }
             });
         });
@@ -534,8 +540,8 @@ impl FolderActions {
                             format!(
                                 text!(browse::could_not_everything_selected_some_items_may_already_have_been_transferred),
                                 match placement {
-                                    FolderPlacement::Copy => "copy",
-                                    FolderPlacement::Move => "move",
+                                    FolderPlacement::Copy => text!(browse::copy_action),
+                                    FolderPlacement::Move => text!(browse::move_action),
                                 },
                                 user_facing_error(&error, "")
                             ),
@@ -639,30 +645,25 @@ impl FolderActions {
         };
         let theme = components::browser_theme(cx);
         let cancel_actions = actions.clone();
-        let dismiss_actions = actions.clone();
         let submit_actions = actions.clone();
         let (title, idle_label, busy_label, id_suffix) =
             if renaming { (text!(browse::rename_folder), text!(browse::rename), text!(browse::renaming), "rename-folder") } else { (text!(browse::create_folder), text!(browse::create), text!(browse::creating), "create-folder") };
         let cancel = components::dialog_cancel_button(format!("cancel-{id_suffix}"), text!(common::cancel)).disabled(busy).on_click(move |_, _, cx| {
             cancel_actions.update(cx, |actions, cx| actions.dismiss_modal(cx));
         });
-        let submit = components::base_button(format!("confirm-{id_suffix}"))
-            .primary()
-            .label(if busy { busy_label } else { idle_label })
-            .tooltip(components::shortcut_tooltip(idle_label, "enter"))
+        let submit = components::dialog_confirm_button(format!("confirm-{id_suffix}"), idle_label, Some("enter"))
+            .when(busy, |button| button.label(busy_label))
             .disabled(busy || actions.read(cx).ui.files_busy(cx) || input.read(cx).value().trim().is_empty())
             .on_click(move |_, window, cx| submit_actions.update(cx, |actions, cx| actions.submit_name_dialog(window, cx)));
         let panel = components::modal_form_surface(theme)
-            .w(px(360.0))
+            .w(gpui::rems(22.5))
             .min_h(px(180.0))
-            .child(div().text_size(rems(1.125)).text_color(theme.text).child(title))
+            .child(components::dialog_title(title, theme))
             .child(Input::new(&input).h(gpui::rems(components::topbar_action_height_rem())))
             .children(error.map(|error| components::error_text(theme).child(error)))
             .child(div().flex_1())
             .child(div().flex().items_center().justify_end().gap(px(components::SPACE_SM)).child(cancel).child(submit));
-        let scrim = components::modal_scrim(format!("{id_suffix}-scrim"), theme).on_click(move |_, _, cx| {
-            dismiss_actions.update(cx, |actions, cx| actions.dismiss_modal(cx));
-        });
+        let scrim = components::modal_scrim(format!("{id_suffix}-scrim"), theme);
         Some(gpui::deferred(components::centered_modal(scrim, panel, window)).with_priority(2).into_any_element())
     }
 
@@ -748,10 +749,8 @@ impl FolderActions {
                             return;
                         }
                         let session = actions.read(cx).ui.session();
-                        window.defer(cx, move |window, cx| {
-                            window.defer(cx, move |window, cx| {
-                                let _ = session.update(cx, |session, cx| session.open_reader_import(source, parent_id, window, cx));
-                            });
+                        crate::services::after_menu_dismiss(window, cx, move |window, cx| {
+                            let _ = session.update(cx, |session, cx| session.open_reader_import(source, parent_id, window, cx));
                         });
                     })
                     .disabled(busy),
@@ -797,7 +796,7 @@ mod tests {
         let folder = library.backend().folder_destinations().await.unwrap().into_iter().find(|folder| folder.label == "Before").unwrap().id;
         let actions = cx.new(|_| FolderActions::new(library.clone()));
         let rename = cx.update(|cx| {
-            let items = [BrowseItem::Child { row: library_model::BrowseRow { id: BrowseLocation::Folder(folder), name: "Before".into(), path: None, book_count: 0, downloaded_book_count: 0 }, parent: None }];
+            let items = [BrowseItem::Child { row: library_model::BrowseRow { id: BrowseLocation::Folder(folder), name: "Before".into(), path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None }, parent: None }];
             let targets = FolderTargets::from_items(&items, ROOT_DIR_ID, cx).unwrap();
             FolderActions::selection_actions(actions.clone(), targets, &items, cx).into_iter().find(|action| action.id == "rename").unwrap()
         });

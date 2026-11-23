@@ -3,7 +3,7 @@
 pub use operation_failure::{Classified, Failure, OperationError as UpdateError};
 use semver::Version;
 use std::collections::BTreeMap;
-pub use update_protocol::{decode_hex, validate_https_url, ApplicationRelease, Artifact, CatalogRelease, Manifest, SignedManifest, TaxonomyRelease, VerifiedManifest, MAX_MANIFEST_BYTES, SIGNATURE_CONTEXT};
+pub use update_protocol::{ApplicationRelease, Artifact, CatalogRelease, MAX_MANIFEST_BYTES, Manifest, SIGNATURE_CONTEXT, SignedManifest, TaxonomyRelease, VerifiedManifest, decode_hex, validate_https_url};
 
 #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
 pub mod blocking;
@@ -11,6 +11,8 @@ pub mod blocking;
 pub mod coordinator;
 
 pub mod fetch;
+pub mod taxonomy;
+pub const APPLICATION_VERSION: &str = include!(concat!(env!("OUT_DIR"), "/application-version.rs"));
 
 #[cfg(all(feature = "native-state", any(unix, windows)))]
 pub mod activation;
@@ -76,10 +78,7 @@ pub fn offer<'a>(verified: &'a VerifiedManifest, installed: &Installed<'_>) -> U
     let application = manifest.application.as_ref().filter(|release| release.version > *installed.application_version).and_then(|release| release.artifacts.get(installed.target).map(|artifact| (release, artifact)));
     let (version, schema, formats) =
         application.map_or((installed.application_version, installed.schema_version, installed.taxonomy_format_versions), |(release, _)| (&release.version, release.schema_version, release.taxonomy_format_versions.as_slice()));
-    let taxonomy = manifest
-        .taxonomy
-        .as_ref()
-        .filter(|release| release.release_id > installed.taxonomy_release_id && version >= &release.minimum_application_version && schema >= release.minimum_schema_version && formats.contains(&release.format_version));
+    let taxonomy = manifest.taxonomy.as_ref().filter(|release| release.release_id > installed.taxonomy_release_id && taxonomy::compatible(release, version, schema, formats));
     UpdateOffer { application, taxonomy }
 }
 

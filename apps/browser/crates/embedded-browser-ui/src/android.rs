@@ -64,9 +64,6 @@ enum NativeEvent {
         download: String,
         name: String,
     },
-    DownloadWaiting {
-        download: String,
-    },
     CancelDownload {
         download: String,
     },
@@ -189,7 +186,6 @@ impl<V: Render + 'static> BrowserRoot<V> {
                 }
                 NativeEvent::CancelDownload { download } => self.download_update(id, BrowserDownloadUpdate { download, name: String::new(), phase: BrowserDownloadPhase::Dismissed, percent: None, message: None }, window, cx),
                 NativeEvent::DownloadProgress { download, percent } => self.downloads.progress(&format!("{id}:{download}"), percent, window, cx),
-                NativeEvent::DownloadWaiting { download } => self.downloads.waiting(&format!("{id}:{download}"), window, cx),
                 NativeEvent::DownloadFinished { download, name, error } => {
                     // HTTP books wait for the backend's import result before
                     // reporting completion while this browser is open.
@@ -331,7 +327,8 @@ impl Browser {
         let history = AddressHistory::load(request.history_file.clone());
         let mut request = json!(request);
         let page = history.page(&url).cloned().unwrap_or_else(|| PageMetadata::for_url(&url));
-        request["start_page_html"] = components::browser_start_page(history.start_page_shortcuts().map(|saved| (saved.page.url.as_str(), saved.page.title.as_str(), saved.page.icon.as_deref())), components::browser_theme(cx)).into();
+        request["start_page_html"] =
+            components::browser_start_page(history.start_page_shortcuts().map(|saved| (saved.page.url.as_str(), saved.page.title.as_str(), saved.page.icon.as_deref())), components::browser_theme(cx), cx.theme()).into();
         request["page_metadata_script"] = PAGE_METADATA_SCRIPT.into();
         let address = cx.new(|cx| InputState::new(window, cx).placeholder(text!(startup::web_address_or_search)).default_value(if url == "about:blank" { "" } else { &url }));
         let focus = cx.focus_handle();
@@ -998,12 +995,6 @@ mod tests {
         let smaller_page = cx.debug_bounds("android-browser-page").unwrap();
         assert!(smaller_page.size.height < page.size.height);
         cx.update(|_, cx| assert!(smaller_page.bottom() <= toasts.top() + cx.theme().notification.margins.top));
-        receive(7, r#"{"kind":"download_waiting","download":"one"}"#);
-        cx.run_until_parked();
-        assert!(root.read_with(cx, |root, _| root.downloads.get("7:one").unwrap().phase == BrowserDownloadPhase::Waiting));
-        receive(7, r#"{"kind":"download_progress","download":"one","percent":null}"#);
-        cx.run_until_parked();
-        assert!(!root.read_with(cx, |root, _| root.downloads.get("7:one").unwrap().phase == BrowserDownloadPhase::Waiting));
         assert_eq!(cx.update(|window, cx| Root::read(window, cx).notification.read(cx).notifications().len()), 2);
         cx.update(|window, cx| {
             let notifications = Root::read(window, cx).notification.clone();

@@ -1,7 +1,7 @@
 //! Native (on-device) filesystem state: work, directories, staged books.
 
 use crate::placements::{FolderPaths, directory_relative_path, stored_book_path, stored_book_path_column, stored_placement_path};
-use crate::query_methods::{query_last, query_rows};
+use crate::query_methods::{optional_text_column, parse_uuid_column, query_last, query_rows, text_column};
 use crate::transactions::WriteOutcome::{Commit, Rollback};
 use content_address::ContentHash;
 use library_model::RelativeBookPath;
@@ -63,7 +63,7 @@ impl Database {
                 .query_map([], |row| row.get(0))?
                 .collect::<Result<Vec<BookId>, _>>()?;
             tx.execute_batch(
-                "UPDATE book_dir SET is_downloaded=0,local_hash='',size_bytes=NULL;
+                "UPDATE book_dir SET is_downloaded=0,local_hash=NULL,size_bytes=NULL;
                  DELETE FROM local_file_projection;
                  DELETE FROM local_directory_projection;
                  DELETE FROM local_file_work;
@@ -116,7 +116,7 @@ impl Database {
             &directory.to_string(),
             &completion.snapshot.book_id,
             &completion.publication.relative_path,
-            completion.publication.fingerprint.as_deref(),
+            completion.publication.fingerprint,
             observations::Revision::Remote { size: i64::try_from(completion.size_bytes).map_err(DatabaseError::operation)? },
         )?;
 
@@ -179,6 +179,11 @@ pub struct PurgeBookSnapshot {
 }
 
 impl Database {
+    /// Completed file work, including purged directory projections.
+    pub fn file_work_revision(&self) -> Result<i64, DatabaseError> {
+        Ok(self.connection.query_row("SELECT replay_revision FROM local_scan_clock WHERE singleton=1", [], |row| row.get(0))?)
+    }
+
     /// Native placement work waiting for physical replay.
     pub fn has_pending_file_work(&self) -> Result<bool, DatabaseError> {
         #[cfg(target_arch = "wasm32")]
@@ -191,7 +196,7 @@ impl Database {
         Ok(query_rows(
             |read| self.connection.native_file_work_rows(read),
             |row| {
-                let directory = row.get::<_, Option<String>>(3)?.map(|id| DirId::parse_str(&id).map_err(|error| SqlError::FromSqlConversionFailure(3, Type::Text, Box::new(error)))).transpose()?;
+                let directory = optional_text_column(row, 3)?.map(|id| parse_uuid_column(id, 3)).transpose()?;
                 let cleanup_path = row.get::<_, Option<String>>(4)?.map(|path| stored_book_path(&path).map_err(|error| SqlError::FromSqlConversionFailure(4, Type::Text, Box::new(error)))).transpose()?;
                 Ok(NativeFileWork {
                     id: row.get(0)?,
@@ -201,7 +206,7 @@ impl Database {
                     cleanup_path,
                     source_root: row.get(5)?,
                     source_identity: row.get(6)?,
-                    source_library: row.get::<_, Option<String>>(7)?.map(|id| LibraryId::parse_str(&id).map_err(|error| SqlError::FromSqlConversionFailure(7, Type::Text, Box::new(error)))).transpose()?,
+                    source_library: optional_text_column(row, 7)?.map(|id| parse_uuid_column(id, 7)).transpose()?,
                 })
             },
         )?)
@@ -270,7 +275,7 @@ impl Database {
     pub fn acknowledge_native_file_work(&self, completion: NativeFileWorkCompletion) -> Result<(), DatabaseError> {
         self.with_write_transaction(|transaction| {
             let snapshot = completion.snapshot;
-            let Some(current) = self.native_file_work_snapshot(snapshot.work)? else { return Ok(Rollback(())) };
+            let Some(current) = self.native_file_work_snapshot(snapshot.work)? else { return Ok(Commit(())) };
             let work = &current.work;
             let hash = &work.book_id;
             if current.resolved_path != snapshot.resolved_path || current.placement != snapshot.placement {
@@ -522,7 +527,7 @@ struct NativeDirectoryRecord {
 }
 
 fn directory_id_column(row: &Row<'_>, index: usize) -> rusqlite::Result<DirId> {
-    DirId::parse_str(&row.get::<_, String>(index)?).map_err(|error| SqlError::FromSqlConversionFailure(index, Type::Text, Box::new(error)))
+    parse_uuid_column(text_column(row, index)?, index)
 }
 
 fn native_directory_record(connection: &rusqlite::Connection, id: &DirId) -> Result<Option<NativeDirectoryRecord>, DatabaseError> {
@@ -544,6 +549,10 @@ database_methods! {
     fn complete_downloaded_book_with_content(completion: NativeBookCompletion, checksum: content_address::ContentHash, thumbnail_set_exists: bool) -> NativeBookAcknowledgement;
     arguments (NativeBookCompletion, content_address::ContentHash, bool,) = (completion, checksum, thumbnail_set_exists,);
     execute database, arguments => database.complete_downloaded_book_with_content(arguments.0, arguments.1, arguments.2);
+
+    fn file_work_revision() -> i64;
+    arguments () = ();
+    execute database, arguments => database.file_work_revision();
 
     fn has_pending_file_work() -> bool;
     arguments () = ();

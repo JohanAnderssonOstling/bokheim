@@ -1,16 +1,18 @@
-#![cfg(all(feature = "authoritative-taxonomy", not(target_arch = "wasm32")))]
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
-use subject_projection::{project_subject_codes, project_subject_concepts, read_unified_taxonomy_connection, reviewed_source_heading_path, unified_concept_id, unified_subject_paths, unified_taxonomy_routes, BookSubject, UnifiedConceptDefinition, UnifiedTaxonomy};
+use subject_projection::{
+    BookSubject, UnifiedConceptDefinition, UnifiedTaxonomy, project_subject_codes, project_subject_concepts, read_unified_taxonomy_connection, reviewed_source_heading_path, unified_concept_id, unified_subject_paths, unified_taxonomy_routes,
+};
 
 const LITERATURE: i64 = 3846;
 const PLAN: &str = include_str!("../data/literature-cleanup-20261014.json");
 
-fn bundled_definitions() -> Vec<UnifiedConceptDefinition> {
-    let db = Connection::open_with_flags(subject_projection::bundled::path().unwrap(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+fn authoring_definitions() -> Vec<UnifiedConceptDefinition> {
+    let db = Connection::open_with_flags(concat!(env!("CARGO_MANIFEST_DIR"), "/data/unified-taxonomy-v2.sqlite3"), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     read_unified_taxonomy_connection(&db, "test taxonomy").unwrap()
 }
 
@@ -40,7 +42,7 @@ fn numbered_code(code: &str) -> Option<(&str, f64)> {
 #[test]
 fn every_reviewed_literary_scope_resolves_exclusively_under_literature() {
     let plan: Value = serde_json::from_str(PLAN).unwrap();
-    let definitions = bundled_definitions();
+    let definitions = authoring_definitions();
     let taxonomy = UnifiedTaxonomy::from_concepts(definitions.clone()).unwrap();
     let concepts = definitions.into_iter().map(|c| (c.concept_id(), c)).collect();
 
@@ -66,7 +68,7 @@ fn every_reviewed_literary_scope_resolves_exclusively_under_literature() {
 #[test]
 fn literary_subjects_and_literature_selectors_have_no_nonliterary_route() {
     let plan: Value = serde_json::from_str(PLAN).unwrap();
-    let concepts: BTreeMap<_, _> = bundled_definitions().into_iter().map(|c| (c.concept_id(), c)).collect();
+    let concepts: BTreeMap<_, _> = authoring_definitions().into_iter().map(|c| (c.concept_id(), c)).collect();
     let moved = plan["moved_literary_concepts"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap());
     let added = plan["new_concepts"].as_array().unwrap().iter().map(|v| v["id"].as_i64().unwrap());
     let flattened: Value = serde_json::from_str(include_str!("../data/literature-flatten-speculative-20261015.json")).unwrap();
@@ -96,15 +98,9 @@ fn literary_subjects_and_literature_selectors_have_no_nonliterary_route() {
 
 #[test]
 fn speculative_children_keep_their_codes_and_saved_paths_directly_under_genres() {
-    let concepts: BTreeMap<_, _> = bundled_definitions().into_iter().map(|c| (c.concept_id(), c)).collect();
+    let concepts: BTreeMap<_, _> = authoring_definitions().into_iter().map(|c| (c.concept_id(), c)).collect();
     let taxonomy = UnifiedTaxonomy::from_concepts(concepts.values().cloned().collect()).unwrap();
-    for (id, label, bisac) in [
-        (3986, "Fantasy", "FIC009000"),
-        (4026, "LitRPG", "FIC129000"),
-        (4108, "Science Fiction", "FIC028000"),
-        (4128, "Superheroes", "FIC063000"),
-        (4144, "Visionary & Metaphysical", "FIC039000"),
-    ] {
+    for (id, label, bisac) in [(3986, "Fantasy", "FIC009000"), (4026, "LitRPG", "FIC129000"), (4108, "Science Fiction", "FIC028000"), (4128, "Superheroes", "FIC063000"), (4144, "Visionary & Metaphysical", "FIC039000")] {
         assert_eq!(concepts[&id].parent_ids(), &[5583]);
         assert_eq!(taxonomy.matching_concept_ids("bisac", bisac), vec![id]);
         assert_eq!(unified_concept_id(&format!("Literature / Genres / {label}")), Some(id));
@@ -149,15 +145,15 @@ fn specific_literary_navigation_shadows_general_literature_but_keeps_independent
     assert!(paths.iter().any(|path| path == "Language" || path.starts_with("Language / ")), "{paths:?}");
 
     let heading = BookSubject::new(None, "Hebrew literature -- Translations into English", "catalog:gutenberg.org", Some("lcsh".into()), None).unwrap();
-    assert_eq!(reviewed_source_heading_path(&heading), Some("Literature / By Language / Hebrew"));
+    assert_eq!(reviewed_source_heading_path(&heading).as_deref(), Some("Literature / By Language / Hebrew"));
 }
 
 #[test]
 fn catalog_literature_codes_cover_missing_interiors_and_keep_period_boundaries() {
-    let taxonomy = UnifiedTaxonomy::from_concepts(bundled_definitions()).unwrap();
+    let taxonomy = UnifiedTaxonomy::from_concepts(authoring_definitions()).unwrap();
     for (code, expected) in [
         ("PR6019", 4179),
-        ("PR6019.O9 D8 2001", 4179), // Dubliners
+        ("PR6019.O9 D8 2001", 4179),  // Dubliners
         ("PR6045.O53 R5 1986", 4179), // Right Ho, Jeeves
         ("PR6052", 4179),
         ("PR6076.Z9", 4179),
@@ -187,7 +183,7 @@ fn catalog_literature_codes_cover_missing_interiors_and_keep_period_boundaries()
 
 #[test]
 fn reviewed_literary_headings_follow_their_pinned_subject_identities() {
-    let concepts: BTreeMap<_, _> = bundled_definitions().into_iter().map(|c| (c.concept_id(), c)).collect();
+    let concepts: BTreeMap<_, _> = authoring_definitions().into_iter().map(|c| (c.concept_id(), c)).collect();
     let rules: Value = serde_json::from_str(include_str!("../data/reviewed-source-headings.json")).unwrap();
     for rule in rules.as_array().unwrap() {
         let id = rule["concept_id"].as_i64().unwrap();
@@ -203,7 +199,7 @@ fn reviewed_literary_headings_follow_their_pinned_subject_identities() {
         ("American fiction -- 19th century", "Literature / By Language / English / U.S. / By Period / 19th Century"),
     ] {
         let subject = BookSubject::new(None, heading, "dc:subject", None, None).unwrap();
-        assert_eq!(reviewed_source_heading_path(&subject), Some(path), "{heading}");
+        assert_eq!(reviewed_source_heading_path(&subject).as_deref(), Some(path), "{heading}");
     }
 }
 
@@ -234,7 +230,7 @@ fn historical_literary_paths_preserve_manual_assignments_and_exclusions() {
 
 #[test]
 fn adult_literary_forms_and_traditions_keep_codes_and_saved_assignments_under_genres() {
-    let concepts: BTreeMap<_, _> = bundled_definitions().into_iter().map(|c| (c.concept_id(), c)).collect();
+    let concepts: BTreeMap<_, _> = authoring_definitions().into_iter().map(|c| (c.concept_id(), c)).collect();
     let taxonomy = UnifiedTaxonomy::from_concepts(concepts.values().cloned().collect()).unwrap();
     let plan: Value = serde_json::from_str(include_str!("../data/literature-flatten-literary-forms-20261015.json")).unwrap();
     let removed = BTreeSet::from([55027, 5630]);
@@ -266,7 +262,7 @@ fn adult_literary_forms_and_traditions_keep_codes_and_saved_assignments_under_ge
 
 #[test]
 fn relationships_is_a_leaf_and_erotica_keeps_its_independent_subtree() {
-    let concepts: BTreeMap<_, _> = bundled_definitions().into_iter().map(|c| (c.concept_id(), c)).collect();
+    let concepts: BTreeMap<_, _> = authoring_definitions().into_iter().map(|c| (c.concept_id(), c)).collect();
     let taxonomy = UnifiedTaxonomy::from_concepts(concepts.values().cloned().collect()).unwrap();
     let plan: Value = serde_json::from_str(include_str!("../data/literature-relationships-leaf-20261015.json")).unwrap();
     assert_eq!(concepts[&55024].parent_ids(), &[5583]);
@@ -310,7 +306,7 @@ fn relationships_is_a_leaf_and_erotica_keeps_its_independent_subtree() {
 
 #[test]
 fn humor_form_and_topic_children_keep_codes_and_saved_paths_in_both_routes() {
-    let concepts: BTreeMap<_, _> = bundled_definitions().into_iter().map(|c| (c.concept_id(), c)).collect();
+    let concepts: BTreeMap<_, _> = authoring_definitions().into_iter().map(|c| (c.concept_id(), c)).collect();
     let taxonomy = UnifiedTaxonomy::from_concepts(concepts.values().cloned().collect()).unwrap();
     let plan: Value = serde_json::from_str(include_str!("../data/humor-flatten-form-topic-20261015.json")).unwrap();
     assert_eq!(concepts[&691].parent_ids(), &[510, 55128]);
@@ -351,7 +347,7 @@ fn humor_form_and_topic_children_keep_codes_and_saved_paths_in_both_routes() {
 
 #[test]
 fn english_forms_keep_saved_paths_under_great_britain_and_shadow_broad_english() {
-    let concepts: BTreeMap<_, _> = bundled_definitions().into_iter().map(|c| (c.concept_id(), c)).collect();
+    let concepts: BTreeMap<_, _> = authoring_definitions().into_iter().map(|c| (c.concept_id(), c)).collect();
     let plan: Value = serde_json::from_str(include_str!("../data/literature-english-forms-great-britain-20261015.json")).unwrap();
     assert!(!concepts.contains_key(&55178));
     assert_eq!(concepts[&60178].parent_ids(), &[5585]);

@@ -4,7 +4,6 @@ use crate::{
     foliate::FoliateBook,
     native_move::MovePreparation,
     reader_batch::ReaderImportBatch,
-    reader_import::ImportMode,
     readest::{self, ReadestBook, ReadestConfig},
 };
 use book_inspection::InspectedBook;
@@ -26,6 +25,12 @@ use uuid::Uuid;
 pub(crate) enum ImportMetadata {
     Inspect,
     Reader,
+}
+
+/// Copy admission always carries the batch that owns its commit.
+pub(crate) enum ReaderImportOperation<'a> {
+    Copy(&'a mut ReaderImportBatch),
+    Move,
 }
 
 /// Reader-specific state conversion; admission, copying and moving share one
@@ -63,46 +68,24 @@ pub struct ReaderBookResult {
     pub warnings: Vec<String>,
 }
 
-pub(crate) async fn import_reader_book(
-    importer: &LibraryImport<'_>, parent: DirId, source: &Path, format: BookFormat, mode: ImportMode, batch: Option<&mut ReaderImportBatch>, prepare: ReaderPreparation,
-) -> Result<ReaderBookResult, BackendError> {
+pub(crate) async fn import_reader_book(importer: &LibraryImport<'_>, parent: DirId, source: &Path, format: BookFormat, operation: ReaderImportOperation<'_>, prepare: ReaderPreparation) -> Result<ReaderBookResult, BackendError> {
     let name = source.file_name().and_then(|name| name.to_str()).ok_or("invalid reader source filename")?.to_owned();
     if BookFormat::from_file_name(&name) != Some(format) {
         return Err(BackendError::message("reader format does not match the source filename"));
     }
-    if mode == ImportMode::Move {
-        if fs::symlink_metadata(source)?.file_type().is_symlink() {
-            return Err(BackendError::message("copy a reader source symlink instead of moving it"));
+    match operation {
+        ReaderImportOperation::Copy(batch) => import_batched_copy(importer, parent, source, name, batch, prepare).await,
+        ReaderImportOperation::Move => {
+            if fs::symlink_metadata(source)?.file_type().is_symlink() {
+                return Err(BackendError::message("copy a reader source symlink instead of moving it"));
+            }
+            if source.canonicalize()?.starts_with(Path::new(&importer.root).canonicalize()?) {
+                return Err(BackendError::message("reader source is already inside the destination library"));
+            }
+            let (moved, warnings) = importer.move_book_from_path_prepared(parent, source, MovePreparation::Reader(prepare)).await?;
+            Ok(ReaderBookResult { book_id: moved.book_id, created: moved.created, source_removed: true, cleanup_error: moved.cleanup_error, skipped_pdf_annotations: 0, warnings })
         }
-        if source.canonicalize()?.starts_with(Path::new(&importer.root).canonicalize()?) {
-            return Err(BackendError::message("reader source is already inside the destination library"));
-        }
-        let (moved, warnings) = importer.move_book_from_path_prepared(parent, source, MovePreparation::Reader(prepare)).await?;
-        return Ok(ReaderBookResult { book_id: moved.book_id, created: moved.created, source_removed: true, cleanup_error: moved.cleanup_error, skipped_pdf_annotations: 0, warnings });
     }
-    if let Some(batch) = batch {
-        return import_batched_copy(importer, parent, source, name, batch, prepare).await;
-    }
-    let ingested = ingest_reader_file(importer, source, name.clone()).await?;
-    let source_path = source.to_owned();
-    let (state, warnings) = run_blocking(move || {
-        let mut warnings = Vec::new();
-        let state = prepare.prepare(&ingested, &source_path, &mut warnings)?;
-        if library_files::filesystem::fingerprint(&source_path)? != ingested.fingerprint {
-            return Err(BackendError::message("reader source changed during preparation"));
-        }
-        Ok::<_, BackendError>((state, warnings))
-    })
-    .await
-    .map_err(BackendError::operation)??;
-    let imported = importer.import_verified_reader_state(parent, name, Box::new(File::open(source)?), state, None).await?;
-    Ok(ReaderBookResult { book_id: imported.book_id, created: imported.created, source_removed: false, cleanup_error: None, skipped_pdf_annotations: 0, warnings })
-}
-
-/// Reader PDFs use external metadata; EPUBs still need their navigation and
-/// publication facts. Both routes hash all source bytes and merge fresh notes.
-pub(crate) async fn ingest_reader_file(importer: &LibraryImport<'_>, source: &Path, name: String) -> Result<IngestedFile, BackendError> {
-    ingest_import_file(importer, source, name, ImportMetadata::Reader).await
 }
 
 pub(crate) async fn ingest_import_file(importer: &LibraryImport<'_>, source: &Path, name: String, metadata: ImportMetadata) -> Result<IngestedFile, BackendError> {
@@ -341,6 +324,7 @@ pub(crate) async fn test_importer(root: &Path) -> std::sync::Arc<tokio::sync::Rw
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reader_import::{ImportMode, ReaderImportReport};
     use book_model::BookDetails;
     use serde_json::json;
     use std::sync::Arc;
@@ -367,11 +351,11 @@ mod tests {
     }
 
     struct NoInspection;
-    impl cpu_host::CpuHost for NoInspection {
-        fn book(&self, _: cpu_host::BookTask, _: cpu_host::BoxedCpuReader) -> client_platform_runtime::executor::BoxedBackendFuture<'_, Result<cpu_host::CpuResponse, BackendError>> {
+    impl cpu_contract::CpuHost for NoInspection {
+        fn book(&self, _: cpu_contract::BookTask, _: cpu_contract::BoxedCpuReader) -> client_platform_runtime::executor::BoxedBackendFuture<'_, Result<cpu_contract::CpuResponse, BackendError>> {
             panic!("repeat reader import must reuse its current inspection")
         }
-        fn request(&self, _: cpu_host::CpuRequest) -> client_platform_runtime::executor::BoxedBackendFuture<'_, Result<cpu_host::CpuResponse, BackendError>> {
+        fn request(&self, _: cpu_contract::CpuRequest) -> client_platform_runtime::executor::BoxedBackendFuture<'_, Result<cpu_contract::CpuResponse, BackendError>> {
             panic!("repeat reader import must not request CPU work")
         }
     }
@@ -400,17 +384,21 @@ mod tests {
         let importer_placement = test_importer(destination.path()).await;
         let importer_storage = importer_placement.write().await;
         let mut importer = LibraryImport::new(&importer_storage, Arc::new(cpu_host::NativeHost));
-        let first = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &ReadestConfig::default(), ImportMode::Copy, None).await.unwrap();
-        assert!(importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Epub, READER_EPUB_METADATA_VERSION).unwrap());
-        assert!(!importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).unwrap());
-        assert!(importer.storage.database().book_transfer_state(first.book_id).unwrap().addition.record.book.identifiers.is_empty(), "reader admission must skip the fixture's page-only ISBN");
+        let mut batch = ReaderImportBatch::new(&importer, ImportMode::Copy).unwrap();
+        let first = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &ReadestConfig::default(), ReaderImportOperation::Copy(&mut batch)).await.unwrap();
+        batch.finish(&importer, &mut ReaderImportReport::default()).await.unwrap();
+        assert!(importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Epub, READER_EPUB_METADATA_VERSION).await.unwrap());
+        assert!(!importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).await.unwrap());
+        assert!(importer.storage.database().book_transfer_state(first.book_id).await.unwrap().addition.record.book.identifiers.is_empty(), "reader admission must skip the fixture's page-only ISBN");
         let published = destination.path().join("book.epub");
         let revision = library_files::filesystem::fingerprint(&published).unwrap();
         importer.cpu = Arc::new(NoInspection);
         let config = ReadestConfig { booknotes: vec![json!({"id":"new-note","type":"annotation","cfi":"epubcfi(/6/2!/4/2/1:0)","text":"New quote","createdAt":1})], ..Default::default() };
-        let repeat = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &config, ImportMode::Copy, None).await.unwrap();
+        let mut batch = ReaderImportBatch::new(&importer, ImportMode::Copy).unwrap();
+        let repeat = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &config, ReaderImportOperation::Copy(&mut batch)).await.unwrap();
+        batch.finish(&importer, &mut ReaderImportReport::default()).await.unwrap();
         assert!(!repeat.created);
-        assert_eq!(importer.storage.database().annotations(first.book_id).unwrap().len(), 1, "cached inspection must still merge new reader notes");
+        assert_eq!(importer.storage.database().annotations(first.book_id).await.unwrap().len(), 1, "cached inspection must still merge new reader notes");
         let state = importer.storage.database().book_transfer_state(first.book_id).await.unwrap();
         let duplicate = importer.import_verified_reader_state(ROOT_DIR_ID, "book.epub".into(), Box::new(Unreadable), state.clone(), None).await.unwrap();
         assert!(!duplicate.created);
@@ -420,7 +408,7 @@ mod tests {
         let other_storage = other_placement.write().await;
         let other = LibraryImport::new(&other_storage, Arc::new(cpu_host::NativeHost));
         let transferred = other.import_transferred_book(ROOT_DIR_ID, "book.epub".into(), Box::new(File::open(&path).unwrap()), fs::metadata(&path).unwrap().len(), state.clone()).await.unwrap();
-        assert!(!other.storage.database().has_import_inspection(&transferred.book_id, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).unwrap(), "general transfers must not claim a current parser inspection");
+        assert!(!other.storage.database().has_import_inspection(&transferred.book_id, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).await.unwrap(), "general transfers must not claim a current parser inspection");
         assert!(importer.import_transferred_book(ROOT_DIR_ID, "book.epub".into(), Box::new(std::io::Cursor::new(b"wrong bytes")), b"wrong bytes".len() as u64, state).await.is_err());
         assert_eq!(fs::read_dir(destination.path()).unwrap().filter_map(Result::ok).filter(|entry| entry.file_name().to_string_lossy().contains(".part-")).count(), 0);
     }
@@ -454,7 +442,15 @@ mod tests {
             let importer_storage = importer_placement.write().await;
             let mut importer = LibraryImport::new(&importer_storage, Arc::new(cpu_host::NativeHost));
             importer.cpu = Arc::new(NoInspection);
-            let first = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &config, mode, None).await.unwrap();
+            let mut batch = ReaderImportBatch::new(&importer, mode);
+            let operation = match batch.as_mut() {
+                Some(batch) => ReaderImportOperation::Copy(batch),
+                None => ReaderImportOperation::Move,
+            };
+            let first = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &config, operation).await.unwrap();
+            if let Some(batch) = batch {
+                batch.finish(&importer, &mut ReaderImportReport::default()).await.unwrap();
+            }
             assert!(first.created);
             assert_eq!(first.skipped_pdf_annotations, 1);
             assert_eq!(path.exists(), mode == ImportMode::Copy);
@@ -464,11 +460,19 @@ mod tests {
             assert!(state.addition.pdf.is_none());
             assert!(state.addition.navigation.is_none());
             assert!(state.annotations.is_empty());
-            assert_eq!(importer.storage.database().reading_position(&first.book_id).unwrap().as_deref(), Some("pdfpage(2)"));
-            assert!(importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Pdf, READER_PDF_METADATA_VERSION).unwrap());
-            assert!(!importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Pdf, book_inspection::inspection_version(BookFormat::Pdf)).unwrap());
+            assert_eq!(importer.storage.database().reading_position(&first.book_id).await.unwrap().as_deref(), Some("pdfpage(2)"));
+            assert!(importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Pdf, READER_PDF_METADATA_VERSION).await.unwrap());
+            assert!(!importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Pdf, book_inspection::inspection_version(BookFormat::Pdf)).await.unwrap());
             fs::write(&path, PDF).unwrap();
-            let repeat = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &config, mode, None).await.unwrap();
+            let mut batch = ReaderImportBatch::new(&importer, mode);
+            let operation = match batch.as_mut() {
+                Some(batch) => ReaderImportOperation::Copy(batch),
+                None => ReaderImportOperation::Move,
+            };
+            let repeat = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &config, operation).await.unwrap();
+            if let Some(batch) = batch {
+                batch.finish(&importer, &mut ReaderImportReport::default()).await.unwrap();
+            }
             assert_eq!(repeat.book_id, first.book_id);
             assert!(!repeat.created);
             let snapshot = importer.storage.database().scan_snapshot(book_inspection::inspection_version(book_model::BookFormat::Pdf)).await.unwrap();
@@ -493,20 +497,25 @@ mod tests {
             let importer_storage = importer_placement.write().await;
             let mut importer = LibraryImport::new(&importer_storage, Arc::new(cpu_host::NativeHost));
             importer.cpu = Arc::new(NoInspection);
-            assert!(import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &ReadestConfig::default(), mode, None).await.is_err());
+            let mut batch = ReaderImportBatch::new(&importer, mode);
+            let operation = match batch.as_mut() {
+                Some(batch) => ReaderImportOperation::Copy(batch),
+                None => ReaderImportOperation::Move,
+            };
+            assert!(import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &ReadestConfig::default(), operation).await.is_err());
             assert_eq!(fs::read(&path).unwrap(), b"not a PDF");
-            assert_eq!(importer.storage.database().book_count().unwrap(), 0);
+            assert_eq!(importer.storage.database().book_count().await.unwrap(), 0);
         }
     }
 
     #[tokio::test]
     async fn ordinary_pdf_moves_still_request_full_inspection() {
         struct RejectInspection;
-        impl cpu_host::CpuHost for RejectInspection {
-            fn book(&self, _: cpu_host::BookTask, _: cpu_host::BoxedCpuReader) -> client_platform_runtime::executor::BoxedBackendFuture<'_, Result<cpu_host::CpuResponse, BackendError>> {
+        impl cpu_contract::CpuHost for RejectInspection {
+            fn book(&self, _: cpu_contract::BookTask, _: cpu_contract::BoxedCpuReader) -> client_platform_runtime::executor::BoxedBackendFuture<'_, Result<cpu_contract::CpuResponse, BackendError>> {
                 Box::pin(async { Err(BackendError::message("inspection requested")) })
             }
-            fn request(&self, _: cpu_host::CpuRequest) -> client_platform_runtime::executor::BoxedBackendFuture<'_, Result<cpu_host::CpuResponse, BackendError>> {
+            fn request(&self, _: cpu_contract::CpuRequest) -> client_platform_runtime::executor::BoxedBackendFuture<'_, Result<cpu_contract::CpuResponse, BackendError>> {
                 panic!("unexpected CPU request")
             }
         }
@@ -521,7 +530,7 @@ mod tests {
         let error = importer.move_book_from_path(sync_common::ROOT_DIR_ID, &path).await.unwrap_err();
         assert!(error.to_string().contains("inspection requested"), "{error}");
         assert!(path.is_file());
-        assert_eq!(importer.storage.database().book_count().unwrap(), 0);
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 0);
     }
 
     #[test]

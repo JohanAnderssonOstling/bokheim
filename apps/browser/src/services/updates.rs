@@ -11,8 +11,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::rc::Rc;
 use ui_components as components;
-pub use update_client::coordinator::{UpdateAction, UpdateView};
 use update_client::UpdateError;
+pub use update_client::coordinator::{UpdateAction, UpdateView};
 
 pub type UpdateActionHandler = Rc<dyn Fn(UpdateAction, &mut App)>;
 
@@ -92,8 +92,8 @@ pub type PublishUpdate<'a> = dyn Fn(UpdateEvent) -> Result<(), UpdateError> + 'a
 #[cfg(not(target_arch = "wasm32"))]
 pub fn bind_worker<H: Send + 'static>(
     initial: UpdateView, restart: Option<PathBuf>, automatic_check: bool, take_host: impl FnOnce() -> Option<H> + 'static,
-    mut work: impl FnMut(&mut H, Option<UpdateAction>, &PublishUpdate<'_>) -> Result<UpdateView, UpdateError> + Send + 'static, view: impl Fn(&H) -> UpdateView + Send + 'static, user_error: impl Fn(&UpdateError) -> Option<String> + Send + 'static,
-    cx: &mut App,
+    mut work: impl FnMut(&mut H, Option<UpdateAction>, &PublishUpdate<'_>) -> Result<UpdateView, UpdateError> + Send + 'static, view: impl Fn(&H) -> UpdateView + Send + 'static,
+    user_error: impl Fn(&UpdateError) -> Option<String> + Send + 'static, cx: &mut App,
 ) -> Entity<UpdateControls> {
     let (actions, requests) = async_channel::unbounded();
     let (events, received) = async_channel::unbounded();
@@ -178,7 +178,9 @@ pub(crate) fn render_row(controls: &Entity<UpdateControls>, id: impl Into<Elemen
         UpdateView::Preparing => (text!(browse::preparing_update).into(), Some((text!(browse::update), UpdateAction::Update, true))),
         UpdateView::WaitingForConnection => (text!(browse::check_your_internet_connection_then_retry_the_update).into(), Some((text!(common::retry), UpdateAction::Update, false))),
         UpdateView::Ready { action } => (text!(browse::update_ready).into(), Some((if *action == UpdateAction::Install { controls.install_label } else { text!(common::restart) }, action.clone(), false))),
-        UpdateView::NeedsSpace { additional_bytes } => (if *additional_bytes == 0 { text!(dictionary::disk_full).into() } else { format!(text!(browse::free_up_to_continue), needed_space(*additional_bytes)) }, Some((text!(common::retry), UpdateAction::Update, false))),
+        UpdateView::NeedsSpace { additional_bytes } => {
+            (if *additional_bytes == 0 { text!(dictionary::disk_full).into() } else { format!(text!(browse::free_up_to_continue), needed_space(*additional_bytes)) }, Some((text!(common::retry), UpdateAction::Update, false)))
+        }
         #[cfg(target_os = "android")]
         UpdateView::NeedsPermission => (text!(browse::allow_the_app_to_install_the_update).into(), Some((text!(browse::continue), UpdateAction::GrantPermission, false))),
         #[cfg(not(target_os = "android"))]

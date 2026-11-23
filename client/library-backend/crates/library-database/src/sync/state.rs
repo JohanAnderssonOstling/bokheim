@@ -1,6 +1,6 @@
 //! Sync cursor and recovery primitives.
 
-use crate::query_methods::query_rows;
+use crate::query_methods::{first_column, optional_text_column, parse_uuid_column, query_last, query_rows};
 use crate::shared_sql::SharedSql;
 use crate::sync::{SyncStateSql, read_pull_cursor};
 use crate::{Database, DatabaseError};
@@ -12,10 +12,7 @@ use sync_common::StateKey;
 // transaction. Page- and chunk-sized looping belongs to the orchestrator,
 // which drives these methods and the network between them.
 
-use sync_common::{StateAddress, SyncCursor};
-
-/// Durable marker key for an in-progress cursor recovery.
-pub const CURSOR_RECOVERY_PENDING_KEY: &str = "cursor_recovery_pending";
+use sync_common::{ReplicaId, StateAddress, SyncCursor};
 
 impl Database {
     /// Reads the server history and both pull checkpoints together.
@@ -34,35 +31,24 @@ impl Database {
         self.connection.sync_begin_cursor_recovery().map(|_| ()).map_err(Into::into)
     }
 
-    /// Writes one explicit sync_metadata column. Only the columns written
-    /// from outside this crate are accepted.
-    pub fn set_sync_metadata(&self, key: &str, value: &str) -> Result<(), DatabaseError> {
-        use crate::OwnerSql;
+    pub fn replica_id(&self) -> Result<Option<ReplicaId>, DatabaseError> {
+        Ok(query_last(|read| self.connection.shared_owner_replica_id(read), |row| optional_text_column(row, 0)?.map(|value| parse_uuid_column(value, 0)).transpose())?.flatten())
+    }
+
+    pub fn set_last_successful_sync_at(&self, value: u64) -> Result<(), DatabaseError> {
         use crate::assets::ActivitySql;
-        match key {
-            "server_library_created" => self.connection.owner_set_server_library_created(value)?,
-            "last_successful_sync_at" => self.connection.activity_set_last_successful_sync_at(value)?,
-            _ => return Err(DatabaseError::message(format!("sync_metadata column {key} is not writable"))),
-        };
+        self.connection.activity_set_last_successful_sync_at(crate::sync::storage_i64(value, "last sync timestamp")?)?;
         Ok(())
     }
 
-    /// Reads one explicit sync_metadata column as text. Unknown keys read as
-    /// `None`; absent rows and null columns both read as `None`.
-    pub fn sync_metadata(&self, key: &str) -> Result<Option<String>, DatabaseError> {
-        use crate::query_methods::first_column;
-        let value: Option<Option<String>> = match key {
-            "replica_id" => first_column(|read| self.connection.shared_owner_replica_id(read))?,
-            "last_successful_sync_at" => first_column(|read| self.connection.shared_owner_last_successful_sync_at(read))?,
-            "last_pull_lifecycle_seq" => first_column(|read| self.connection.shared_cursor_lifecycle_select(read))?,
-            "last_pull_field_seq" => first_column(|read| self.connection.shared_cursor_field_select(read))?,
-            "cursor_recovery_pending" => first_column(|read| self.connection.syncmeta_cursor_recovery_pending(read))?,
-            "scan_seq" => first_column(|read| self.connection.shared_scanner_sequence(read))?,
-            "cloud_storage_enabled" => first_column(|read| self.connection.syncmeta_cloud_storage_enabled(read))?,
-            "server_library_created" => first_column(|read| self.connection.shared_owner_server_library_created(read))?,
-            _ => return Ok(None),
-        };
-        Ok(value.flatten())
+    pub fn server_library_created(&self) -> Result<Option<String>, DatabaseError> {
+        Ok(first_column::<Option<String>>(|read| self.connection.shared_owner_server_library_created(read))?.flatten())
+    }
+
+    pub fn set_server_library_created(&self, identity: &str) -> Result<(), DatabaseError> {
+        use crate::OwnerSql;
+        self.connection.owner_set_server_library_created(identity)?;
+        Ok(())
     }
 
     /// Read only the next bounded set of register identities. Local changes
@@ -119,13 +105,21 @@ database_methods! {
     arguments () = ();
     execute database, arguments => database.sync_begin_cursor_recovery();
 
-    fn set_sync_metadata(key: &str, value: &str) -> ();
-    arguments (String, String,) = (key.to_owned(), value.to_owned(),);
-    execute database, arguments => database.set_sync_metadata(&arguments.0, &arguments.1);
+    fn replica_id() -> Option<ReplicaId>;
+    arguments () = ();
+    execute database, arguments => database.replica_id();
 
-    fn sync_metadata(key: &str) -> Option<String>;
-    arguments (String,) = (key.to_owned(),);
-    execute database, arguments => database.sync_metadata(&arguments.0);
+    fn set_last_successful_sync_at(value: u64) -> ();
+    arguments (u64,) = (value,);
+    execute database, arguments => database.set_last_successful_sync_at(arguments.0);
+
+    fn server_library_created() -> Option<String>;
+    arguments () = ();
+    execute database, arguments => database.server_library_created();
+
+    fn set_server_library_created(identity: &str) -> ();
+    arguments (String,) = (identity.to_owned(),);
+    execute database, arguments => database.set_server_library_created(&arguments.0);
 
     fn sync_inventory_page(after: Option<&StateAddress>) -> Vec<StateAddress>;
     arguments (Option<StateAddress>,) = (after.cloned(),);

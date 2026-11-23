@@ -56,7 +56,7 @@ CARGO_PROFILE_RELEASE_LTO=thin \
 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
 CARGO_PROFILE_RELEASE_DEBUG=0 \
-cargo build --release --target-dir "$BUILD_TARGET" --target armv7-unknown-linux-gnueabihf \
+python3 scripts/ci/build-native.py cargo build --release --target-dir "$BUILD_TARGET" --target armv7-unknown-linux-gnueabihf \
     --config 'profile.release.package.gpui-component.codegen-units=16' \
     --config 'profile.release.package.browser-ui.codegen-units=16' \
     --config 'profile.release.package.reader-ui.codegen-units=16' \
@@ -125,10 +125,10 @@ if [ "$KOBO_CPU_PROFILE" = generic ]; then
 fi
 printf 'FBInk source: %s\n' 886f25f13368859ad8a899b88d04c26e19cda32e >>"$APP/BUILD-INFO.txt"
 printf 'UI crate codegen units: 16 (bounded build memory)\n' >>"$APP/BUILD-INFO.txt"
-python3 - "${BOKHEIM_BUILD_TAXONOMY_SQLITE:-$REPO_ROOT/shared/subject-projection/data/unified-taxonomy-v2.sqlite3}" >>"$APP/BUILD-INFO.txt" <<'PY'
+python3 - "$APP/taxonomy.sqlite3" >>"$APP/BUILD-INFO.txt" <<'PY'
 import hashlib, sys
 with open(sys.argv[1], 'rb') as source:
-    print('Taxonomy source SHA256: ' + hashlib.file_digest(source, 'sha256').hexdigest())
+    print('Taxonomy runtime SHA256: ' + hashlib.file_digest(source, 'sha256').hexdigest())
 PY
 
 ARCHIVE="$OUTPUT/desktop-gpui-kobo.tar.gz"

@@ -4,6 +4,12 @@ This is the browser build of the same GPUI application used by the native
 targets. It renders GPUI into a browser canvas and keeps browser-specific
 storage behind the SQLite OPFS VFS used by the shared Rust backend.
 
+Wide browser windows support the same split panes as desktop, with independent
+navigation, readers, and saved audiobook state. Narrow windows show the active
+pane. Browser file drops import copies into the folder under the pointer, or
+the library root on query pages. Multiple files use the same import and error
+reporting flow as the file picker; use the folder picker for directory trees.
+
 EPUB and PDF read aloud uses the browser's Web Speech synthesis service. The
 TTS button appears only when the speech API and at least one voice are available;
 the reader also watches for voices loaded asynchronously. Narration selects an

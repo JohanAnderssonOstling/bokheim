@@ -1,0 +1,22 @@
+[package]
+name = "ui-paginator"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+mobile = []
+kobo = ["mobile"]
+
+[dependencies]
+gpui.workspace = true
+web-time = "1"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+gpui-component.workspace = true
+ui-components = { path = "../../../apps/components", default-features = false }

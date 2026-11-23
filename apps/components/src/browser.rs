@@ -12,8 +12,8 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::{Icon, IconName};
 
 use crate::{
-    BrowserTheme, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, THEME_PICKER_WIDTH_REM, TITLE_MD, TOPBAR_ACTION_HORIZONTAL_PADDING,
-    settings_control_size_rem, topbar_action_gap, topbar_action_height_rem,
+    BrowserTheme, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TEXT_MD, TEXT_SM, TEXT_XS, THEME_PICKER_WIDTH_REM, TITLE_MD, TOPBAR_ACTION_HORIZONTAL_PADDING, settings_control_size_rem,
+    topbar_action_gap, topbar_action_height_rem,
 };
 
 /// A navigation destination, in the sidebar rail and the bottom bar alike: its
@@ -412,6 +412,7 @@ pub fn browser_settings_content() -> Div {
 }
 
 pub fn browser_settings_row(title: impl Into<SharedString>, description: impl Into<SharedString>, control: impl IntoElement, theme: BrowserTheme) -> Div {
+    let description = description.into();
     div()
         .w_full()
         .min_w_0()
@@ -423,12 +424,22 @@ pub fn browser_settings_row(title: impl Into<SharedString>, description: impl In
         .gap(px(20.0))
         .border_t_1()
         .border_color(theme.rule)
-        .child(div().flex_grow(1.0).flex_basis(gpui::rems(12.0)).min_w_0().flex().flex_col().gap(px(SPACE_XS)).child(div().text_size(gpui::rems(TEXT_MD)).child(title.into())).child(div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(description.into())))
+        .child(div().flex_grow(1.0).flex_basis(gpui::rems(12.0)).min_w_0().flex().flex_col().gap(px(SPACE_XS)).child(div().text_size(gpui::rems(TEXT_MD)).child(title.into())).when(!description.is_empty(), |label| label.child(div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(description))))
         .child(control)
 }
 
 pub fn browser_settings_sections() -> Div {
-    div().w_full().flex().flex_col().gap(px(SPACE_XL))
+    div().w_full().min_w_0().flex().flex_col().gap(px(20.0))
+}
+
+/// Related controls share the row's width and wrap as whole settings.
+pub fn browser_settings_paired_controls() -> Div {
+    div().w_full().min_w_0().flex().flex_wrap().items_start().gap(px(10.0))
+}
+
+/// A small-caps heading above a full-width preference control.
+pub fn browser_settings_control(title: impl Into<SharedString>, control: impl IntoElement, theme: BrowserTheme) -> Div {
+    div().w_full().min_w_0().flex().flex_col().gap(px(SPACE_XS)).child(div().text_size(gpui::rems(TEXT_XS)).font_features(crate::small_caps()).text_color(theme.text_muted).child(title.into())).child(control)
 }
 
 /// A block of settings: a heading and the rows under it, with no box.
@@ -460,28 +471,17 @@ pub fn browser_settings_banner(theme: BrowserTheme) -> Div {
 
 /// A titled block whose header carries a control of its own, on the right.
 ///
-/// For the one group whose subject is a thing you act on rather than a list of
-/// settings: the account. Its control — sign in, or who is signed in — is not a
-/// setting inside the group, it is what the group is about, so it sits in the
-/// header beside the name instead of becoming the first row.
+/// Account identity and dictionary actions belong beside the section title.
 pub fn browser_settings_fieldset_with_actions(title: impl Into<SharedString>, actions: impl IntoElement, theme: BrowserTheme) -> Div {
-    browser_settings_group().child(browser_settings_header(title, theme).child(div().flex_none().flex().flex_row().items_center().gap(px(SPACE_SM)).child(actions)))
+    browser_settings_group().child(browser_settings_header(title, theme).child(div().min_w_0().max_w_full().flex().flex_wrap().items_center().gap(px(SPACE_SM)).child(actions)))
 }
 
-/// A group's header bar: on the rows' line, and at least as tall as a header
-/// button, so a group whose header has none is exactly as tall as one whose
-/// header does.
-fn browser_settings_header(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div()
-        .w_full()
-        .py(px(SPACE_SM))
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .justify_between()
-        .gap(px(SPACE_SM))
-        .child(browser_settings_legend(title, theme).flex_none().w_auto().min_h(gpui::rems(settings_control_size_rem())).flex().items_center())
+/// Reserve a control-height line even without actions, so adjacent sections'
+/// titles and content start at the same height.
+pub(crate) fn browser_settings_header(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    div().w_full().pb(px(SPACE_SM)).flex().flex_row().flex_wrap().items_center().justify_between().gap(px(SPACE_SM)).child(
+        browser_settings_legend(title, theme).flex_none().w_auto().min_h(rems(settings_control_size_rem())).flex().items_center(),
+    )
 }
 
 /// An action in a settings group's header.
@@ -502,12 +502,9 @@ pub fn browser_settings_header_button(id: impl Into<ElementId>, label: impl Into
     crate::selectable_button(button, primary, theme).when(primary && cfg!(feature = "kobo"), |button| button.border_1())
 }
 
-/// The name a settings group is read by: a section heading in the display
-/// face, as on the book detail page. It was muted small caps, quieter than the
-/// controls under it, so the eye reached the controls before it knew which
-/// section it was in.
+/// Section headings use the same small caps as headings over controls.
 fn browser_settings_legend(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w_full().when_some(theme.display_font_family(), |text, family| text.font_family(family)).text_size(gpui::rems(TEXT_LG)).text_color(theme.text).child(title.into())
+    div().w_full().when_some(theme.display_font_family(), |text, family| text.font_family(family)).text_size(gpui::rems(TEXT_MD)).font_features(crate::small_caps()).text_color(theme.text).child(title.into())
 }
 
 /// What went wrong, said inside the group it went wrong in.

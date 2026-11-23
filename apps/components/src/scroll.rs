@@ -1,26 +1,22 @@
 use std::cell::Cell;
 use std::panic::Location;
 use std::rc::Rc;
-use std::time::Duration;
-use web_time::Instant;
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, Bounds, Div, Element, ElementId, Global, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Window, canvas, div, point,
+    AnyWindowHandle, App, Bounds, Div, Element, ElementId, Global, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, WeakEntity,
+    Window, canvas, div, point,
 };
 use gpui_component::StyledExt;
 use gpui_component::scroll::{Scrollbar, ScrollbarAxis};
 
-pub const PAGE_WHEEL_REPEAT_INTERVAL: Duration = Duration::from_millis(200);
-
-/// Physical wheel paging consumes fresh input only, never queues it behind an
-/// animation. Closely spaced notches therefore cannot schedule a second turn.
-pub fn page_wheel_ready(last_turn: Option<Instant>, animating: bool, now: Instant) -> bool {
-    !animating && last_turn.is_none_or(|last| now.duration_since(last) >= PAGE_WHEEL_REPEAT_INTERVAL)
-}
+pub use gpui::{PAGE_WHEEL_REPEAT_INTERVAL, page_wheel_ready};
 
 struct RegisteredScroll {
     id: ElementId,
     handle: ScrollHandle,
+    window: AnyWindowHandle,
+    mount: WeakEntity<()>,
 }
 
 struct PageScrollRegistry {
@@ -44,7 +40,8 @@ pub fn init_page_scrolling(cx: &mut App) {
         let Some(direction) = page_direction(&event.keystroke.key) else {
             return;
         };
-        let handle = cx.global::<PageScrollRegistry>().scrolls.iter().rev().find_map(|registered| {
+        cx.global_mut::<PageScrollRegistry>().scrolls.retain(|registered| registered.mount.is_upgradable());
+        let handle = cx.global::<PageScrollRegistry>().scrolls.iter().rev().filter(|registered| registered.window == window.window_handle()).find_map(|registered| {
             let bounds = registered.handle.bounds();
             (bounds.size.height > gpui::Pixels::ZERO && registered.handle.max_offset().y > gpui::Pixels::ZERO).then(|| registered.handle.clone())
         });
@@ -55,16 +52,19 @@ pub fn init_page_scrolling(cx: &mut App) {
     cx.set_global(PageScrollRegistry { scrolls: Vec::new(), _keystroke_subscription: subscription });
 }
 
-/// Registers an externally managed vertical scroll handle for application-wide
-/// viewport paging.
-pub fn register_page_scroll_handle(id: impl Into<ElementId>, handle: ScrollHandle, cx: &mut App) {
+/// Registers a vertical scroll handle for its current window and mounted
+/// element lifetime. Call while rendering the surface.
+pub fn register_page_scroll_handle(id: impl Into<ElementId>, handle: ScrollHandle, window: &mut Window, cx: &mut App) {
     if !cx.has_global::<PageScrollRegistry>() {
         return;
     }
     let id = id.into();
+    // Keyed element state is retained across cached frames and released when
+    // the surface unmounts. The registry itself must not keep that state alive.
+    let mount = window.use_keyed_state((id.clone(), "page-scroll-mount"), cx, |_, _| ()).downgrade();
     let registry = cx.global_mut::<PageScrollRegistry>();
-    registry.scrolls.retain(|registered| registered.id != id);
-    registry.scrolls.push(RegisteredScroll { id, handle });
+    registry.scrolls.retain(|registered| registered.mount.is_upgradable() && (registered.id != id || registered.window != window.window_handle()));
+    registry.scrolls.push(RegisteredScroll { id, handle, window: window.window_handle(), mount });
 }
 
 /// Adds Bokheim's keyboard paging behavior to a scrollable element.
@@ -103,6 +103,7 @@ pub struct Scrollable<E: InteractiveElement + Styled + ParentElement + Element> 
     id: ElementId,
     element: E,
     show_scrollbar: bool,
+    fit_content: bool,
     /// A handle supplied by the caller, for surfaces that scroll themselves.
     /// Without one the surface keeps its own offset across frames.
     handle: Option<ScrollHandle>,
@@ -114,12 +115,18 @@ where
 {
     #[track_caller]
     fn new(element: E) -> Self {
-        Self { id: ElementId::CodeLocation(*Location::caller()), element, show_scrollbar: true, handle: None }
+        Self { id: ElementId::CodeLocation(*Location::caller()), element, show_scrollbar: true, fit_content: false, handle: None }
     }
 
     /// Keep scrolling and the surface's stable identity without drawing a bar.
     pub fn hide_scrollbar(mut self) -> Self {
         self.show_scrollbar = false;
+        self
+    }
+
+    /// Grow with the content, then shrink and scroll when the parent caps its height.
+    pub fn fit_content(mut self) -> Self {
+        self.fit_content = true;
         self
     }
 }
@@ -160,17 +167,25 @@ where
             Some(handle) => handle,
             None => window.use_keyed_state(self.id.clone(), cx, |_, _| ScrollHandle::default()).read(cx).clone(),
         };
-        register_page_scroll_handle(self.id.clone(), scroll_handle.clone(), cx);
+        register_page_scroll_handle(self.id.clone(), scroll_handle.clone(), window, cx);
         let root_style = outer_layout_style(&mut self.element);
 
-        let content = self.element.id((self.id.clone(), "content")).flex_none().h_auto().min_h_full();
-        let scroll_area = div().id((self.id.clone(), "area")).size_full().flex().track_scroll(&scroll_handle).flex_col().overflow_y_scroll().child(content);
+        let content = self.element.id((self.id.clone(), "content")).flex_none().h_auto().min_h_full().when(self.fit_content, |content| content.min_h_0());
+        let scroll_area = div().id((self.id.clone(), "area")).size_full().flex().track_scroll(&scroll_handle).flex_col().overflow_y_scroll().when(self.fit_content, |area| area.h_auto().min_h_0().flex_auto()).child(content);
 
         // Scrollbar is absolute but supplies no inset of its own. Anchor its
         // layer to the viewport so its static position cannot follow the
         // preceding scroll area and extend below a popup.
         let scrollbar = self.show_scrollbar.then(|| div().absolute().inset_0().child(Scrollbar::new(&scroll_handle).id((self.id.clone(), "scrollbar")).axis(ScrollbarAxis::Vertical)));
-        div().id(self.id).size_full().relative().refine_style(&root_style).on_key_down(page_with_arrow_keys(scroll_handle.clone())).child(scroll_area).children(scrollbar)
+        div()
+            .id(self.id)
+            .size_full()
+            .relative()
+            .refine_style(&root_style)
+            .when(self.fit_content, |root| root.h_auto().min_h_0().flex_auto().flex().flex_col())
+            .on_key_down(page_with_arrow_keys(scroll_handle.clone()))
+            .child(scroll_area)
+            .children(scrollbar)
     }
 }
 

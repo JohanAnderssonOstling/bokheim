@@ -1,6 +1,6 @@
 //! Pull-page commit: wire decoding plus one atomic apply transaction.
 
-use crate::query_methods::{query_last, query_rows};
+use crate::query_methods::{query_last, query_rows, text_column};
 pub(crate) use crate::sync::{SyncApplySql, invalid_integer_column, nonnegative_u64, parse_uuid_column, read_pull_cursor, storage_i64, write_pull_cursor};
 #[cfg(test)]
 pub use crate::transactions::commit;
@@ -15,7 +15,7 @@ pub(crate) use sync_common::{PullStateResponse, ReplicaSeq};
 pub(crate) struct StoredVersion(pub(crate) VersionKey);
 
 impl StoredVersion {
-    pub(crate) fn decode(changed_at: i64, conflict_rank: i64, actor: String, actor_seq: i64, columns: [usize; 4]) -> rusqlite::Result<Option<Self>> {
+    pub(crate) fn decode(changed_at: i64, conflict_rank: i64, actor: &str, actor_seq: i64, columns: [usize; 4]) -> rusqlite::Result<Option<Self>> {
         if changed_at == 0 && actor.is_empty() && actor_seq == 0 {
             return Ok(None);
         }
@@ -28,16 +28,7 @@ impl StoredVersion {
 }
 
 pub(crate) fn read_version(conn: &rusqlite::Connection, kind: &str, key: &StateKey, subkey: &str) -> Result<Option<VersionKey>, DatabaseError> {
-    Ok(query_last(|read| conn.read_sync_state_version_select(kind, key, subkey, read), |row| StoredVersion::decode(row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, [0, 1, 2, 3]))?.flatten().map(|version| version.0))
-}
-
-/// Mutable registers carry an ordered version; immutable records retain an
-/// opaque transport token solely for acknowledgements and exact republication.
-pub(crate) fn publication_version(conn: &rusqlite::Connection, kind: &str, key: &StateKey, subkey: &str) -> Result<Option<VersionKey>, DatabaseError> {
-    if records::is_record(kind) {
-        return records::publication_version(conn, kind, key, subkey);
-    }
-    read_version(conn, kind, key, subkey)
+    Ok(query_last(|read| conn.read_sync_state_version_select(kind, key, subkey, read), |row| StoredVersion::decode(row.get(0)?, row.get(1)?, text_column(row, 2)?, row.get(3)?, [0, 1, 2, 3]))?.flatten().map(|version| version.0))
 }
 
 pub(crate) fn sync_state_identity(body: &LibraryStateEntry) -> (&'static str, StateKey, String) {
@@ -66,7 +57,6 @@ pub(crate) fn project_book(metadata: &book_model::BookMetadata) -> Result<Prepar
 
 pub(crate) mod pull;
 
-pub(crate) mod records;
 pub(crate) mod registers;
 
 /// Replace a book's complete local subject projection inside the caller's transaction.
@@ -80,7 +70,7 @@ pub(crate) fn write_subject_projection(tx: &rusqlite::Transaction<'_>, book_id: 
         tx.subject_projection_insert_subject(book_id, position as i64, subject.name(), subject.source(), subject.authority(), subject.code())?;
     }
     for (index, concept) in concepts {
-        tx.subject_projection_insert_concept(book_id, concept, subject_projection::UNIFIED_MATCHER_VERSION)?;
+        tx.subject_projection_insert_concept(book_id, concept, subject_projection::UNIFIED_PROJECTION_VERSION)?;
         let code = &projected.subject_codes[index];
         for position in code.evidence_positions() {
             tx.subject_projection_insert_evidence(book_id, concept, *position as i64, code.system_id(), code.code())?;

@@ -7,9 +7,7 @@ mod presence;
 mod transfer;
 pub(crate) mod uploads;
 
-pub use planning::BookUploadSnapshot;
-pub use transfer::{AssetTransferState, PlacementTransferEntry, TransferSnapshot};
-pub use uploads::BookStorageMetadata;
+pub use uploads::{BookStorageMetadata, BookUploadSnapshot};
 
 use content_address::{BookId, ContentHash};
 use include_sqlite_sql::include_sql;

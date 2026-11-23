@@ -1,13 +1,12 @@
-//! Scoped, reviewed raw headings select pinned routes in the curated taxonomy.
-use super::{BISAC_SYSTEM_ID, BookSubject, UNIFIED_SYSTEM_ID, bisac_code_for_path, canonical_subject_system, compact_whitespace, match_bisac_subjects, unified_concept_id, unified_subject_paths};
+//! Scoped, reviewed raw headings select stable identities in the curated taxonomy.
+use super::runtime::{unified_concept_exists, unified_concept_paths};
+use super::{BISAC_SYSTEM_ID, BookSubject, UNIFIED_SYSTEM_ID, bisac_code_for_path, canonical_subject_system, compact_whitespace, has_unified_subjects, match_bisac_subjects, most_specific_concept_ids, unified_concept_id};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 pub(crate) const SOURCE_HEADING_PREFIX: &str = "metadata:source-heading:";
-pub(crate) const GENERIC_DRAMA_PATH: &str = "Literature / Genres / Literary Forms / Drama";
 const GENERIC_DRAMA_CONCEPT_ID: i64 = 3876;
-pub(crate) const GENERAL_FICTION_PATH: &str = "Literature";
 pub(crate) const GENERAL_FICTION_CONCEPT_ID: i64 = 3846;
 
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -30,7 +29,6 @@ struct HeadingRule {
     #[serde(default)]
     required_sources: Vec<String>,
     concept_id: i64,
-    destination: String,
 }
 
 impl HeadingRule {
@@ -44,10 +42,14 @@ fn heading_key(raw: &str) -> String {
     compact_whitespace(raw).to_lowercase()
 }
 
+pub(super) fn validate_rules(text: &str) -> Result<(), String> {
+    serde_json::from_str::<Vec<HeadingRule>>(text).map(|_| ()).map_err(|e| e.to_string())
+}
+
 fn rules() -> &'static BTreeMap<(MatchScope, String), Option<HeadingRule>> {
     static RULES: OnceLock<BTreeMap<(MatchScope, String), Option<HeadingRule>>> = OnceLock::new();
     RULES.get_or_init(|| {
-        let rules: Vec<HeadingRule> = serde_json::from_str(include_str!("../data/reviewed-source-headings.json")).expect("reviewed source-heading rules must be valid");
+        let rules: Vec<HeadingRule> = serde_json::from_str(&super::runtime::source_heading_policy()).expect("reviewed source-heading rules must be valid");
         let mut by_heading = BTreeMap::new();
         for rule in rules {
             // A duplicate within one scope fails closed; the same token can
@@ -58,10 +60,10 @@ fn rules() -> &'static BTreeMap<(MatchScope, String), Option<HeadingRule>> {
     })
 }
 
-/// Returns a pinned exact route, or a broad form/topic subdivision fallback.
+/// Returns the stable identity selected by a reviewed heading or form/topic fallback.
 /// Complete matches take priority; conflicting topical fallbacks stay unresolved.
 /// Derived enrichment subjects must still agree with their original heading.
-pub fn reviewed_source_heading_path(subject: &BookSubject) -> Option<&'static str> {
+pub fn reviewed_source_heading_concept(subject: &BookSubject) -> Option<i64> {
     let derived = subject.authority() == Some(UNIFIED_SYSTEM_ID);
     let source = if derived {
         subject.source().strip_prefix(SOURCE_HEADING_PREFIX)?
@@ -75,13 +77,13 @@ pub fn reviewed_source_heading_path(subject: &BookSubject) -> Option<&'static st
         return None;
     }
     let heading = heading_key(subject.name());
-    let (path, concept_id) = if let Some(rule) = rules().get(&(MatchScope::ExactHeading, heading.clone())) {
+    let concept_id = if let Some(rule) = rules().get(&(MatchScope::ExactHeading, heading.clone())) {
         // A conflicting or stale exact rule must not fall through to a form.
         let rule = rule.as_ref()?;
         if !rule.permits_source(source) {
             return None;
         }
-        (rule.destination.as_str(), rule.concept_id)
+        rule.concept_id
     } else {
         // Evaluate the original declaration, not a materialized unified code.
         let original = if derived { BookSubject::new(None, subject.name(), source, None, None).ok()? } else { subject.clone() };
@@ -91,31 +93,42 @@ pub fn reviewed_source_heading_path(subject: &BookSubject) -> Option<&'static st
         let fallback = if let Some(target) = subdivision_fallback(&heading, source).ok()? {
             target
         } else if is_drama_form(&heading) {
-            (GENERIC_DRAMA_PATH, GENERIC_DRAMA_CONCEPT_ID)
+            GENERIC_DRAMA_CONCEPT_ID
         } else if heading == "fiction" || heading.rsplit_once("--").is_some_and(|(_, form)| form.trim() == "fiction") {
-            (GENERAL_FICTION_PATH, GENERAL_FICTION_CONCEPT_ID)
+            GENERAL_FICTION_CONCEPT_ID
         } else {
             return None;
         };
-        if match_bisac_subjects(std::slice::from_ref(&original)).iter().any(|assignment| bisac_code_for_path(assignment.node_path()).is_some_and(|code| !unified_subject_paths(BISAC_SYSTEM_ID, &code).is_empty())) {
+        if match_bisac_subjects(std::slice::from_ref(&original)).iter().any(|assignment| bisac_code_for_path(assignment.node_path()).is_some_and(|code| has_unified_subjects(BISAC_SYSTEM_ID, &code))) {
             return None;
         }
         fallback
     };
-    if derived && subject.code() != Some(path) {
+    if !unified_concept_exists(concept_id) {
         return None;
     }
-    (unified_concept_id(path) == Some(concept_id)).then_some(path)
+    // Accept existing path-based enrichment as well as stable ID references,
+    // while rejecting subjects that no longer agree with their raw heading.
+    if derived && subject.code().and_then(unified_concept_id) != Some(concept_id) {
+        return None;
+    }
+    Some(concept_id)
 }
 
-fn subdivision_fallback(heading: &str, source: &str) -> Result<Option<(&'static str, i64)>, ()> {
+/// Returns the first current display path in lexical order for the selected identity.
+/// Projection retains the identity so every active route remains available.
+pub fn reviewed_source_heading_path(subject: &BookSubject) -> Option<String> {
+    unified_concept_paths(reviewed_source_heading_concept(subject)?).into_iter().next()
+}
+
+fn subdivision_fallback(heading: &str, source: &str) -> Result<Option<i64>, ()> {
     let components = heading.split("--").map(str::trim).collect::<Vec<_>>();
     if components.len() < 2 || components.iter().any(|component| component.is_empty()) {
         return Ok(None);
     }
     let last = *components.last().ok_or(())?;
     if last == "juvenile literature" && components.get(components.len() - 2) == Some(&"biography") {
-        return Ok(Some(("Youth / Juvenile Nonfiction / People, Society & History / Biography & Autobiography", 1440)));
+        return Ok(Some(1440));
     }
     // Final forms override earlier topics. A conflicting form definition
     // cannot fall through to a broader primary/topic rule.
@@ -124,7 +137,7 @@ fn subdivision_fallback(heading: &str, source: &str) -> Result<Option<(&'static 
         if !rule.permits_source(source) {
             return Err(());
         }
-        return Ok(Some((rule.destination.as_str(), rule.concept_id)));
+        return Ok(Some(rule.concept_id));
     }
     if last.starts_with("juvenile") || last.starts_with("young adult") {
         return Err(());
@@ -132,14 +145,12 @@ fn subdivision_fallback(heading: &str, source: &str) -> Result<Option<(&'static 
     if components.iter().skip(1).any(|component| matches!(*component, "history and criticism" | "criticism and interpretation")) {
         let primary = components[0];
         if primary == "drama" || primary.ends_with(" drama") {
-            return Ok(Some(("Literature / Criticism / Genres & Forms / Drama", 4328)));
+            return Ok(Some(4328));
         }
         if primary == "poetry" || primary.ends_with(" poetry") {
-            return Ok(Some(("Literature / Criticism / Genres & Forms / Poetry", 4355)));
+            return Ok(Some(4355));
         }
-        return Ok(
-            (primary == "fiction" || primary.ends_with(" fiction") || primary == "literature" || primary.ends_with(" literature") || matches!(primary, "short stories" | "essays" | "novels")).then_some(("Literature / Criticism", 4309))
-        );
+        return Ok((primary == "fiction" || primary.ends_with(" fiction") || primary == "literature" || primary.ends_with(" literature") || matches!(primary, "short stories" | "essays" | "novels")).then_some(4309));
     }
     // Do not discard an audience or a later form to force an adult topic.
     if components.iter().skip(1).any(|component| rules().contains_key(&(MatchScope::FinalForm, (*component).to_owned()))) {
@@ -158,20 +169,21 @@ fn subdivision_fallback(heading: &str, source: &str) -> Result<Option<(&'static 
             if !rule.permits_source(source) {
                 continue;
             }
-            // Invalid candidate destinations also fail closed before we
-            // consider whether they shadow a broader route.
-            if unified_concept_id(&rule.destination) != Some(rule.concept_id) {
+            // Missing candidate identities fail closed before we consider
+            // whether they shadow a broader subject.
+            if !unified_concept_exists(rule.concept_id) {
                 return Err(());
             }
-            targets.push((rule.destination.as_str(), rule.concept_id));
+            targets.push(rule.concept_id);
         }
     }
-    targets.sort_unstable();
-    targets.dedup();
-    let candidates = targets.iter().filter(|(path, _)| !targets.iter().any(|(other, _)| other.starts_with(&format!("{path} / ")))).collect::<Vec<_>>();
-    match candidates.as_slice() {
-        [] => Ok(None),
-        [target] => Ok(Some(**target)),
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    let candidates = most_specific_concept_ids(targets);
+    match candidates.len() {
+        0 => Ok(None),
+        1 => Ok(candidates.first().copied()),
         _ => Err(()),
     }
 }
@@ -217,6 +229,6 @@ pub fn reviewed_source_heading_subject(subject: &BookSubject) -> Option<BookSubj
     if subject.authority() == Some(UNIFIED_SYSTEM_ID) {
         return None;
     }
-    let path = reviewed_source_heading_path(subject)?;
-    BookSubject::new(None, subject.name(), format!("{SOURCE_HEADING_PREFIX}{}", subject.source()), Some(UNIFIED_SYSTEM_ID.into()), Some(path.into())).ok()
+    let concept_id = reviewed_source_heading_concept(subject)?;
+    BookSubject::new(None, subject.name(), format!("{SOURCE_HEADING_PREFIX}{}", subject.source()), Some(UNIFIED_SYSTEM_ID.into()), Some(format!("concept:{concept_id}"))).ok()
 }

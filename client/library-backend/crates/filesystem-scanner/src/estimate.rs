@@ -1,6 +1,8 @@
 //! Fast pre-import size estimates using the same file eligibility as scanning.
 
 use book_model::BookFormat;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem as fs;
 use std::{
     collections::HashSet,
     path::PathBuf,
@@ -17,7 +19,7 @@ pub fn count_books(locators: Vec<String>, cancelled: &AtomicBool) -> Option<(u64
         if cancelled() {
             return None;
         }
-        let root = match root.canonicalize() {
+        let root = match fs::canonicalize(&root) {
             Ok(root) => root,
             Err(_) => {
                 unreadable += 1;
@@ -56,9 +58,5 @@ pub fn count_books(locators: Vec<String>, cancelled: &AtomicBool) -> Option<(u64
             }
         }
     }
-    if cancelled() {
-        None
-    } else {
-        Some((books, bytes, unreadable))
-    }
+    if cancelled() { None } else { Some((books, bytes, unreadable)) }
 }

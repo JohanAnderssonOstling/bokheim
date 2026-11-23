@@ -4,4 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+client-platform-runtime = { path = "../runtime" }
 tempfile = "3"

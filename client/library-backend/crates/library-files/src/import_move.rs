@@ -1,7 +1,11 @@
 //! A claimed native import source. Only private staging or the published
 //! inode is rolled back; the original pathname is never unlinked.
 
-use std::fs::{self, File, OpenOptions};
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem::temporary;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem::walk;
+use client_platform_runtime::filesystem::{self as fs, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -49,12 +53,12 @@ impl ImportMove {
         if !fs::symlink_metadata(source)?.is_file() {
             return Err(io::Error::other("only regular files can be moved into a library"));
         }
-        let source = source.canonicalize()?;
+        let source = fs::canonicalize(&source)?;
         // Keep staging and publication paths in the same canonical namespace,
         // including the verbatim drive prefix used by Windows canonicalize.
-        let destination_directory = destination_directory.canonicalize()?;
+        let destination_directory = fs::canonicalize(&destination_directory)?;
         let name = source.file_name().ok_or_else(|| io::Error::other("source has no filename"))?;
-        let directory = tempfile::Builder::new().prefix(".bokheim-import-move-").tempdir_in(&destination_directory)?;
+        let directory = temporary::Builder::new().prefix(".bokheim-import-move-").tempdir_in(&destination_directory)?;
         let intent = Intent { source: source.clone(), staged: directory.path().join(name), destination: None, identity: Some(file_identity(&source)?) };
         let lease = OpenOptions::new().read(true).write(true).create_new(true).open(directory.path().join("recovery.lock"))?;
         FileExt::try_lock_exclusive(&lease)?;
@@ -63,7 +67,7 @@ impl ImportMove {
         // Persist the private directory entry before removing the source name.
         sync_directory(claimed.directory.parent().unwrap())?;
         if let Some(root) = root {
-            claimed.registration = Some(register_move(&root.canonicalize()?, &claimed.directory.canonicalize()?)?);
+            claimed.registration = Some(register_move(&fs::canonicalize(&root)?, &fs::canonicalize(&claimed.directory)?)?);
         }
         // EXDEV is deliberately returned with the source untouched. Copy mode
         // remains available when the two locations are on different volumes.
@@ -119,7 +123,7 @@ impl ImportMove {
     }
 
     pub fn rollback(&mut self) -> io::Result<()> {
-        let current = if self.intent.staged.try_exists()? {
+        let current = if fs::try_exists(&self.intent.staged)? {
             Some(self.intent.staged.as_path())
         } else if let Some(path) = &self.published {
             if self.published_fingerprint != Some(fingerprint(path)?) {
@@ -171,7 +175,7 @@ fn registry(root: &Path) -> io::Result<PathBuf> {
     for path in [&metadata, &registry] {
         match fs::create_dir(path) {
             Ok(()) => sync_directory(path.parent().unwrap())?,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && fs::is_dir(&path) => {}
             Err(error) => return Err(error),
         }
     }
@@ -181,7 +185,7 @@ fn registry(root: &Path) -> io::Result<PathBuf> {
 fn register_move(root: &Path, directory: &Path) -> io::Result<PathBuf> {
     let relative = directory.strip_prefix(root).map_err(io::Error::other)?;
     let registry = registry(root)?;
-    let temporary = tempfile::NamedTempFile::new_in(&registry)?;
+    let temporary = temporary::NamedTempFile::new_in(&registry)?;
     serde_json::to_writer(temporary.as_file(), relative).map_err(io::Error::other)?;
     temporary.as_file().sync_all()?;
     let entry = registry.join(format!("{}.json", uuid::Uuid::new_v4()));
@@ -204,7 +208,7 @@ fn remove_registration(entry: &Path) -> io::Result<()> {
 /// lock keeps independently opened sessions from recovering active imports.
 /// Published files are retained only when the database confirms their commit.
 pub fn recover_import_moves(root: &Path, mut is_committed: impl FnMut(&Path) -> io::Result<bool>) -> io::Result<Vec<String>> {
-    let root = root.canonicalize()?;
+    let root = fs::canonicalize(&root)?;
     let mut unresolved = Vec::new();
     let registry = registry(&root)?;
     let mut missing = Vec::new();
@@ -214,17 +218,17 @@ pub fn recover_import_moves(root: &Path, mut is_committed: impl FnMut(&Path) -> 
             continue;
         }
         let result = (|| -> io::Result<()> {
-            let relative: PathBuf = serde_json::from_reader(File::open(entry.path())?).map_err(io::Error::other)?;
+            let relative: PathBuf = serde_json::from_reader(fs::open(entry.path())?).map_err(io::Error::other)?;
             if relative.as_os_str().is_empty() || !relative.components().all(|component| matches!(component, Component::Normal(_))) || !relative.file_name().is_some_and(|name| name.to_string_lossy().starts_with(".bokheim-import-move-")) {
                 return Err(io::Error::other("invalid registered move path"));
             }
             let directory = root.join(relative);
-            if directory.try_exists()? {
-                if !directory.canonicalize()?.starts_with(&root) {
+            if fs::try_exists(&directory)? {
+                if !fs::canonicalize(&directory)?.starts_with(&root) {
                     return Err(io::Error::other("registered move escaped the library"));
                 }
                 recover_one(&directory, &mut is_committed)?;
-                if !directory.try_exists()? {
+                if !fs::try_exists(&directory)? {
                     remove_registration(&entry.path())?;
                 }
             } else {
@@ -239,11 +243,14 @@ pub fn recover_import_moves(root: &Path, mut is_committed: impl FnMut(&Path) -> 
             unresolved.push(format!("{}: {error}", entry.path().display()));
         }
     }
-    if missing.is_empty() {
+    // Older releases did not register claims. Discover them once, then use
+    // the registry on ordinary opens. Failed walks remain eligible for retry.
+    let legacy_complete = registry.join("legacy-recovery-complete");
+    if missing.is_empty() && fs::try_exists(&legacy_complete)? {
         return Ok(unresolved);
     }
     let mut scanned = true;
-    let mut entries = walkdir::WalkDir::new(&root).follow_links(false).into_iter();
+    let mut entries = walk::WalkDir::new(&root).follow_links(false).into_iter();
     while let Some(entry) = entries.next() {
         let entry = match entry {
             Ok(entry) => entry,
@@ -261,10 +268,10 @@ pub fn recover_import_moves(root: &Path, mut is_committed: impl FnMut(&Path) -> 
             entries.skip_current_dir();
             let result = (|| -> io::Result<()> {
                 let registration = register_move(&root, entry.path())?;
-                if entry.path().try_exists()? {
+                if fs::try_exists(entry.path())? {
                     recover_one(entry.path(), &mut is_committed)?;
                 }
-                if !entry.path().try_exists()? {
+                if !fs::try_exists(entry.path())? {
                     remove_registration(&registration)?;
                 }
                 Ok(())
@@ -278,6 +285,10 @@ pub fn recover_import_moves(root: &Path, mut is_committed: impl FnMut(&Path) -> 
         }
     }
     if scanned {
+        if !fs::try_exists(&legacy_complete)? {
+            fs::create(&legacy_complete)?.sync_all()?;
+            sync_directory(&registry)?;
+        }
         for entry in missing {
             remove_registration(&entry)?;
         }
@@ -292,7 +303,7 @@ fn recover_one(directory: &Path, is_committed: &mut impl FnMut(&Path) -> io::Res
         Err(error) if error.kind() == io::ErrorKind::WouldBlock || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => return Ok(()),
         Err(error) => return Err(error),
     }
-    let mut intent: Intent = match File::open(directory.join("recovery.json")) {
+    let mut intent: Intent = match fs::open(directory.join("recovery.json")) {
         Ok(file) => {
             let mut latest = None;
             for record in serde_json::Deserializer::from_reader(file).into_iter::<Intent>() {
@@ -318,21 +329,17 @@ fn recover_one(directory: &Path, is_committed: &mut impl FnMut(&Path) -> io::Res
     if !intent.source.is_absolute() || intent.source.file_name().is_none() || intent.staged != directory.join(intent.source.file_name().unwrap()) || intent.destination.as_ref().is_some_and(|path| path.parent() != Some(parent)) {
         return Err(io::Error::other("invalid move recovery paths; files retained"));
     }
-    let restore = if intent.staged.try_exists()? {
+    let restore = if fs::try_exists(&intent.staged)? {
         Some(intent.staged.as_path())
-    } else if let Some(destination) = intent.destination.as_deref().filter(|path| path.exists()) {
+    } else if let Some(destination) = intent.destination.as_deref().filter(|path| fs::exists(&path)) {
         // The candidate was journaled before rename. Prove that publication
         // actually succeeded before touching it, including the crash window
         // before its fingerprint could be recorded.
         if intent.identity.is_none() || Some(file_identity(destination)?) != intent.identity {
             return Err(io::Error::other("published file identity changed; files retained"));
         }
-        if is_committed(destination)? {
-            None
-        } else {
-            Some(destination)
-        }
-    } else if intent.source.try_exists()? && (intent.identity.is_none() || Some(file_identity(&intent.source)?) == intent.identity) {
+        if is_committed(destination)? { None } else { Some(destination) }
+    } else if fs::try_exists(&intent.source)? && (intent.identity.is_none() || Some(file_identity(&intent.source)?) == intent.identity) {
         None // Interrupted before claim or after successful restoration.
     } else {
         return Err(io::Error::other("moved file could not be located; journal retained"));

@@ -28,7 +28,7 @@ mod sync;
 pub use book_access::remote_file::AudioStreamControl;
 pub use book_access::remote_file::RemoteFile;
 pub use downloads::LibraryBookStorage;
-pub use storage::StorageCopyProgress;
+pub use storage::{StorageCopiedBook, StorageCopyProgress};
 #[cfg(target_arch = "wasm32")]
 #[path = "../browser_audiobook.rs"]
 pub mod browser_audiobook;

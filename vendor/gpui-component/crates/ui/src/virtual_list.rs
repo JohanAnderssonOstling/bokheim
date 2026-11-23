@@ -231,6 +231,13 @@ impl VirtualList {
         self
     }
 
+    /// The table owns the shared horizontal scroll bounds in its header.
+    pub(crate) fn with_scroll_handle(mut self, scroll_handle: &VirtualListScrollHandle) -> Self {
+        self.base = div().id(self.id.clone()).size_full();
+        self.scroll_handle = scroll_handle.clone();
+        self
+    }
+
     /// Set the sizing behavior for the list.
     pub fn with_sizing_behavior(mut self, behavior: ListSizingBehavior) -> Self {
         self.sizing_behavior = behavior;

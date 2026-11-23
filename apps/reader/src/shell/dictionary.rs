@@ -394,7 +394,7 @@ impl DictionaryPopup {
         let mut popup = Self {
             translation: Some(translation),
             show_translation: true,
-            result: Some(Ok(DictionaryLookup { dictionaries: Vec::new(), enabled_count: 0, errors: Vec::new() })),
+            result: Some(Ok(DictionaryLookup { dictionaries: Vec::new(), installed_count: 0, errors: Vec::new() })),
             wikipedia_request: Some(request),
             ..Self::empty(query, Vec::new(), anchor, window, cx)
         };
@@ -534,6 +534,9 @@ impl DictionaryPopup {
     }
 
     fn wikipedia_result_count(&self) -> usize {
+        if self.translation.is_some() && self.wikipedia_hits.is_empty() && self.wikipedia.is_none() && self.wikipedia_failed.is_none() {
+            return 0;
+        }
         if self.wikipedia_eligible() {
             self.wikipedia_hits.len().max(usize::from(self.wikipedia.is_some() || self.wikipedia_loading || self.wikipedia_failed.is_some()))
         } else {
@@ -717,11 +720,21 @@ impl DictionaryPopup {
 
     fn start_wikipedia(&mut self, query: String, languages: Vec<LanguageTag>, cx: &mut Context<Self>) {
         let Some(request) = self.wikipedia_request.clone() else { return };
+        let mut equivalents = (self.translation.is_some() && self.wikipedia_hits.is_empty()).then(|| wikipedia::Equivalents::new(self.wikipedia_equivalents.targets.clone()));
+        let lookups = super::lookups::client(cx);
         self.wikipedia_loading = true;
         self.wikipedia_failed = None;
         self._wikipedia_task = cx.spawn(async move |this, cx| {
             let result = request(query.clone(), languages).await;
+            let result = if let Some(equivalents) = &mut equivalents {
+                equivalents.filter_lookup(result, lookups, cx).await
+            } else {
+                result
+            };
             let _ = this.update(cx, |this, cx| {
+                if let Some(equivalents) = equivalents {
+                    this.wikipedia_equivalents = equivalents;
+                }
                 this.wikipedia_loading = false;
                 if !this.showing_translation() {
                     this.popup_height = None;
@@ -810,6 +823,8 @@ impl Render for DictionaryPopup {
                 if event.keystroke.key == "escape" {
                     cx.emit(Closed);
                     cx.stop_propagation();
+                } else if matches!(event.keystroke.key.as_str(), "pageup" | "pagedown") {
+                    cx.stop_propagation();
                 }
             })).into_any_element();
         }
@@ -852,10 +867,10 @@ impl Render for DictionaryPopup {
                         definitions = definitions.child(text!(reader::downloading_a_dictionary_results_will_update_when_it_is_installed));
                     } else if dictionary_total == 0 && self.wikipedia_eligible() && self.wikipedia_attempted && self.wikipedia_failed.is_none() && wikipedia.is_none() && !self.wikipedia_loading {
                         definitions = definitions.child(text!(reader::no_wikipedia_article_found));
-                    } else if self.translation.is_none() && result.enabled_count == 0 && self.wikipedia_failed.is_none() && wikipedia.is_none() && !self.wikipedia_loading {
-                        definitions = definitions.child(text!(reader::open_dictionary_settings_to_download_import_or_enable_a_dictionary_for_offline));
+                    } else if self.translation.is_none() && result.installed_count == 0 && self.wikipedia_failed.is_none() && wikipedia.is_none() && !self.wikipedia_loading {
+                        definitions = definitions.child(text!(reader::open_dictionary_settings_to_download_or_import_a_dictionary_for_offline));
                     } else if self.translation.is_none() && dictionary_total == 0 && self.wikipedia_failed.is_none() && wikipedia.is_none() && !self.wikipedia_loading {
-                        definitions = definitions.child(text!(reader::no_definition_found_in_the_enabled_dictionaries));
+                        definitions = definitions.child(text!(reader::no_definition_found_in_the_installed_dictionaries));
                     }
                     if let Some((_, definition)) = self.dictionary_entries().nth(self.dictionary_index) {
                         title = definition.word.trim_start().to_owned();
@@ -1128,8 +1143,8 @@ impl DictionaryPopup {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
                     "escape" => cx.emit(Closed),
-                    "left" if !event.keystroke.modifiers.modified() => this.navigate_result(-1, window, cx),
-                    "right" if !event.keystroke.modifiers.modified() => this.navigate_result(1, window, cx),
+                    "left" | "pageup" if !event.keystroke.modifiers.modified() => this.navigate_result(-1, window, cx),
+                    "right" | "pagedown" if !event.keystroke.modifiers.modified() => this.navigate_result(1, window, cx),
                     _ => return,
                 }
                 cx.stop_propagation();

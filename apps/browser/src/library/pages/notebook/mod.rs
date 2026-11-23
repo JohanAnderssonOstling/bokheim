@@ -1,12 +1,14 @@
 //! Annotations and book text share book rows, controls and page loading.
+
 use ui_text::text;
 
 mod overlay;
 mod row;
 
 use super::pagination::{compatible_pages, merge_page, page_request_for_slots};
+use super::with_retry_banner;
 use crate::library::services::{LibraryAnnotationsChanged, LibraryContentsChanged, LibraryContext, LibraryDownloadChanged};
-use crate::library::widgets::{BookCardView, Paginator, PaginatorAxis, PaginatorChild, PaginatorChildren, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy};
+use crate::library::widgets::{BookCardView, Paginator, PaginatorAxis, PaginatorChild, PaginatorChildren, PaginatorEvent, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy, new_paginator};
 use crate::navigation::LibraryRoute;
 use futures_util::future::try_join_all;
 use gpui::prelude::*;
@@ -22,7 +24,6 @@ use row::{NotebookRow, RowData};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     mem,
-    time::Duration,
 };
 use ui_components as components;
 
@@ -66,9 +67,11 @@ impl NotebookPage {
         Self::new_kind(library, true, cx)
     }
     fn new_kind(library: LibraryContext, content_search: bool, cx: &mut Context<Self>) -> Self {
-        let flow = cx.new(|_| Paginator::new("notebook-books", []).flow_axis(PaginatorAxis::Vertical));
-        let flow_updates = cx.observe(&flow, move |page: &mut Self, _, cx| {
-            page.load_visible_page(cx);
+        let flow = cx.new(|_| new_paginator("notebook-books", []).flow_axis(PaginatorAxis::Vertical));
+        let flow_updates = cx.subscribe(&flow, |page: &mut Self, _, event: &PaginatorEvent, cx| {
+            if *event == PaginatorEvent::PageChanged {
+                page.load_visible_page(cx);
+            }
         });
         let cover_text_updates = cx.observe_global::<crate::stores::CoverTextSetting>(|page: &mut Self, cx| {
             page.layout = None;
@@ -190,10 +193,6 @@ impl NotebookPage {
         let query = self.query.clone();
         let library = self.library.backend().clone();
         self.request = Some(cx.spawn(async move |page, cx| {
-            // Coalesce search keystrokes; viewport requests start immediately.
-            if continuation.is_none() {
-                cx.background_executor().timer(Duration::from_millis(60)).await;
-            }
             let result = if content_search {
                 async {
                     let Some(page) = library.text_search(query.clone(), request).await? else { return Ok(None) };
@@ -501,14 +500,20 @@ impl Render for NotebookPage {
                 }
             }))
             .child(topbar)
-            .child(div().flex_1().min_h_0().px(rems(0.5)).child(self.flow.clone()));
-        if let Some(error) = self.error.clone() {
-            body = body.child(div().p(rems(1.0)).child(components::error_text(theme).child(error)).child(components::outlined_text_button("notebook-retry", text!(common::retry)).on_click(cx.listener(|page, _, _, cx| page.load(None, cx)))));
-        }
+            .child(div().relative().flex_1().min_h_0().px(rems(0.5)).child(self.flow.clone()).when(self.request.is_none() && self.error.is_none() && self.rows.is_empty(), |body| {
+                let message = if self.content_search && self.query.search.trim().chars().take(3).count() < 3 {
+                    text!(browse::search_minimum_characters)
+                } else if self.content_search || !self.query.search.is_empty() || !self.query.formats.is_empty() {
+                    text!(browse::no_matches)
+                } else {
+                    text!(browse::no_annotations_yet)
+                };
+                body.child(components::absolute_full_size().flex().items_center().justify_center().child(components::reader_state_note(message, theme)))
+            }));
         if self.options_open {
             body = body.child(self.options_sheet(cx));
         }
-        body
+        with_retry_banner(body.into_any_element(), self.error.clone(), "notebook-retry", theme, cx.listener(|page, _, _, cx| page.load(None, cx)))
     }
 }
 

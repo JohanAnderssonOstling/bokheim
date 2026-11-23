@@ -1128,6 +1128,12 @@ impl PageTextGeometry {
         self.select_positions(anchor, focus.position, options)
     }
 
+    pub fn select_source_range_with_options(&self, first_source_index: usize, last_source_index: usize, options: SelectionOptions) -> Option<PageSelection> {
+        let first = self.characters.iter().position(|character| character.source_index == first_source_index)?;
+        let last = self.characters.iter().position(|character| character.source_index == last_source_index)?;
+        self.select_positions(first, last, options)
+    }
+
     fn select_positions(&self, anchor: usize, focus: usize, options: SelectionOptions) -> Option<PageSelection> {
         let (first, last) = if anchor <= focus { (anchor, focus) } else { (focus, anchor) };
         let (first, last) = match options.granularity {

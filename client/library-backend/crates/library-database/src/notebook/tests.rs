@@ -8,7 +8,7 @@ fn book(db: &Database, byte: u8, title: &str, format: BookFormat, downloaded: bo
     let id = BookId::from_bytes([byte; 32]);
     db.connection.execute("INSERT INTO book(content_hash,title,format) VALUES(?1,?2,?3)", params![id, title, format as i64]).unwrap();
     db.connection
-        .execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,?2,'fixture',?3 FROM book WHERE content_hash=?4", params![ROOT_DIR_ID.to_string(), format!("{byte}.epub"), downloaded, id])
+        .execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,?2,X'0100000000000000',?3 FROM book WHERE content_hash=?4", params![ROOT_DIR_ID.to_string(), format!("{byte}.epub"), downloaded, id])
         .unwrap();
     id
 }

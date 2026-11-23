@@ -95,12 +95,11 @@ impl<S: Storage> DictionaryStore<S> {
             }
         }
         let id = uuid::Uuid::new_v4().to_string();
-        let size_bytes = components.iter().map(|file| file.bytes.len() as u64).sum();
         let names = components.iter().map(|file| file.name.clone()).collect();
         let result = async {
             let components = components.into_iter().map(|file| (file.name, file.bytes)).collect();
             self.storage_context.write_all(&id, components).await?;
-            catalog.push(DictionaryInfo { id: id.clone(), metadata, enabled: true, size_bytes, files: names, curated_id: curated.map(|spec| spec.id.clone()) });
+            catalog.push(DictionaryInfo { id: id.clone(), metadata, files: names, curated_id: curated.map(|spec| spec.id.clone()) });
             self.save_catalog(&catalog).await?;
             self.wake.send_replace(());
             Ok(catalog)
@@ -113,17 +112,13 @@ impl<S: Storage> DictionaryStore<S> {
     }
 
     /// Priority is the catalog order. A move changes one slot at a time.
-    pub async fn configure(&self, id: String, enabled: bool, direction: i8) -> Result<Vec<DictionaryInfo>> {
-        let mut indexes = self.storage.lock().await;
+    pub async fn reorder(&self, id: String, direction: i8) -> Result<Vec<DictionaryInfo>> {
+        let _guard = self.storage.lock().await;
         let mut catalog = self.catalog().await?;
         let index = catalog.iter().position(|item| item.id == id).ok_or_else(|| String::from("Dictionary was removed"))?;
-        catalog[index].enabled = enabled;
         let next = index.saturating_add_signed(direction.signum() as isize).min(catalog.len() - 1);
         catalog.swap(index, next);
         self.save_catalog(&catalog).await?;
-        if !enabled {
-            indexes.remove(&id);
-        }
         self.wake.send_replace(());
         Ok(catalog)
     }
@@ -154,15 +149,15 @@ impl<S: Storage> DictionaryStore<S> {
         let languages: Vec<_> = languages.iter().filter_map(|tag| dictionary_catalog::language(tag)).collect();
         let mut indexes = self.storage.lock().await;
         let catalog = self.catalog().await?;
-        indexes.retain(|id, _| catalog.iter().any(|item| item.enabled && &item.id == id));
-        let mut result = DictionaryLookup { dictionaries: Vec::new(), enabled_count: catalog.iter().filter(|item| item.enabled).count(), errors: Vec::new() };
+        indexes.retain(|id, _| catalog.iter().any(|item| &item.id == id));
+        let mut result = DictionaryLookup { dictionaries: Vec::new(), installed_count: catalog.len(), errors: Vec::new() };
         // Unknown source languages participate in the primary search. Known
         // other languages are fallback for foreign words in a tagged book.
         for fallback in [false, true] {
             if fallback && (!result.dictionaries.is_empty() || languages.is_empty()) {
                 break;
             }
-            for item in catalog.iter().filter(|item| item.enabled) {
+            for item in &catalog {
                 let other_language = !languages.is_empty() && item.metadata.language.as_deref().and_then(dictionary_catalog::language).is_some_and(|language| !languages.contains(&language));
                 if other_language != fallback {
                     continue;

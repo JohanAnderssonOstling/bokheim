@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 ui-text = { path = "../../../../ui-text" }
 serde = { version = "1", features = ["derive"] }
-ui-components = { path = "../../../../components" }
+ui-components = { path = "../../../../components", default-features = false }
 gpui.workspace = true
 gpui-image-eviction = { path = "../../../../../../HtmlEngine/adapters/gpui-image-eviction" }
 gpui-component.workspace = true

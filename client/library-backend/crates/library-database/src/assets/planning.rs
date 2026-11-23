@@ -1,5 +1,4 @@
 //! Transfer planning, snapshots, and conditional settlements.
-use library_model::BookUploadIntent;
 use std::collections::HashSet;
 
 use crate::placements::{FolderPaths, validate_stored_book_path, validate_stored_placement};
@@ -13,12 +12,6 @@ use crate::{Database, DatabaseError};
 
 use super::TransfersSql;
 use sync_common::BookId;
-
-#[derive(Clone, Debug)]
-pub struct BookUploadSnapshot {
-    pub local_versions: Vec<(String, String, String)>,
-    pub intent: Option<BookUploadIntent>,
-}
 
 impl Database {
     /// One bounded page of covers to fetch. Skip books without a local path;

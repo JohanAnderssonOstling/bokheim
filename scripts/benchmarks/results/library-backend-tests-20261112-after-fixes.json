@@ -1,0 +1,72 @@
+[
+  {
+    "crate": "audiobook-archive",
+    "passed": 5,
+    "failed": 0,
+    "seconds": 0.0
+  },
+  {
+    "crate": "filesystem-scanner",
+    "passed": 17,
+    "failed": 0,
+    "seconds": 0.19
+  },
+  {
+    "crate": "library-backend",
+    "passed": 33,
+    "failed": 0,
+    "seconds": 1.23
+  },
+  {
+    "crate": "library-catalog",
+    "passed": 3,
+    "failed": 0,
+    "seconds": 0.84
+  },
+  {
+    "crate": "library-database",
+    "passed": 162,
+    "failed": 0,
+    "seconds": 4.41
+  },
+  {
+    "crate": "library-files",
+    "passed": 44,
+    "failed": 0,
+    "seconds": 0.12
+  },
+  {
+    "crate": "library-import",
+    "passed": 46,
+    "failed": 0,
+    "seconds": 1.76
+  },
+  {
+    "crate": "library-management",
+    "passed": 10,
+    "failed": 0,
+    "seconds": 0.01
+  },
+  {
+    "crate": "library-registry",
+    "passed": 19,
+    "failed": 0,
+    "seconds": 0.07
+  },
+  {
+    "crate": "library-services",
+    "passed": 15,
+    "failed": 0,
+    "seconds": 0.0
+  },
+  {
+    "crate": "library-database",
+    "target": "catalog_pagination",
+    "features": [
+      "scanner"
+    ],
+    "passed": 1,
+    "failed": 0,
+    "seconds": 1.08
+  }
+]

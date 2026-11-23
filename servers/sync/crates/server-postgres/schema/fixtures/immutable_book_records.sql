@@ -18,24 +18,20 @@ BEGIN
         ON CONFLICT(library_id,kind,entity_key,entity_subkey) DO UPDATE SET
             value=EXCLUDED.value,changed_at=EXCLUDED.changed_at,replica_id=EXCLUDED.replica_id,
             replica_seq=EXCLUDED.replica_seq,server_seq=DEFAULT;
-        IF record_kind='reading_position' THEN
-            IF NOT EXISTS(SELECT 1 FROM sync_state WHERE library_id='immutable-record-test' AND kind=record_kind AND value=decode('02','hex')) THEN
-                RAISE EXCEPTION 'mutable reading position did not advance';
-            END IF;
-        ELSE
-            IF NOT EXISTS(SELECT 1 FROM sync_state WHERE library_id='immutable-record-test' AND kind=record_kind AND value=decode('01','hex') AND changed_at=1 AND replica_id='first') THEN
-                RAISE EXCEPTION 'immutable record was replaced: %',record_kind;
-            END IF;
-            SELECT server_seq INTO repaired_revision FROM sync_state
-            WHERE library_id='immutable-record-test' AND kind=record_kind;
-            IF repaired_revision<=accepted_revision THEN
-                RAISE EXCEPTION 'accepted record was not redelivered to its competing author';
-            END IF;
-            UPDATE sync_state SET value=decode('01','hex'),changed_at=1,replica_id='first',replica_seq=1,server_seq=DEFAULT
-            WHERE library_id='immutable-record-test' AND kind=record_kind;
-            IF NOT EXISTS(SELECT 1 FROM sync_state WHERE library_id='immutable-record-test' AND kind=record_kind AND server_seq=repaired_revision) THEN
-                RAISE EXCEPTION 'exact retry churned the immutable record revision';
-            END IF;
+        IF NOT EXISTS(SELECT 1 FROM sync_state WHERE library_id='immutable-record-test' AND kind=record_kind AND value=decode('02','hex') AND changed_at=2 AND replica_id='second') THEN
+            RAISE EXCEPTION 'newer record did not advance: %',record_kind;
+        END IF;
+        UPDATE sync_state SET value=decode('01','hex'),changed_at=1,replica_id='first',replica_seq=1,server_seq=DEFAULT
+        WHERE library_id='immutable-record-test' AND kind=record_kind;
+        SELECT server_seq INTO repaired_revision FROM sync_state
+        WHERE library_id='immutable-record-test' AND kind=record_kind;
+        IF repaired_revision<=accepted_revision THEN
+            RAISE EXCEPTION 'accepted record was not redelivered to its competing author';
+        END IF;
+        UPDATE sync_state SET value=decode('02','hex'),changed_at=2,replica_id='second',replica_seq=1,server_seq=DEFAULT
+        WHERE library_id='immutable-record-test' AND kind=record_kind;
+        IF NOT EXISTS(SELECT 1 FROM sync_state WHERE library_id='immutable-record-test' AND kind=record_kind AND server_seq=repaired_revision) THEN
+            RAISE EXCEPTION 'exact retry churned the record revision';
         END IF;
     END LOOP;
 END $$;

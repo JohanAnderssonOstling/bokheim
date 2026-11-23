@@ -9,6 +9,11 @@ fn names(value: Option<&Value>) -> Vec<String> {
 }
 
 pub(super) fn parse_product(value: &Value, region: &str, source: DiscoverySource) -> Result<Candidate, String> {
+    // Search also returns podcast series, which have no recording or chapter
+    // endpoint. They must not become unresolved audiobook candidates.
+    if value.get("content_type").and_then(Value::as_str).is_some_and(|kind| kind.eq_ignore_ascii_case("podcast")) || value.get("content_delivery_type").and_then(Value::as_str).is_some_and(|kind| kind.eq_ignore_ascii_case("PodcastParent")) {
+        return Err("Audible product is a podcast, not an audiobook recording".into());
+    }
     let asin = value.get("asin").and_then(Value::as_str).filter(|s| valid_asin(s)).ok_or("Invalid Audible ASIN")?;
     let title = value.get("title").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).ok_or("Audible title missing")?;
     let text = |field: &str| value.get(field).and_then(Value::as_str).map(|s| s.chars().take(4096).collect::<String>());

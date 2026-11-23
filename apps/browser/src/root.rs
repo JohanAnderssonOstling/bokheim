@@ -427,10 +427,7 @@ mod session_tests {
         shortcut_save.await.unwrap();
         second.update(cx, |root, _, cx| assert_eq!(root.preferences.read(cx).browsing().keyboard_shortcuts(), &shortcuts)).unwrap();
         assert_eq!(second.update(cx, |root, _, cx| root.preferences.read(cx).ui_font_size_px()).unwrap(), 18);
-        let metered_save = first.update(cx, |root, _, cx| root.preferences.update(cx, |preferences, cx| preferences.save_metered_transfers(true, cx))).unwrap();
         second.update(cx, |root, _, cx| root.preferences.update(cx, |preferences, cx| preferences.update_browsing(BrowsingPreferencePatch::CatalogLanguages(Some(vec!["swe".into()])), cx)).unwrap()).unwrap();
-        metered_save.await.unwrap();
-        assert!(second.update(cx, |root, _, cx| root.preferences.read(cx).browsing().allow_metered_transfers()).unwrap());
         assert_eq!(first.update(cx, |root, _, cx| root.preferences.read(cx).browsing().catalog_languages().map(<[String]>::to_vec)).unwrap(), Some(vec!["swe".into()]));
         first.update(cx, |root, window, cx| root.open_folder(*library.library_id(), ROOT_DIR_ID, "Folders".into(), window, cx)).unwrap();
         cx.run_until_parked();

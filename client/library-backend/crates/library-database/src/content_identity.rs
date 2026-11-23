@@ -1,15 +1,12 @@
 //! Stable book references and independently verified byte revisions.
 
-use crate::query_methods::try_for_each_row;
+use crate::query_methods::fingerprint_column;
 use crate::{Database, DatabaseError};
-use book_model::BookFormat;
 use book_inspection_contract::PdfSourceIdentity;
+use book_model::BookFormat;
 use content_address::{BookId, ContentHash};
-use include_sqlite_sql::include_sql;
 use rusqlite::{Connection, OptionalExtension, params};
 use sync_common::{DirId, LibraryId, ReplicaId};
-
-include_sql!("src/content_identity_operations.sql");
 
 pub(crate) fn initialize_scope(connection: &Connection, library: Option<LibraryId>, replica: ReplicaId) -> Result<(), DatabaseError> {
     let existing: Option<Vec<u8>> = connection.query_row("SELECT scope FROM local_identity_scope WHERE singleton=1", [], |row| row.get(0)).optional()?;
@@ -72,46 +69,6 @@ pub(crate) fn freeze_content(connection: &Connection, book: BookId, checksum: Co
     record_alias(connection, book, checksum)
 }
 
-/// Canonicalize distinct books under the caller's writer transaction.
-/// The manifest query has already grouped duplicate upload acknowledgements.
-pub(crate) fn freeze_contents(connection: &Connection, contents: &[(BookId, ContentHash, Option<u64>)]) -> Result<(), DatabaseError> {
-    if contents.is_empty() {
-        return Ok(());
-    }
-    let contents = contents
-        .iter()
-        .map(|(book, checksum, size)| {
-            let size = size.map(i64::try_from).transpose().map_err(DatabaseError::operation)?;
-            if size.is_some_and(|size| size <= 0) {
-                return Err(DatabaseError::message("the uploaded byte length of a book cannot change"));
-            }
-            Ok((*book, *checksum, size))
-        })
-        .collect::<Result<Vec<_>, DatabaseError>>()?;
-    let contents = serde_json::to_string(&contents).map_err(DatabaseError::operation)?;
-    try_for_each_row(
-        |read| connection.content_validate_batch(&contents, read),
-        |row| {
-            let current = row.get::<_, Option<ContentHash>>(0)?;
-            let size = row.get::<_, Option<i64>>(1)?;
-            let checksum = row.get::<_, ContentHash>(2)?;
-            let requested_size = row.get::<_, Option<i64>>(3)?;
-            if current.is_some_and(|current| current != checksum) {
-                return Err(DatabaseError::message("the uploaded content hash of a book cannot change"));
-            }
-            if size.zip(requested_size).is_some_and(|(stored, requested)| stored != requested) {
-                return Err(DatabaseError::message("the uploaded byte length of a book cannot change"));
-            }
-            Ok(())
-        },
-    )?;
-    connection.content_freeze_batch(&contents)?;
-    connection.content_update_uploads_batch(&contents)?;
-    connection.content_forget_origins_batch(&contents)?;
-    connection.content_record_aliases_batch(&contents)?;
-    Ok(())
-}
-
 pub(crate) fn observe_content(connection: &Connection, book: BookId, directory: DirId, checksum: ContentHash) -> Result<(), DatabaseError> {
     record_alias(connection, book, checksum)?;
     connection.execute("INSERT INTO local_file_content(book_id,dir_id,byte_hash) VALUES(?1,?2,?3) ON CONFLICT(book_id,dir_id) DO UPDATE SET byte_hash=excluded.byte_hash", params![book, directory.to_string(), checksum])?;
@@ -136,7 +93,7 @@ impl Database {
             .connection
             .query_row(
                 "SELECT b.content_hash FROM book b JOIN book_dir d ON d.book_row_id=b.row_id WHERE d.dir_id=?1 AND d.file_name=?2 AND d.local_hash=?3 AND d.is_downloaded=1 AND d.deleted_at IS NULL AND b.deleted_at IS NULL AND b.format=?4",
-                params![directory.to_string(), name, fingerprint.to_string(), BookFormat::Mp3Folder as i64],
+                params![directory.to_string(), name, fingerprint.to_le_bytes(), BookFormat::Mp3Folder as i64],
                 |row| row.get(0),
             )
             .optional()?)
@@ -161,17 +118,17 @@ impl Database {
 
     /// Reuse only the exact device-observed file revision from a prior commit.
     pub fn cached_import_source(&self, path: &str, fingerprint: u64) -> Result<Option<ContentHash>, DatabaseError> {
-        Ok(self.connection.query_row("SELECT byte_hash FROM local_import_source WHERE path=?1 AND fingerprint=?2", params![path, fingerprint.to_string()], |row| row.get(0)).optional()?)
+        Ok(self.connection.query_row("SELECT byte_hash FROM local_import_source WHERE path=?1 AND fingerprint=?2", params![path, fingerprint.to_le_bytes()], |row| row.get(0)).optional()?)
     }
 
     /// A stored checksum is valid for a destination only at its observed revision.
-    pub fn local_content_revision(&self, book: BookId, directory: DirId, checksum: ContentHash) -> Result<Option<String>, DatabaseError> {
-        Ok(self.connection.query_row("SELECT d.local_hash FROM local_file_content f JOIN book b ON b.content_hash=f.book_id JOIN book_dir d ON d.book_row_id=b.row_id AND d.dir_id=f.dir_id WHERE f.book_id=?1 AND f.dir_id=?2 AND f.byte_hash=?3 AND d.deleted_at IS NULL AND d.is_downloaded=1 AND d.local_hash<>''", params![book, directory.to_string(), checksum], |row| row.get(0)).optional()?)
+    pub fn local_content_revision(&self, book: BookId, directory: DirId, checksum: ContentHash) -> Result<Option<u64>, DatabaseError> {
+        Ok(self.connection.query_row("SELECT d.local_hash FROM local_file_content f JOIN book b ON b.content_hash=f.book_id JOIN book_dir d ON d.book_row_id=b.row_id AND d.dir_id=f.dir_id WHERE f.book_id=?1 AND f.dir_id=?2 AND f.byte_hash=?3 AND d.deleted_at IS NULL AND d.is_downloaded=1 AND d.local_hash IS NOT NULL", params![book, directory.to_string(), checksum], |row| fingerprint_column(row, 0)).optional()?.flatten())
     }
     /// Resolve a byte-hash reference once at the reader boundary. All reader
     /// state remains keyed by the returned stable identity.
     pub fn resolve_book_identity(&self, reference: BookId) -> Result<BookId, DatabaseError> {
-        let reference = crate::migration::book_ids::mapping(&self.connection)?.get(&reference).copied().unwrap_or(reference);
+        let reference = self.connection.query_row("SELECT book_id FROM local_legacy_book_id WHERE legacy_id=?1", [reference], |row| row.get(0)).optional()?.unwrap_or(reference);
         let exists: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=?1)", [reference], |row| row.get(0))?;
         if exists {
             return Ok(reference);
@@ -260,8 +217,8 @@ impl Database {
             .connection
             .prepare_cached(
                 "SELECT b.content_hash,b.format FROM book b WHERE b.deleted_at IS NULL
-            AND (b.content_hash=?1 OR EXISTS(SELECT 1 FROM local_content_alias a WHERE a.book_id=b.content_hash AND a.byte_hash=?2)
-                OR EXISTS(SELECT 1 FROM book_content c WHERE c.book_id=b.content_hash AND c.canonical_hash=?2))
+            AND b.content_hash IN (SELECT ?1 UNION SELECT book_id FROM local_content_alias WHERE byte_hash=?2
+                UNION SELECT book_id FROM book_content WHERE canonical_hash=?2)
             AND EXISTS(SELECT 1 FROM book_dir d WHERE d.book_row_id=b.row_id AND d.deleted_at IS NULL)
             ORDER BY b.content_hash",
             )?
@@ -286,11 +243,11 @@ impl Database {
 
     /// Called after an intentional local PDF annotation write. Reader state
     /// continues to use `book`; this write never authors synchronized state.
-    pub fn record_local_annotation_export(&self, book: BookId, directory: DirId, checksum: ContentHash, fingerprint: &str, size_bytes: u64) -> Result<(), DatabaseError> {
+    pub fn record_local_annotation_export(&self, book: BookId, directory: DirId, checksum: ContentHash, fingerprint: u64, size_bytes: u64) -> Result<(), DatabaseError> {
         self.write(|tx| {
             let updated = tx.execute(
                 "UPDATE book_dir SET local_hash=?3,size_bytes=?4,is_downloaded=1 WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND dir_id=?2 AND deleted_at IS NULL",
-                params![book, directory.to_string(), fingerprint, i64::try_from(size_bytes).map_err(DatabaseError::operation)?],
+                params![book, directory.to_string(), fingerprint.to_le_bytes(), i64::try_from(size_bytes).map_err(DatabaseError::operation)?],
             )?;
             if updated != 1 {
                 return Err(DatabaseError::message("annotation export placement is no longer present"));
@@ -324,7 +281,7 @@ mod tests {
         db.initialize_library().unwrap();
         let book = BookId::from(hash(b"original PDF"));
         db.connection.execute("INSERT INTO book(content_hash,format,title) VALUES(?1,?2,'Book')", params![book, BookFormat::Pdf as i64]).unwrap();
-        db.connection.execute("INSERT INTO book_dir(book_row_id,dir_id,file_name,local_hash,is_downloaded) SELECT row_id,?2,'Book.pdf','first',1 FROM book WHERE content_hash=?1", params![book, ROOT_DIR_ID.to_string()]).unwrap();
+        db.connection.execute("INSERT INTO book_dir(book_row_id,dir_id,file_name,local_hash,is_downloaded) SELECT row_id,?2,'Book.pdf',X'0100000000000000',1 FROM book WHERE content_hash=?1", params![book, ROOT_DIR_ID.to_string()]).unwrap();
         db.connection.execute("INSERT INTO book_transfer(content_hash,upload_id,upload_size,upload_prepared) VALUES(?1,1,100,1)", [book]).unwrap();
         observe_content(&db.connection, book, ROOT_DIR_ID, hash(b"original PDF")).unwrap();
         (db, book)
@@ -350,14 +307,14 @@ mod tests {
         db.upsert_annotation(&annotation).unwrap();
         let row: i64 = db.connection.query_row("SELECT row_id FROM book WHERE content_hash=?1", [book], |r| r.get(0)).unwrap();
         let pre_upload = hash(b"PDF with annotations before upload");
-        db.record_local_annotation_export(book, ROOT_DIR_ID, pre_upload, "second", 200).unwrap();
+        db.record_local_annotation_export(book, ROOT_DIR_ID, pre_upload, 2, 200).unwrap();
         assert_eq!(db.canonical_content_hash(book).unwrap(), None);
         assert_eq!(db.local_content_hash(book, ROOT_DIR_ID).unwrap(), Some(pre_upload));
         assert_eq!(Database::upload_intent_of(&db.connection, &book).unwrap().unwrap().byte_checksum, Some(pre_upload));
         db.confirm_uploaded_content_with_pdf(book, pre_upload, Some(200), None).unwrap();
         let outbox: i64 = db.connection.query_row("SELECT count(*) FROM sync_outbox", [], |r| r.get(0)).unwrap();
         let post_upload = hash(b"PDF with additional local annotations");
-        db.record_local_annotation_export(book, ROOT_DIR_ID, post_upload, "third", 300).unwrap();
+        db.record_local_annotation_export(book, ROOT_DIR_ID, post_upload, 3, 300).unwrap();
         assert_eq!(db.canonical_content_hash(book).unwrap(), Some(pre_upload));
         assert_eq!(db.local_content_hash(book, ROOT_DIR_ID).unwrap(), Some(post_upload));
         assert_eq!(db.book_for_local_content(post_upload).unwrap(), Some(book));
@@ -380,7 +337,7 @@ mod tests {
         let (db, book) = library();
         let accepted = hash(b"original PDF");
         let newer = hash(b"local export while upload is in flight");
-        db.record_local_annotation_export(book, ROOT_DIR_ID, newer, "changed", 300).unwrap();
+        db.record_local_annotation_export(book, ROOT_DIR_ID, newer, 4, 300).unwrap();
         db.confirm_uploaded_content_with_pdf(book, accepted, None, None).unwrap();
         assert_eq!(db.canonical_content_hash(book).unwrap(), Some(accepted));
         assert_eq!(db.local_content_hash(book, ROOT_DIR_ID).unwrap(), Some(newer));
@@ -395,7 +352,7 @@ mod tests {
         db.confirm_uploaded_content_with_pdf(book, checksum, Some(200), Some(pdf.clone())).unwrap();
         db.confirm_uploaded_content_with_pdf(book, checksum, None, None).unwrap();
         assert_eq!(db.pdf_metadata(&book).unwrap(), Some(pdf.clone()));
-        db.record_local_annotation_export(book, ROOT_DIR_ID, hash(b"new local PDF"), "edited", 300).unwrap();
+        db.record_local_annotation_export(book, ROOT_DIR_ID, hash(b"new local PDF"), 5, 300).unwrap();
         assert_eq!(db.local_pdf_metadata(&book, "/Book.pdf").unwrap(), None);
         assert_eq!(db.pdf_metadata(&book).unwrap(), Some(pdf));
         let size: Option<i64> = db.connection.query_row("SELECT size_bytes FROM book_content WHERE book_id=?1", [book], |row| row.get(0)).unwrap();
@@ -426,7 +383,7 @@ mod tests {
             size_bytes: 400,
             inspection_version: 1,
             inspection: Some(book_inspection_contract::InspectedBook { metadata: book_model::BookRecord { metadata: Default::default(), description: String::new() }, pdf: None, audiobook: None, toc: vec![] }),
-            published: library_model::PublishedStagedBook { name: "Book.pdf".into(), relative_path: "/Book.pdf".into(), published: true, fingerprint: Some("edited".into()) },
+            published: library_model::PublishedStagedBook { name: "Book.pdf".into(), relative_path: "/Book.pdf".into(), published: true, fingerprint: Some(1) },
             request_thumbnail: false,
             restore_paths: vec![],
         })
@@ -434,7 +391,7 @@ mod tests {
         assert_eq!(db.canonical_content_hash(book).unwrap(), None);
         assert_eq!(db.local_content_hash(book, ROOT_DIR_ID).unwrap(), Some(edited));
         assert_eq!(Database::upload_intent_of(&db.connection, &book).unwrap().unwrap().byte_checksum, Some(original));
-        db.record_local_annotation_export(book, ROOT_DIR_ID, hash(b"newer export"), "newer", 500).unwrap();
+        db.record_local_annotation_export(book, ROOT_DIR_ID, hash(b"newer export"), 6, 500).unwrap();
         assert_eq!(Database::upload_intent_of(&db.connection, &book).unwrap().unwrap().byte_checksum, Some(original));
         db.set_asset_storage_policy(true, true).unwrap();
         assert_eq!(Database::upload_intent_of(&db.connection, &book).unwrap().unwrap().byte_checksum, Some(original));
@@ -492,7 +449,7 @@ database_methods! {
     arguments (String, u64,) = (path.to_owned(), fingerprint,);
     execute database, arguments => database.cached_import_source(&arguments.0, arguments.1);
 
-    fn local_content_revision(book: BookId, directory: DirId, checksum: ContentHash) -> Option<String>;
+    fn local_content_revision(book: BookId, directory: DirId, checksum: ContentHash) -> Option<u64>;
     arguments (BookId, DirId, ContentHash,) = (book, directory, checksum,);
     execute database, arguments => database.local_content_revision(arguments.0, arguments.1, arguments.2);
 
@@ -532,7 +489,7 @@ database_methods! {
     arguments (BookId, DirId,) = (book, directory,);
     execute database, arguments => database.local_content_hash(arguments.0, arguments.1);
 
-    fn record_local_annotation_export(book: BookId, directory: DirId, checksum: ContentHash, fingerprint: &str, size_bytes: u64) -> ();
-    arguments (BookId, DirId, ContentHash, String, u64,) = (book, directory, checksum, fingerprint.to_owned(), size_bytes,);
-    execute database, arguments => database.record_local_annotation_export(arguments.0, arguments.1, arguments.2, &arguments.3, arguments.4);
+    fn record_local_annotation_export(book: BookId, directory: DirId, checksum: ContentHash, fingerprint: u64, size_bytes: u64) -> ();
+    arguments (BookId, DirId, ContentHash, u64, u64,) = (book, directory, checksum, fingerprint, size_bytes,);
+    execute database, arguments => database.record_local_annotation_export(arguments.0, arguments.1, arguments.2, arguments.3, arguments.4);
 }

@@ -142,9 +142,6 @@ pub enum LibraryUpdate {
     SyncStatusChanged,
     /// Annotation text, anchors or deletion state changed locally.
     Annotations,
-    /// Reading position, progress, or chapter read status changed. Shelf cards
-    /// may need refreshing, while annotations and bookmarks remain unchanged.
-    ReadingProgress(BookId),
     TextSearchRemoved(crate::TextSearchRemoval),
 }
 
@@ -191,17 +188,39 @@ pub enum BrowseChipSort {
     #[default]
     Alphabetical,
     BookCount,
+    TitleDescending,
+    Size,
+    SizeDescending,
+    Availability,
+    AvailabilityDescending,
     /// Home's existing shelf order, offered only by Home.
     DefaultOrder,
 }
 
 impl BrowseChipSort {
-    pub const ALL: [Self; 2] = [Self::Alphabetical, Self::BookCount];
+    pub const ALL: [Self; 7] = [Self::Alphabetical, Self::TitleDescending, Self::BookCount, Self::Size, Self::SizeDescending, Self::Availability, Self::AvailabilityDescending];
+
+    pub fn for_book_sort(sort: BrowseBookSort) -> Option<Self> {
+        Some(match sort {
+            BrowseBookSort::Alphabetical => Self::Alphabetical,
+            BrowseBookSort::TitleDescending => Self::TitleDescending,
+            BrowseBookSort::Size => Self::Size,
+            BrowseBookSort::SizeDescending => Self::SizeDescending,
+            BrowseBookSort::Availability => Self::Availability,
+            BrowseBookSort::AvailabilityDescending => Self::AvailabilityDescending,
+            _ => return None,
+        })
+    }
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Alphabetical => text!(browse::alphabetical),
             Self::BookCount => text!(browse::book_count_sort),
+            Self::TitleDescending => BrowseBookSort::TitleDescending.label(),
+            Self::Size => BrowseBookSort::Size.label(),
+            Self::SizeDescending => BrowseBookSort::SizeDescending.label(),
+            Self::Availability => BrowseBookSort::Availability.label(),
+            Self::AvailabilityDescending => BrowseBookSort::AvailabilityDescending.label(),
             Self::DefaultOrder => text!(browse::default_order),
         }
     }
@@ -215,17 +234,54 @@ pub enum BrowseBookSort {
     #[default]
     Alphabetical,
     RecentlyRead,
+    TitleDescending,
+    Author,
+    AuthorDescending,
+    Format,
+    FormatDescending,
+    Size,
+    SizeDescending,
+    Progress,
+    ProgressDescending,
+    Availability,
+    AvailabilityDescending,
     /// Home's existing activity order, offered only by Home.
     DefaultOrder,
 }
 
 impl BrowseBookSort {
-    pub const ALL: [Self; 2] = [Self::Alphabetical, Self::RecentlyRead];
+    pub const ALL: [Self; 13] = [
+        Self::Alphabetical,
+        Self::TitleDescending,
+        Self::Author,
+        Self::AuthorDescending,
+        Self::Format,
+        Self::FormatDescending,
+        Self::Size,
+        Self::SizeDescending,
+        Self::Progress,
+        Self::ProgressDescending,
+        Self::Availability,
+        Self::AvailabilityDescending,
+        Self::RecentlyRead,
+    ];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Alphabetical => text!(browse::alphabetical),
             Self::RecentlyRead => text!(browse::recently_read),
+            Self::TitleDescending => text!(browse::title_z_a),
+            Self::Author => text!(browse::author_a_z),
+            Self::AuthorDescending => text!(browse::author_z_a),
+            Self::Format => text!(browse::format_a_z),
+            Self::FormatDescending => text!(browse::format_z_a),
+            Self::Size => text!(browse::smallest_first),
+            Self::SizeDescending => text!(browse::largest_first),
+            Self::Progress => text!(browse::least_read_first),
+            Self::ProgressDescending => text!(browse::most_read_first),
+            Self::Availability => text!(browse::cloud_first),
+            Self::AvailabilityDescending => text!(browse::on_device_first),
+
             Self::DefaultOrder => text!(browse::default_order),
         }
     }
@@ -315,6 +371,10 @@ pub struct BrowseRow {
     pub path: Option<String>,
     pub book_count: usize,
     pub downloaded_book_count: usize,
+    /// Combined size of the matching folder contents, including subfolders.
+    /// Absent when any file size is unknown or this is another kind of heading.
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
 }
 
 /// One folder or subject in the displayed breadcrumb trail.
@@ -481,6 +541,11 @@ pub struct BookCardRow {
     /// Canonical broad format used by filters, facets, and cover chips.
     pub format_category: LibraryFileTypeFilter,
     pub audiobook_duration_ms: Option<u64>,
+    /// Known complete book asset size; unavailable catalog sizes remain unknown.
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+    #[serde(default)]
+    pub format: Option<book_model::BookFormat>,
     /// Milliseconds since the Unix epoch when this book entered the library.
     /// Legacy rows without a timestamp use zero and sort after dated books.
     pub added_at: i64,

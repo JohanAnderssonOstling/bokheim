@@ -20,9 +20,16 @@ JOIN book ON book.row_id=placement.book_row_id AND book.deleted_at IS NULL;
 -- param: languages: &str
 -- param: hide_finished: i32
 -- param: finished_threshold: f64
--- Each row counts only one directory's live placements, including duplicate books.
-SELECT selected.value,count(book.row_id),
-       count(CASE WHEN placement.is_downloaded=1 THEN book.row_id END)
+-- Each row aggregates one directory's live placements, including duplicate books.
+-- Size follows the same metadata precedence as book cards. Sized counts keep
+-- incomplete totals from looking like the size of the entire folder.
+WITH eligible AS (
+SELECT selected.value AS directory_id,book.row_id,placement.is_downloaded,
+       CASE WHEN book.row_id IS NOT NULL THEN
+         COALESCE(content.size_bytes,transfer.upload_size,placement.size_bytes,
+           (SELECT max(size_bytes) FROM book_dir
+            WHERE book_row_id=book.row_id AND deleted_at IS NULL))
+       END AS size_bytes
 FROM json_each(:directory_ids) selected
 LEFT JOIN book_dir placement ON placement.dir_id=selected.value AND placement.deleted_at IS NULL
 LEFT JOIN book ON book.row_id=placement.book_row_id
@@ -31,4 +38,14 @@ LEFT JOIN book ON book.row_id=placement.book_row_id
   AND (:file_types=0 OR (:file_types & book.format)!=0)
   AND (:languages='' OR EXISTS(SELECT 1 FROM book_language language
       WHERE language.book_row_id=book.row_id AND instr(:languages,',' || language.language || ',')>0))
-GROUP BY selected.value;
+LEFT JOIN book_content content ON content.book_id=book.content_hash
+LEFT JOIN book_transfer transfer ON transfer.content_hash=book.content_hash
+)
+SELECT directory_id,count(row_id),
+       count(CASE WHEN is_downloaded=1 THEN row_id END),
+       COALESCE(sum(CASE WHEN size_bytes>0 THEN size_bytes ELSE 0 END),0),
+       count(CASE WHEN size_bytes>0 THEN row_id END),
+       COALESCE(sum(CASE WHEN is_downloaded=1 AND size_bytes>0 THEN size_bytes ELSE 0 END),0),
+       count(CASE WHEN is_downloaded=1 AND size_bytes>0 THEN row_id END)
+FROM eligible
+GROUP BY directory_id;

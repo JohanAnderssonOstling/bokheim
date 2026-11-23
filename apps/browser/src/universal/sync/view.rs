@@ -14,14 +14,51 @@ use ui_text::text;
 
 use super::*;
 use crate::services::format_storage_bytes;
-use gpui::{ScrollHandle, rems};
+use gpui::{Anchor, App, FocusHandle, Focusable, FontWeight, Pixels, ScrollHandle, deferred, rems};
 use gpui_component::Disableable;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::DropdownMenu as _;
+use gpui_component::popover::Popover;
 use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 use sync_common::{MutationIssue, MutationRejectionReason};
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 use ui_components::Button;
+
+/// The library table's fixed columns. The name takes what is left.
+const LIBRARY_NAME_COLUMN_MIN_WIDTH_REM: f32 = 8.0;
+const LIBRARY_SIZE_COLUMN_WIDTH_REM: f32 = 6.5;
+const LIBRARY_COMPACT_SIZE_COLUMN_WIDTH_REM: f32 = 4.0;
+const LIBRARY_COMPACT_TEXT_COLUMN_MIN_WIDTH_REM: f32 = 3.5;
+const LIBRARY_STATUS_COLUMN_WIDTH_REM: f32 = 9.0;
+const LIBRARY_CLOUD_COLUMN_WIDTH_REM: f32 = 5.0;
+/// The column gap in the library table.
+const LIBRARY_COLUMN_GAP: f32 = 12.0;
+
+fn library_compact_size_cell() -> Div {
+    div().w(rems(LIBRARY_COMPACT_SIZE_COLUMN_WIDTH_REM)).flex_none().min_w_0().text_center()
+}
+
+fn library_compact_cloud_cell() -> Div {
+    div().w(rems(components::topbar_action_height_rem().max(3.0))).flex_none().flex().items_center().justify_center()
+}
+
+fn library_table_min_width(window: &Window) -> Pixels {
+    let columns = LIBRARY_NAME_COLUMN_MIN_WIDTH_REM + LIBRARY_SIZE_COLUMN_WIDTH_REM + LIBRARY_STATUS_COLUMN_WIDTH_REM + LIBRARY_CLOUD_COLUMN_WIDTH_REM + components::topbar_action_height_rem();
+    window.rem_size() * columns + px(LIBRARY_COLUMN_GAP * 4.0)
+}
+
+fn library_compact_table_min_width(window: &Window) -> Pixels {
+    let columns = 2.0 * LIBRARY_COMPACT_TEXT_COLUMN_MIN_WIDTH_REM + LIBRARY_COMPACT_SIZE_COLUMN_WIDTH_REM + components::topbar_action_height_rem().max(3.0) + components::topbar_action_height_rem();
+    window.rem_size() * columns + px(8.0 * 4.0)
+}
+
+fn library_table_line(theme: components::BrowserTheme) -> Div {
+    div().w_full().flex().flex_row().items_center().gap(px(LIBRARY_COLUMN_GAP)).border_t_1().border_color(theme.rule)
+}
+
+fn library_table_menu_cell() -> Div {
+    div().w(rems(components::topbar_action_height_rem())).flex_none().flex().items_center().justify_center()
+}
 
 const LEGEND_LIBRARY_LIMIT: usize = 4;
 
@@ -31,16 +68,18 @@ fn account_initial(email: &str) -> String {
     email.chars().next().map(|first| first.to_uppercase().to_string()).unwrap_or_else(|| "?".to_owned())
 }
 
-/// The identity row has its own render boundary. Sync, storage, and transfer
-/// updates can refresh the page around it without making the row flash.
+/// Identity state changes independently from storage and transfer state.
 pub(super) struct AccountIdentityView {
     page: Entity<SyncPage>,
     account_status: AccountStatus,
+    menu_open: bool,
+    focus: FocusHandle,
+    previous_focus: Option<FocusHandle>,
 }
 
 impl AccountIdentityView {
-    pub(super) fn new(page: Entity<SyncPage>, account_status: AccountStatus) -> Self {
-        Self { page, account_status }
+    pub(super) fn new(page: Entity<SyncPage>, account_status: AccountStatus, cx: &mut Context<Self>) -> Self {
+        Self { page, account_status, menu_open: false, focus: cx.focus_handle(), previous_focus: None }
     }
 
     pub(super) fn set_account_status(&mut self, account_status: AccountStatus, cx: &mut Context<Self>) -> bool {
@@ -48,32 +87,98 @@ impl AccountIdentityView {
             return false;
         }
         self.account_status = account_status;
+        self.menu_open = false;
+        self.previous_focus = None;
         cx.notify();
         true
     }
+
+    fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        if let Some(previous) = self.previous_focus.take() {
+            if self.focus.contains_focused(window, cx) {
+                previous.focus(window, cx);
+            }
+        }
+        cx.notify();
+    }
+}
+
+/// The same account actions are used by the dropdown, overlay and sheet.
+fn account_controls(page: Entity<SyncPage>, dismiss: impl Fn(&mut Window, &mut App) + Clone + 'static) -> Div {
+    let mut actions = Vec::with_capacity(3);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let password = page.clone();
+        let dismiss = dismiss.clone();
+        actions.push(components::outlined_text_button("account-change-password", text!(account::change_password)).w_full().on_click(move |_, window, cx| {
+            dismiss(window, cx);
+            password.update(cx, |page, cx| {
+                #[cfg(target_os = "android")]
+                page.open_android_password_change(cx);
+                #[cfg(not(target_os = "android"))]
+                page.open_password_change(cx);
+            });
+        }));
+    }
+    let logout = page.clone();
+    let close_logout = dismiss.clone();
+    actions.push(components::outlined_text_button("account-log-out", text!(account::log_out)).w_full().on_click(move |_, window, cx| {
+        close_logout(window, cx);
+        logout.update(cx, |page, cx| page.start_logout(cx));
+    }));
+    actions.push(components::outlined_text_button("account-delete", text!(account::delete_account)).w_full().on_click(move |_, window, cx| {
+        dismiss(window, cx);
+        page.update(cx, |page, cx| page.open_account_deletion(window, cx));
+    }));
+    div().w_full().min_w_0().flex().flex_col().gap(px(components::SPACE_SM)).children(actions)
 }
 
 impl Render for AccountIdentityView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
         let email = self.account_status.email().unwrap_or_default().to_owned();
-        let mut actions = Vec::with_capacity(3);
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-        {
-            let password = self.page.clone();
-            actions.push(components::link_button("account-change-password", text!(account::change_password), false).on_click(move |_, _, cx| {
-                password.update(cx, |page, cx| page.open_password_change(cx));
-            }));
+        let trigger = components::account_avatar_button(account_initial(&email));
+        if !components::touch_ui() {
+            let page = self.page.clone();
+            let popover = Popover::new("account-menu-popover").anchor(Anchor::TopRight).trigger(trigger).content(move |state, _, cx| {
+                let focus = state.focus_handle(cx);
+                let popover = cx.entity();
+                let content = div().w(rems(18.0)).max_w_full().min_w_0().flex().flex_col().gap(px(components::SPACE_MD)).child(account_controls(page.clone(), move |window, cx| popover.update(cx, |state, cx| state.dismiss(window, cx))));
+                components::contain_modal_focus(content, &focus, "Popover Dialog ModalFocus", cx)
+            });
+            return components::account_header(email, popover, theme).into_any_element();
         }
-        let logout = self.page.clone();
-        actions.push(components::link_button("account-log-out", text!(account::log_out), false).on_click(move |_, _, cx| {
-            logout.update(cx, |page, cx| page.start_logout(cx));
+
+        let trigger = trigger.on_click(cx.listener(|this, _, window, cx| {
+            this.previous_focus = window.focused(cx);
+            this.menu_open = true;
+            this.focus.focus(window, cx);
+            cx.notify();
         }));
-        let delete = self.page.clone();
-        actions.push(components::link_button("account-delete", text!(account::delete_account), false).on_click(move |_, window, cx| {
-            delete.update(cx, |page, cx| page.open_account_deletion(window, cx));
-        }));
-        components::account_identity(account_initial(&email), email, actions, theme)
+        let mut root = components::account_header(email, trigger, theme);
+        if self.menu_open {
+            let owner = cx.entity();
+            let close = owner.clone();
+            let header = components::bottom_sheet_header(text!(account::account), theme)
+                .child(components::bottom_sheet_close_button("account-menu-close", theme).on_click(move |_, window, cx| close.update(cx, |this, cx| this.close_menu(window, cx))));
+            let actions = account_controls(self.page.clone(), move |window, cx| owner.update(cx, |this, cx| this.close_menu(window, cx)));
+            let body = div().id("account-menu-body").min_h_0().overflow_y_scroll().p(px(components::SPACE_MD)).flex().flex_col().gap(px(components::SPACE_MD)).child(actions);
+            let panel =
+                if cfg!(feature = "kobo") { components::modal_surface(theme).w(rems(22.0)).max_w_full().max_h_full().flex().flex_col().child(header).child(body) } else { components::bottom_sheet_surface(theme).child(header).child(body) };
+            let close = cx.entity();
+            let panel = components::contain_modal_focus(panel, &self.focus, "AccountMenu Dialog ModalFocus", cx).on_key_down(move |event, window, cx| {
+                if event.keystroke.key == "escape" {
+                    close.update(cx, |this, cx| this.close_menu(window, cx));
+                    cx.stop_propagation();
+                }
+            });
+            let close = cx.entity();
+            let scrim = components::modal_scrim("account-menu-scrim", theme).on_click(move |_, window, cx| close.update(cx, |this, cx| this.close_menu(window, cx)));
+            let layer = if cfg!(feature = "kobo") { components::modal_overlay() } else { components::bottom_sheet_overlay() };
+            root = root.child(deferred(components::anchor_to_window(layer.child(scrim).child(panel), window)).with_priority(1));
+        }
+        root.into_any_element()
     }
 }
 
@@ -81,9 +186,7 @@ impl Render for AccountIdentityView {
 ///
 /// Settings draws Account, then this, as two sections — so the two halves of
 /// what [`SyncPage`] knows are rendered in two places. A view of its own is
-/// also the right boundary for the content: transfer progress reaches these
-/// rows several times a second, and nothing above them should be rebuilt at
-/// that rate.
+/// independently retains the table state; it is not a cached render boundary.
 pub(crate) struct LibrariesView {
     page: Entity<SyncPage>,
     compact: bool,
@@ -98,15 +201,16 @@ impl LibrariesView {
 }
 
 impl Render for LibrariesView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
         let compact = self.compact;
+        let compact_min_width = library_compact_table_min_width(window);
         let page = self.page.clone();
         let rows = page.read(cx).library_rows(cx);
         let view = cx.weak_entity();
-        div().w_full().min_w_0().child(SyncPage::libraries_section(page.read(cx), &page, &rows, compact, theme, cx)).on_children_prepainted(move |children, window, cx| {
+        div().w_full().min_w_0().child(SyncPage::libraries_section(page.read(cx), &page, &rows, compact, compact_min_width, theme, cx)).on_children_prepainted(move |children, window, cx| {
             let Some(bounds) = children.first() else { return };
-            let next_compact = bounds.size.width < components::library_table_min_width(window);
+            let next_compact = bounds.size.width < library_table_min_width(window);
             if next_compact != compact {
                 let view = view.clone();
                 window.defer(cx, move |_, cx| {
@@ -129,7 +233,7 @@ impl Render for LibrariesView {
 /// meter is built from; `local_bytes` is what has been downloaded here. They
 /// answer different questions and are never mixed.
 struct LibraryRow {
-    #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android")))]
     local_path: Option<String>,
     name: String,
     status: LibrarySyncStatus,
@@ -179,7 +283,7 @@ impl SyncPage {
                     status,
                     server_bytes,
                     local_bytes,
-                    #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+                    #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android")))]
                     local_path: Some(library.storage_locator().to_owned()),
                 }
             })
@@ -227,10 +331,9 @@ impl SyncPage {
                 #[cfg(not(feature = "kobo"))]
                 {
                     let reset = entity.clone();
-                    actions = actions.w_full()
-                        .child(components::secondary_action_button("account-request-reset", text!(account::password_reset), IconName::Redo2, self.is_busy()).on_click(move |_, _, cx| {
-                            reset.update(cx, |page, cx| page.set_flow(AccountFlow::RequestPasswordReset, cx));
-                        }));
+                    actions = actions.w_full().child(components::secondary_action_button("account-request-reset", text!(account::password_reset), IconName::Redo2, self.is_busy()).on_click(move |_, _, cx| {
+                        reset.update(cx, |page, cx| page.set_flow(AccountFlow::RequestPasswordReset, cx));
+                    }));
                 }
                 form.child(components::section_header(text!(common::sign_in), "", theme))
                     .children(feedback)
@@ -323,9 +426,8 @@ impl SyncPage {
 impl SyncPage {
     /// The account group: who is signed in, and what that account holds.
     ///
-    /// Cloud storage used to be a group of its own, one gap below the identity
-    /// that owns it. A quota is not a second subject: it is the answer to "what
-    /// does this account get me", so it sits under the address it belongs to.
+    /// The header shows the email beside the avatar that opens account actions;
+    /// storage remains visible beneath it.
     /// Signed-out desktop accounts show the access form directly. Platforms
     /// with a separate account screen keep their entry actions in the header.
     pub(crate) fn settings_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -350,7 +452,7 @@ impl SyncPage {
             return components::browser_settings_fieldset(text!(account::account), theme).child(components::browser_settings_block().child(self.account_access_form(&entity, feedback, theme)));
         }
         let account = if signed_in {
-            components::browser_settings_fieldset(text!(account::account), theme).child(components::browser_settings_block().child(self.identity.clone()).child(self.storage_body(theme, window, cx)))
+            components::browser_settings_group().child(self.identity.clone()).child(components::browser_settings_block().child(self.storage_body(theme, window, cx)))
         } else {
             components::browser_settings_fieldset_with_actions(text!(account::account), self.account_access_actions(&entity, theme), theme)
         };
@@ -387,12 +489,7 @@ impl SyncPage {
         let Some(usage) = state.storage_usage else {
             return components::storage_block().child(text!(account::loading_cloud_storage));
         };
-        let mut storage = components::storage_block().child(components::storage_summary(
-            format_storage_bytes(usage.used_bytes),
-            format!(text!(account::of_used), format_storage_bytes(usage.quota_bytes)),
-            format!(text!(account::available), format_storage_bytes(usage.available_bytes())),
-            theme,
-        ));
+        let mut storage = components::storage_block().child(components::storage_summary(format_storage_bytes(usage.used_bytes), format!(text!(account::of_used), format_storage_bytes(usage.quota_bytes)), theme));
         if let Some(pending) = state.pending_cloud_bytes.filter(|bytes| *bytes > 0) {
             storage = storage.child(components::form_hint(format!(text!(account::waiting_to_upload), format_storage_bytes(pending)), theme));
         }
@@ -405,60 +502,28 @@ impl SyncPage {
                 storage = storage.child(components::storage_meter(segments.iter().map(|(_, bytes, color)| (share(*bytes), *color)), theme));
             }
         }
-        let tabs = components::settings_choice_button_group(theme)
-            .self_start()
-            .flex_nowrap()
-            .child(components::settings_choice_button("account-storage-libraries-tab", text!(account::largest_libraries), self.storage_tab == StorageBreakdownTab::Libraries, theme).flex_none().whitespace_nowrap().on_click(cx.listener(
-                |page, _, _, cx| {
-                    page.storage_tab = StorageBreakdownTab::Libraries;
-                    cx.notify();
-                },
-            )))
-            .child(components::settings_choice_button("account-storage-books-tab", text!(account::largest_books), self.storage_tab == StorageBreakdownTab::Books, theme).flex_none().whitespace_nowrap().on_click(cx.listener(
-                |page, _, _, cx| {
-                    page.storage_tab = StorageBreakdownTab::Books;
-                    cx.notify();
-                },
-            )));
         let mut breakdown = components::storage_breakdown(std::iter::empty());
-        match self.storage_tab {
-            StorageBreakdownTab::Libraries => match &state.server_storage_usage {
-                None => breakdown = breakdown.child(components::form_hint(text!(account::library_storage_details_are_unavailable), theme)),
-                Some(libraries) => {
-                    let mut has_rows = false;
-                    for (index, library) in libraries.iter().filter(|library| library.used_bytes > 0).enumerate() {
-                        has_rows = true;
-                        let share = if usage.quota_bytes == 0 { 0.0 } else { library.used_bytes as f64 * 100.0 / usage.quota_bytes as f64 };
-                        breakdown = breakdown.child(components::storage_breakdown_row(
-                            components::usage_segment_color(index.min(LEGEND_LIBRARY_LIMIT), theme),
-                            library.library_name.clone(),
-                            format!(text!(account::share_percent), share = share),
-                            format_storage_bytes(library.used_bytes),
-                            theme,
-                        ));
-                    }
-                    if !has_rows {
-                        breakdown = breakdown.child(components::form_hint(text!(account::no_libraries_use_cloud_storage_yet), theme));
-                    }
+        match &state.server_storage_usage {
+            None => breakdown = breakdown.child(components::form_hint(text!(account::library_storage_details_are_unavailable), theme)),
+            Some(libraries) => {
+                let mut has_rows = false;
+                for (index, library) in libraries.iter().filter(|library| library.used_bytes > 0).enumerate() {
+                    has_rows = true;
+                    let share = if usage.quota_bytes == 0 { 0.0 } else { library.used_bytes as f64 * 100.0 / usage.quota_bytes as f64 };
+                    breakdown = breakdown.child(components::storage_breakdown_row(
+                        components::usage_segment_color(index.min(LEGEND_LIBRARY_LIMIT), theme),
+                        library.library_name.clone(),
+                        format!(text!(account::share_percent), share = share),
+                        format_storage_bytes(library.used_bytes),
+                        theme,
+                    ));
                 }
-            },
-            StorageBreakdownTab::Books => match &state.server_book_storage_usage {
-                None => breakdown = breakdown.child(components::form_hint(text!(account::book_storage_details_are_unavailable_try_refreshing_your_account), theme)),
-                Some(books) if books.is_empty() => breakdown = breakdown.child(components::form_hint(text!(account::no_books_use_cloud_storage_yet), theme)),
-                Some(books) => {
-                    for book in books {
-                        breakdown = breakdown.child(components::storage_book_row(book.title.clone(), format_storage_bytes(book.used_bytes), theme));
-                    }
-                    if books.len() == account_contract::MAX_ACCOUNT_STORAGE_BOOKS {
-                        breakdown = breakdown.child(components::form_hint(format!(text!(account::showing_the_largest_books), account_contract::MAX_ACCOUNT_STORAGE_BOOKS), theme));
-                    }
+                if !has_rows {
+                    breakdown = breakdown.child(components::form_hint(text!(account::no_libraries_use_cloud_storage_yet), theme));
                 }
-            },
+            }
         }
-        let (list_id, scrollbar_id) = match self.storage_tab {
-            StorageBreakdownTab::Libraries => ("account-storage-libraries", "account-storage-libraries-scrollbar"),
-            StorageBreakdownTab::Books => ("account-storage-books", "account-storage-books-scrollbar"),
-        };
+        let (list_id, scrollbar_id) = ("account-storage-libraries", "account-storage-libraries-scrollbar");
         let scroll = window.use_keyed_state(list_id, cx, |_, _| ScrollHandle::default()).read(cx).clone();
         let desktop = !components::touch_ui();
         let list = div()
@@ -469,7 +534,7 @@ impl SyncPage {
             // scrollbar without consuming wheel input from the settings page.
             .child(breakdown.id(list_id).max_h(px(280.0)).overflow_hidden().track_scroll(&scroll).when(!desktop, |list| list.overflow_y_scroll()).when(desktop, |list| list.pr(px(components::SPACE_MD))))
             .when(desktop, |list| list.child(div().absolute().inset_0().child(Scrollbar::vertical(&scroll).id(scrollbar_id).scrollbar_show(ScrollbarShow::Always))));
-        storage.child(tabs).child(list)
+        storage.child(list)
     }
 
     /// The account group's header control while signed out: the two ways in.
@@ -541,27 +606,39 @@ impl SyncPage {
     /// is about this list — it decides where the next row in it will live — and
     /// a "Library storage" group of its own separated it from the only thing it
     /// refers to.
-    fn libraries_section(&self, page: &Entity<Self>, rows: &[LibraryRow], compact: bool, theme: components::BrowserTheme, cx: &gpui::App) -> Div {
-        let mut libraries = components::browser_settings_fieldset(text!(common::libraries), theme);
-        let mut has_rows = false;
-
+    fn libraries_section(&self, page: &Entity<Self>, rows: &[LibraryRow], compact: bool, compact_min_width: Pixels, theme: components::BrowserTheme, cx: &gpui::App) -> Div {
         #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
-        if let Some(path) = self.default_library_location.clone() {
+        let location = self.default_library_location.clone().map(|path| {
             let page = page.clone();
-            let choose = components::browser_settings_path_button("default-library-location", path, theme).on_click(move |_, _, cx| page.update(cx, |page, cx| page.choose_library_location(cx)));
-            libraries = libraries.child(components::browser_settings_compact_row(text!(account::default_location_for_new_libraries), choose, theme).border_t_0());
-            has_rows = true;
-        }
+            let choose =
+                components::browser_settings_path_button("default-library-location", client_platform_runtime::filesystem::display_path(&path), theme).on_click(move |_, _, cx| page.update(cx, |page, cx| page.choose_library_location(cx)));
+            components::browser_settings_compact_row(text!(account::default_location_for_new_libraries), choose, theme).border_t_0()
+        });
+        #[cfg(not(all(feature = "filesystem-libraries", not(target_arch = "wasm32"))))]
+        let location: Option<Div> = None;
+        let has_location = location.is_some();
+        let mut libraries = components::browser_settings_fieldset(text!(common::libraries), theme).children(location);
 
         if rows.is_empty() {
-            return libraries.child(components::library_usage_empty(text!(account::no_local_libraries), theme).when(!has_rows, |row| row.border_t_0()));
+            return libraries.child(components::library_usage_empty(text!(account::no_local_libraries), theme).when(!has_location, |row| row.border_t_0()));
         }
-        if !compact {
-            let header = components::library_table_header(theme);
-            let header = header.child(div().w(rems(components::topbar_action_height_rem())).flex_none());
-            libraries = libraries.child(header.when(!has_rows, |row| row.border_t_0()));
-            has_rows = true;
-        }
+        let mut table = div().w_full().when(compact, |table| table.min_w(compact_min_width));
+        let heading = |label: &'static str| div().min_w_0().text_size(rems(components::TEXT_XS)).text_color(theme.text_muted).font_features(components::small_caps()).child(label);
+        let header = if compact {
+            library_table_line(theme)
+                .gap(px(8.0))
+                .child(heading(text!(common::library)).flex_1())
+                .child(library_compact_size_cell().child(heading(text!(account::local_storage))))
+                .child(heading(text!(account::status)).flex_1().text_center())
+                .child(library_compact_cloud_cell().child(heading(text!(account::cloud))))
+        } else {
+            library_table_line(theme)
+                .child(heading(text!(common::library)).flex_1().min_w(rems(LIBRARY_NAME_COLUMN_MIN_WIDTH_REM)))
+                .child(heading(text!(account::local_storage)).w(rems(LIBRARY_SIZE_COLUMN_WIDTH_REM)).flex_none().text_center())
+                .child(heading(text!(account::status)).w(rems(LIBRARY_STATUS_COLUMN_WIDTH_REM)).flex_none().text_center())
+                .child(heading(text!(account::cloud)).w(rems(LIBRARY_CLOUD_COLUMN_WIDTH_REM)).flex_none().text_center())
+        };
+        table = table.child(header.py(px(components::SPACE_XS)).child(library_table_menu_cell()).when(!has_location, |row| row.border_t_0()));
         for row in rows {
             let local_bytes = row.local_bytes.map(format_storage_bytes).unwrap_or_else(|| if row.status.state == LibrarySyncState::Unavailable { text!(common::unavailable).to_owned() } else { text!(account::calculating).to_owned() });
             let (status, status_color) = if row.status.issues.rejected != 0 {
@@ -581,59 +658,90 @@ impl SyncPage {
                     LibrarySyncState::RemoteMissing => (text!(account::not_on_server), theme.warning),
                     LibrarySyncState::AccountRequired => (text!(account::sign_in_to_library_account), theme.warning),
                     LibrarySyncState::CloudStorageFull => (text!(account::cloud_storage_full_books_on_disk_were_not_added), theme.warning),
-                    LibrarySyncState::LocalOnly => (text!(account::on_this_device), theme.text_muted),
+                    LibrarySyncState::LocalOnly => (text!(account::local_storage), theme.text_muted),
                 }
             };
             let (status, status_color) = (status.to_owned(), status_color);
             let library_id = row.status.library_id;
             // The folder is the button that opens it, labelled with its path.
-            #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+            #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android")))]
             let path = row.local_path.as_ref().map(|path| {
                 let destination = std::path::PathBuf::from(path);
-                components::browser_settings_path_button(SharedString::from(format!("library-path-{library_id}")), path.clone(), theme)
+                components::browser_settings_path_button(SharedString::from(format!("library-path-{library_id}")), client_platform_runtime::filesystem::display_path(path), theme)
                     .max_w_full()
                     .overflow_hidden()
-                    .on_click(move |_, _, cx| cx.open_with_system(&destination))
+                    .on_click(move |_, _, cx| {
+                        #[cfg(target_os = "android")]
+                        if let Err(error) = client_platform_runtime::filesystem::show_document_folder(&destination) {
+                            log::warn!("Could not open library folder: {error}");
+                        }
+                        #[cfg(not(target_os = "android"))]
+                        cx.open_with_system(&destination);
+                    })
                     .into_any_element()
             });
-            #[cfg(not(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
+            #[cfg(not(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android"))))]
             let path: Option<gpui::AnyElement> = None;
-            // The column heading names the switch; stacked, with no heading,
-            // the switch names itself.
+            // The column heading labels every switch in both layouts.
             let cloud_page = page.clone();
             let cloud_blocker = self.state.read(cx).library_cloud_storage_blocker(library_id);
             let cloud = {
                 Checkbox::new(SharedString::from(format!("asset-storage-{library_id}")))
-                    .when(compact, |checkbox| checkbox.label(text!(account::cloud_books)))
+                    .aria_label(format!("{}: {}", text!(account::cloud), row.name))
+                    .tooltip(text!(account::cloud))
                     .checked(row.status.asset_storage_enabled)
                     .disabled(row.status.book_file_activity.blocks_file_changes() || self.asset_storage_pending.contains(&library_id) || (!row.status.asset_storage_enabled && cloud_blocker.is_some()))
                     .on_click(move |enabled, _, cx| cloud_page.update(cx, |page, cx| page.change_asset_storage(library_id, *enabled, cx)))
                     .into_any_element()
             };
-            let cloud = gpui::div()
+            let cloud_hint = (self.state.read(cx).account_status.signed_in() && !row.status.asset_storage_enabled).then_some(cloud_blocker).flatten().map(|message| components::form_hint(message, theme));
+            let local_size = div().text_size(rems(components::TEXT_XS)).text_color(theme.text_muted).child(local_bytes);
+            let title = div()
+                .flex_1()
+                .min_w_0()
                 .flex()
                 .flex_col()
-                .gap(gpui::px(components::SPACE_XS))
-                .child(cloud)
-                .children((self.state.read(cx).account_status.signed_in() && !row.status.asset_storage_enabled).then_some(cloud_blocker).flatten().map(|message| components::form_hint(message, theme)))
-                .into_any_element();
-            let library_row = components::library_table_row(row.name.clone(), path, local_bytes, (status, status_color), cloud, compact, theme).when(!has_rows, |row| row.border_t_0());
-            let library_row = {
+                .items_start()
+                .gap(px(components::SPACE_XS))
+                .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::BOLD).text_size(rems(components::TEXT_SM)).text_color(theme.text).child(row.name.clone()))
+                .children(path.map(|path| div().w_full().min_w_0().flex().child(path)));
+            let status = div()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(rems(0.75))
+                .text_color(theme.text)
+                .child(div().size(px(8.0)).flex_none().rounded_full().bg(status_color))
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(status));
+            let cloud = div().flex_none().flex().items_center().child(cloud);
+            let menu = {
                 let libraries = self.active_library.clone();
                 let backend = libraries.read(cx).backend_client();
                 let name = row.name.clone();
                 let cloud_enabled = row.status.asset_storage_enabled;
                 let files_busy = row.status.book_file_activity.blocks_file_changes();
                 let has_actions = cloud_enabled || libraries.read(cx).annotation_export_available();
-                library_row.when(has_actions, |library_row| {
+                library_table_menu_cell().when(has_actions, |cell| {
                     let more = components::library_switcher_menu_button(format!("settings-library-menu-{library_id}"), row.name.clone(), false, theme).dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, cx| {
                         let menu = crate::universal::library_book_menu(menu, libraries.clone(), backend.clone(), library_id, name.clone(), cloud_enabled, files_busy).touch_friendly(compact || components::touch_ui());
                         Libraries::annotation_export_menu(libraries.clone(), library_id, menu, cx)
                     });
-                    library_row.child(more)
+                    cell.child(more)
                 })
             };
-            libraries = libraries.child(library_row);
+            let library_row = if compact {
+                library_table_line(theme).gap(px(8.0)).py(px(12.0)).child(title).child(library_compact_size_cell().child(local_size)).child(status.flex_1().justify_center()).child(library_compact_cloud_cell().child(cloud)).child(menu)
+            } else {
+                library_table_line(theme)
+                    .py(px(12.0))
+                    .child(title.min_w(rems(LIBRARY_NAME_COLUMN_MIN_WIDTH_REM)))
+                    .child(local_size.w(rems(LIBRARY_SIZE_COLUMN_WIDTH_REM)).flex_none().text_center())
+                    .child(status.w(rems(LIBRARY_STATUS_COLUMN_WIDTH_REM)).flex_none().justify_center())
+                    .child(cloud.w(rems(LIBRARY_CLOUD_COLUMN_WIDTH_REM)).justify_center())
+                    .child(menu)
+            };
+            table = table.child(library_row).children(cloud_hint);
             for detail in &row.status.issue_details {
                 let kind = match detail.kind.as_str() {
                     "reading_position" => text!(account::reading_position),
@@ -656,26 +764,35 @@ impl SyncPage {
                     },
                     MutationIssue::Untransmittable(_) => text!(account::this_change_is_too_large_to_sync_report_the_problem),
                 };
-                libraries = libraries.child(components::form_hint(format!(text!(account::change_recovery), recovery = recovery, subject = subject), theme));
+                table = table.child(components::form_hint(format!(text!(account::change_recovery), recovery = recovery, subject = subject), theme));
             }
             let issue_count = row.status.issues.rejected.saturating_add(row.status.issues.retryable).saturating_add(row.status.issues.untransmittable);
             let remaining = issue_count.saturating_sub(row.status.issue_details.len() as u64);
             if remaining > 0 {
-                libraries = libraries.child(components::form_hint(format!(text!(account::more_changes_need_attention), remaining = remaining), theme));
+                table = table.child(components::form_hint(format!(text!(account::more_changes_need_attention), remaining = remaining), theme));
             }
-            has_rows = true;
         }
-        libraries
+        libraries.child(div().id("settings-library-table").w_full().min_w_0().overflow_x_scroll().child(table))
     }
 
     /// Chooses the folder new libraries are created in.
     #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
     fn choose_library_location(&mut self, cx: &mut Context<Self>) {
-        let selection = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(text!(account::choose_default_library_location).into()) });
+        let selection = cx.prompt_for_directories(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(text!(account::choose_default_library_location).into()) });
         let preferences = self.services.preferences.clone();
         cx.spawn(async move |page, cx| {
-            let Ok(Ok(Some(paths))) = selection.await else { return };
-            let Some(path) = paths.first() else { return };
+            let paths = match selection.await {
+                Ok(Ok(Some(paths))) => paths,
+                Ok(Ok(None)) => return,
+                _ => {
+                    let _ = page.update(cx, |page, cx| {
+                        page.error = Some(text!(account::could_not_save_the_library_location_choose_an_accessible_folder_and_try).into());
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let Some(path) = paths.first().and_then(|directory| directory.local_path.as_ref()) else { return };
             let result = preferences.set_default_library_save_location(path.to_string_lossy().into_owned()).await.map_err(app::BackendError::operation);
             let _ = page.update(cx, |page, cx| {
                 match result {

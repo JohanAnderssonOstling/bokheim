@@ -7,6 +7,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use sync_common::BookId;
+use tokio::io::AsyncReadExt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogStorage {
@@ -23,6 +24,8 @@ pub struct PreparedCatalogBook {
     pin: PathBuf,
     duplicate: PathBuf,
     size: u64,
+    hash: BookId,
+    published: bool,
 }
 
 fn temporary_pin(pins: &Path) -> PathBuf {
@@ -35,17 +38,76 @@ impl PreparedCatalogBook {
         self.size
     }
 
-    /// Caller must hold the exclusive asset-publication database lock. This is
-    /// synchronous so cancellation cannot publish or unlink after lock release.
+    /// Reuse this preparation's immutable inode for every alias in a manifest.
+    /// The caller holds the publication lock through linking and database commit.
+    /// Returns whether this call installed the retained catalog pin.
+    pub async fn publish_and_link(&mut self, store: &FsAssetStore, destination: &BookId, length: u64) -> Result<bool, AssetError> {
+        if self.size != length { return Err(AssetError::HashMismatch); }
+        let installed = !self.published;
+        if installed {
+            // Keep our unique verified source name alive: another publisher may
+            // replace the shared pin, but cannot replace this preparation.
+            let parent = self.pin.parent().expect("catalog pin has a parent");
+            let publication = TemporaryFile::new(temporary_pin(parent));
+            std::fs::hard_link(self.temp.path(), publication.path()).map_err(storage_error)?;
+            std::fs::rename(publication.path(), &self.pin).map_err(storage_error)?;
+            std::fs::File::open(parent).and_then(|directory| directory.sync_all()).map_err(storage_error)?;
+            self.published = true;
+        }
+        let target = store.path("", AssetKind::Book, destination)?;
+        let parent = target.parent().expect("book path has a parent");
+        tokio::fs::create_dir_all(parent).await.map_err(storage_error)?;
+        match tokio::fs::hard_link(self.temp.path(), &target).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                let mut existing = tokio::fs::File::open(&target).await.map_err(storage_error)?;
+                let metadata = existing.metadata().await.map_err(storage_error)?;
+                if metadata.len() != self.size { return Err(AssetError::HashMismatch); }
+                #[cfg(unix)]
+                let same_inode = {
+                    use std::os::unix::fs::MetadataExt;
+                    let source = tokio::fs::metadata(self.temp.path()).await.map_err(storage_error)?;
+                    source.dev() == metadata.dev() && source.ino() == metadata.ino()
+                };
+                #[cfg(not(unix))]
+                let same_inode = false;
+                if !same_inode {
+                    let mut digest = blake3::Hasher::new();
+                    let mut buffer = vec![0; 64 * 1024];
+                    loop {
+                        let count = existing.read(&mut buffer).await.map_err(storage_error)?;
+                        if count == 0 { break; }
+                        digest.update(&buffer[..count]);
+                    }
+                    if digest.finalize().as_bytes() != self.hash.as_bytes() { return Err(AssetError::HashMismatch); }
+                }
+            }
+            // Reads resolve the committed checksum to the retained pin when
+            // the private book directory is on another filesystem.
+            Err(error) if error.kind() == ErrorKind::CrossesDevices => return Ok(installed),
+            Err(error) => return Err(storage_error(error)),
+        }
+        std::fs::File::open(parent).and_then(|directory| directory.sync_all()).map_err(storage_error)?;
+        Ok(installed)
+    }
+
+    /// Caller holds the shared publication lock to exclude collection. This
+    /// only installs a verified pin; it never unlinks an upload's private path.
+    /// Synchronous publication cannot continue after cancellation releases the lock.
     pub fn publish(self) -> Result<(), AssetError> {
         // Atomic replacement also handles a publisher installing a new inode
         // with identical bytes at an existing public content-hash URL.
         std::fs::rename(self.temp.path(), &self.pin).map_err(storage_error)?;
         std::fs::File::open(self.pin.parent().expect("catalog pin has a parent")).and_then(|directory| directory.sync_all()).map_err(storage_error)?;
-        // Consolidate a previously uploaded copy only after the retained link
-        // is durable. Existing open readers retain their original file handle.
-        remove_if_present(&self.duplicate)?;
         self.temp.remove().map_err(storage_error)
+    }
+
+    /// Background consolidation requires the exclusive publication lock:
+    /// uploads may still be linking or validating the private path.
+    pub fn publish_and_consolidate(self) -> Result<(), AssetError> {
+        let duplicate = self.duplicate.clone();
+        self.publish()?;
+        remove_if_present(&duplicate)
     }
 }
 
@@ -93,7 +155,7 @@ impl FsAssetStore {
             if digest.as_bytes() != hash.as_bytes() {
                 return Err(AssetError::HashMismatch);
             }
-            Ok(Some(PreparedCatalogBook { temp, pin, duplicate, size }))
+            Ok(Some(PreparedCatalogBook { temp, pin, duplicate, size, hash, published: false }))
         })
         .await
         .map_err(|error| AssetError::Storage(error.to_string()))?

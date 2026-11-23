@@ -24,7 +24,9 @@ pub(super) struct LibraryNameDialog {
     asset_storage_enabled: bool,
     input: Entity<InputState>,
     error: Option<SharedString>,
+    saving: bool,
     _subscription: Subscription,
+    _sync_subscription: Option<Subscription>,
 }
 
 impl Sidebar {
@@ -58,7 +60,7 @@ impl Sidebar {
                 }))
             };
             menu.item(
-                components::menu_item(text!(browse::remove), move |_, window, cx| {
+                components::menu_item(text!(browse::remove_library), move |_, window, cx| {
                     delete.update(cx, |navigation, cx| navigation.prompt_delete_library(id, window, cx));
                 })
                 .disabled(downloads.3),
@@ -113,62 +115,70 @@ impl Sidebar {
             cx.notify();
         });
         input.focus_handle(cx).focus(window, cx);
-        let asset_storage_enabled = self.sync_state.read(cx).account_status.signed_in();
-        self.library_name_dialog = Some(LibraryNameDialog { id, folders: None, estimate: Some((0, 0, 0)), asset_storage_enabled, input, error: None, _subscription: subscription });
+        let asset_storage_enabled = id.is_none() && self.sync_state.read(cx).account_status.signed_in();
+        let sync_subscription = id.is_none().then(|| cx.observe(&self.sync_state, |_, _, cx| cx.notify()));
+        self.library_name_dialog = Some(LibraryNameDialog { id, folders: None, estimate: Some((0, 0, 0)), asset_storage_enabled, input, error: None, saving: false, _subscription: subscription, _sync_subscription: sync_subscription });
         cx.notify();
     }
 
     fn cancel_library_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.library_name_dialog.as_ref().is_some_and(|dialog| dialog.saving) {
+            return;
+        }
         self.library_name_dialog = None;
         self.switcher_focus.focus(window, cx);
         cx.notify();
     }
 
     fn submit_library_name(&mut self, cx: &mut Context<Self>) {
-        let signed_in = self.sync_state.read(cx).account_status.signed_in();
         let Some(dialog) = self.library_name_dialog.as_mut() else { return };
-        if dialog.estimate.is_none() {
+        if dialog.saving || dialog.estimate.is_none() {
             return;
         }
-        let cloud_available = self.sync_state.read(cx).cloud_storage_blocker(dialog.estimate.filter(|(_, _, unavailable)| *unavailable == 0).map(|(_, bytes, _)| bytes)).is_none();
+        let asset_storage_enabled = dialog.id.is_none() && dialog.asset_storage_enabled && self.sync_state.read(cx).cloud_storage_blocker(dialog.estimate.filter(|(_, _, unavailable)| *unavailable == 0).map(|(_, bytes, _)| bytes)).is_none();
         if let Some(folders) = dialog.folders.take() {
-            let enabled = signed_in && cloud_available && dialog.asset_storage_enabled;
-            self.libraries.update(cx, |libraries, cx| libraries.create_selected_libraries(folders, enabled, cx));
+            self.libraries.update(cx, |libraries, cx| libraries.create_selected_libraries(folders, asset_storage_enabled, cx));
             self.library_name_dialog = None;
             self.switcher_open = false;
             cx.notify();
             return;
         }
         let name = dialog.input.read(cx).value().trim().to_owned();
-        if name.is_empty() || name.len() > 255 || name.chars().any(char::is_control) {
-            let message = if name.is_empty() {
-                text!(browse::enter_a_library_name)
-            } else if name.len() > 255 {
-                text!(browse::this_library_name_is_too_long_enter_a_shorter_name)
-            } else {
-                text!(browse::remove_line_breaks_tabs_and_other_invisible_characters_from_the_library_name)
-            };
+        if let Some(message) = crate::services::name_error(&name, text!(browse::enter_a_library_name)) {
             dialog.error = Some(message.into());
             cx.notify();
             return;
         }
-        let asset_storage_enabled = signed_in && cloud_available && dialog.asset_storage_enabled;
+        dialog.saving = true;
+        dialog.error = None;
+        let input_id = dialog.input.entity_id();
         let operation = self.libraries.read(cx).save_library_name(dialog.id, name, asset_storage_enabled);
         let selection_epoch = self.libraries.read(cx).selection_epoch();
-        // Saving metadata must not keep the window-wide name form modal.
-        self.library_name_dialog = None;
-        self.switcher_open = false;
         cx.spawn(async move |navigation, cx| {
             let result = operation.await;
-            let _ = navigation.update_in(cx, |navigation, window, cx| {
+            let _ = navigation.update(cx, |navigation, cx| {
                 match result {
                     Ok(created) => {
+                        if navigation.library_name_dialog.as_ref().is_some_and(|dialog| dialog.input.entity_id() == input_id) {
+                            navigation.library_name_dialog = None;
+                            navigation.switcher_open = false;
+                        }
                         if let Some(id) = created.filter(|_| navigation.libraries.read(cx).selection_epoch() == selection_epoch) {
                             navigation.libraries.update(cx, |libraries, cx| libraries.select_library(id, cx));
                         }
                     }
                     Err(error) => {
-                        crate::services::notify_error("library-name-save", user_facing_error(&error, text!(browse::could_not_save_the_library_changes_please_try_again)), window, cx);
+                        let message = user_facing_error(&error, text!(browse::could_not_save_the_library_changes_please_try_again));
+                        if let Some(dialog) = navigation.library_name_dialog.as_mut().filter(|dialog| dialog.input.entity_id() == input_id) {
+                            dialog.saving = false;
+                            dialog.error = Some(message.into());
+                            let focus = dialog.input.focus_handle(cx);
+                            let owner = cx.entity_id();
+                            cx.with_window(owner, |window, cx| focus.focus(window, cx));
+                        } else {
+                            let owner = cx.entity_id();
+                            cx.with_window(owner, |window, cx| crate::services::notify_error("library-name-save", message, window, cx));
+                        }
                     }
                 }
                 cx.notify();
@@ -180,17 +190,17 @@ impl Sidebar {
 
     fn render_library_name_dialog(&self, emitter: Entity<Self>, window: &gpui::Window, cx: &gpui::App) -> Option<gpui::AnyElement> {
         let dialog = self.library_name_dialog.as_ref()?;
-        let signed_in = self.sync_state.read(cx).account_status.signed_in();
-        let cloud_blocker = self.sync_state.read(cx).cloud_storage_blocker(dialog.estimate.filter(|(_, _, unavailable)| *unavailable == 0).map(|(_, bytes, _)| bytes));
         let theme = components::browser_theme(cx);
         let cancel = emitter.clone();
         let submit = emitter.clone();
         let panel = components::modal_form_surface(theme)
-            .w(gpui::px(360.0))
-            .child(gpui::div().text_color(theme.text).child(if dialog.id.is_none() { text!(browse::create_library) } else { text!(browse::rename_library) }))
-            .child(Input::new(&dialog.input).disabled(dialog.folders.is_some()))
+            .w(gpui::rems(22.5))
+            .child(components::dialog_title(if dialog.id.is_none() { text!(browse::create_library) } else { text!(browse::rename_library) }, theme))
+            .child(Input::new(&dialog.input).disabled(dialog.saving || dialog.folders.is_some()))
             .children(dialog.folders.as_ref().filter(|folders| folders.iter().any(|folder| folder.local_path.is_none())).map(|_| gpui::div().child(text!(browse::books_will_be_copied_into_bokheim_the_originals_will_stay_in_the))))
             .children((dialog.id.is_none()).then(|| {
+                let signed_in = self.sync_state.read(cx).account_status.signed_in();
+                let cloud_blocker = self.sync_state.read(cx).cloud_storage_blocker(dialog.estimate.filter(|(_, _, unavailable)| *unavailable == 0).map(|(_, bytes, _)| bytes));
                 let toggle = emitter.clone();
                 let estimate = match dialog.estimate {
                     Some(estimate) => crate::navigation::folder_creation::estimate_label(estimate),
@@ -202,7 +212,7 @@ impl Sidebar {
                     .gap(gpui::px(components::SPACE_SM))
                     .child(estimate)
                     .children(signed_in.then(|| {
-                        Checkbox::new("library-upload-choice").label(text!(browse::cloud_storage)).checked(dialog.asset_storage_enabled && cloud_blocker.is_none()).disabled(cloud_blocker.is_some()).on_click(
+                        Checkbox::new("library-upload-choice").label(text!(browse::cloud_storage)).checked(dialog.asset_storage_enabled && cloud_blocker.is_none()).disabled(dialog.saving || cloud_blocker.is_some()).on_click(
                             move |checked, _, cx| {
                                 toggle.update(cx, |navigation, cx| {
                                     if let Some(dialog) = &mut navigation.library_name_dialog {
@@ -221,18 +231,25 @@ impl Sidebar {
                     .flex()
                     .justify_end()
                     .gap(gpui::px(components::SPACE_SM))
-                    .child(components::dialog_cancel_button("cancel-library-rename", text!(common::cancel)).on_click(move |_, window, cx| {
+                    .child(components::dialog_cancel_button("cancel-library-rename", text!(common::cancel)).disabled(dialog.saving).on_click(move |_, window, cx| {
                         cancel.update(cx, |navigation, cx| navigation.cancel_library_name(window, cx));
                     }))
                     .child(
-                        components::base_button("save-library-rename")
-                            .primary()
-                            .label(if dialog.id.is_none() { text!(browse::create) } else { text!(browse::rename) })
+                        components::dialog_confirm_button(
+                            "save-library-rename",
+                            if dialog.saving {
+                                if dialog.id.is_none() { text!(browse::creating) } else { text!(browse::renaming) }
+                            } else if dialog.id.is_none() {
+                                text!(browse::create)
+                            } else {
+                                text!(browse::rename)
+                            },
                             // Folder-import review disables the input, so its
                             // submit button has no Enter shortcut to advertise.
-                            .when(dialog.folders.is_none(), |button| button.tooltip(components::shortcut_tooltip(if dialog.id.is_none() { text!(browse::create) } else { text!(browse::rename) }, "enter")))
-                            .disabled(dialog.estimate.is_none() || dialog.input.read(cx).value().trim().is_empty())
-                            .on_click(move |_, _, cx| submit.update(cx, |navigation, cx| navigation.submit_library_name(cx))),
+                            dialog.folders.is_none().then_some("enter"),
+                        )
+                        .disabled(dialog.saving || dialog.estimate.is_none() || dialog.input.read(cx).value().trim().is_empty())
+                        .on_click(move |_, _, cx| submit.update(cx, |navigation, cx| navigation.submit_library_name(cx))),
                     ),
             );
         // Keep this in the normal content tree. KoboKeyboardRoot paints its
@@ -324,6 +341,12 @@ impl Sidebar {
         cx.stop_propagation();
     }
 
+    fn select_library(&mut self, id: LibraryId, cx: &mut Context<Self>) {
+        self.switcher_open = false;
+        cx.notify();
+        self.libraries.update(cx, |libraries, cx| libraries.select_library(id, cx));
+    }
+
     fn activate_switcher_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.switcher_cursor {
             SwitcherCursor::Add => {
@@ -334,9 +357,7 @@ impl Sidebar {
                 if menu {
                     self.open_library_menu(id, window, cx);
                 } else {
-                    self.switcher_open = false;
-                    cx.notify();
-                    self.libraries.update(cx, |libraries, cx| libraries.select_library(id, cx));
+                    self.select_library(id, cx);
                 }
             }
         }
@@ -353,7 +374,7 @@ impl Sidebar {
             let theme = components::browser_theme(cx);
             let navigation = navigation.clone();
             let cancel = components::dialog_cancel_button("cancel-delete-library", text!(common::cancel)).on_click(|_, window, cx| window.close_dialog(cx));
-            let delete = components::base_button("delete-library").label(text!(browse::remove)).danger().on_click(move |_, window, cx| {
+            let delete = components::base_button("delete-library").label(text!(browse::remove_library)).danger().on_click(move |_, window, cx| {
                 window.close_dialog(cx);
                 // The switcher stays open: deleting is a management action,
                 // and there is usually more than one to do. Closing it also
@@ -501,11 +522,7 @@ impl Sidebar {
             let menu_was_open = self.library_menu.as_ref().is_some_and(|(id, _, _)| *id == library_id);
             list = list.child(components::library_switcher_row(
                 components::library_switcher_item(format!("library-switcher-{library_id}"), name.clone(), selected, cursor == SwitcherCursor::Library { index, menu: false }, theme).on_click(move |_, _window, cx| {
-                    select.update(cx, |navigation, cx| {
-                        navigation.switcher_open = false;
-                        cx.notify();
-                        navigation.libraries.update(cx, |libraries, cx| libraries.select_library(select_id, cx));
-                    });
+                    select.update(cx, |navigation, cx| navigation.select_library(select_id, cx));
                 }),
                 gpui::div()
                     .flex_none()

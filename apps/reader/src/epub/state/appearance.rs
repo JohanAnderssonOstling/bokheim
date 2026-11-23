@@ -3,8 +3,8 @@
 use crate::invalidation::notify;
 use app_preferences::ReaderPreferencePatch;
 use app_preferences::{
-    FIRST_LINE_INDENT_MAX_EM, FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_WIDTH_MAX, LINE_WIDTH_MIN, PARAGRAPH_SPACING_MAX_EM, READER_SPACING_MAX, READER_SPACING_MIN, ReaderFirstLineIndent, ReaderFontFamily,
-    ReaderHyphenation, ReaderTextAlignment, WORD_SPACING_MAX_PERCENT, WORD_SPACING_MIN_PERCENT,
+    FIRST_LINE_INDENT_MAX_EM, FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_WIDTH_CH_MAX, LINE_WIDTH_CH_MIN, PARAGRAPH_SPACING_MAX_EM, READER_SPACING_MAX, READER_SPACING_MIN,
+    ReaderFirstLineIndent, ReaderFontFamily, ReaderHyphenation, ReaderTextAlignment, WORD_SPACING_MAX_PERCENT, WORD_SPACING_MIN_PERCENT,
 };
 use gpui::{App, Context, Window};
 use html_view_gpui::ReadingRulerStyle;
@@ -17,6 +17,17 @@ use crate::shell::chrome;
 /// Keeps glyph ink and logical-to-framebuffer rounding inside the Kobo panel.
 /// Include this guard in both the column plan and the document's padding.
 const KOBO_READER_EDGE_INSET: f32 = 2.0;
+
+// Match the layout engine's fallback character advance while keeping the saved
+// line-length range independent of the current font size and screen density.
+const CH_ADVANCE_EM: f64 = 0.5;
+
+fn line_width_range_px(preferences: &ReaderPreferences) -> (f64, f64) {
+    let ch = f64::from(preferences.synchronized.font_size_px()) * CH_ADVANCE_EM;
+    let minimum = (preferences.synchronized.min_line_width_ch() * ch).max(1.0);
+    let maximum = (preferences.synchronized.max_line_width_ch() * ch).max(minimum);
+    (minimum, maximum)
+}
 
 fn horizontal_insets(document_width: f32, requested_margin: f32, edge_inset: f32) -> (f32, f32) {
     let maximum_margin = ((document_width - 100.0) / 2.0 - edge_inset).max(0.0);
@@ -36,9 +47,28 @@ fn column_count_for_gap(viewport_width: f64, column_width: f64, minimum_gap: f64
 /// viewport cannot hold a single column at the requested width.
 fn fitted_columns_and_width(viewport_width: f64, minimum_gap: f64, desired: u8, column_width: f64) -> (u8, f64) {
     let viewport_width = (viewport_width - 1.0).floor().max(1.0);
-    let width = column_width.round().min(viewport_width);
+    let width = column_width.min(viewport_width);
     let count = column_count_for_gap(viewport_width, width, minimum_gap, desired);
     (count, width)
+}
+
+/// Choose the column count closest to the preferred line length, then share
+/// the full width between those columns and the requested gaps. The preferred
+/// range guides the count without leaving unused space beyond a width cap.
+fn fitted_line_width_range(viewport_width: f64, minimum_gap: f64, desired: u8, minimum_width: f64, maximum_width: f64) -> (u8, f64) {
+    let preferred_width = (minimum_width + maximum_width) / 2.0;
+    let (count, _) = fitted_columns_and_width(viewport_width, minimum_gap, desired, preferred_width);
+    // Keep the existing one-pixel allowance for layout/framebuffer rounding.
+    let available_width = (viewport_width - 1.0).floor().max(1.0);
+    let width_for = |count: u8| (available_width - f64::from(count.saturating_sub(1)) * minimum_gap) / f64::from(count);
+    let width = width_for(count);
+    let next_count = count.saturating_add(1).min(desired.max(1));
+    let next_width = width_for(next_count);
+    if next_width >= 1.0 && (next_width - preferred_width).abs() < (width - preferred_width).abs() {
+        (next_count, next_width)
+    } else {
+        (count, width)
+    }
 }
 
 impl ReaderView {
@@ -99,7 +129,8 @@ impl ReaderView {
         let scale = preferences.synchronized.zoom().max(0.1);
         let viewport_width = available_width.max(1.0) / scale;
         let gap = f64::from(preferences.synchronized.min_column_gap_px()) / scale;
-        fitted_columns_and_width(viewport_width, gap, desired_column_count, preferences.synchronized.max_line_width_px())
+        let (minimum, maximum) = line_width_range_px(preferences);
+        fitted_line_width_range(viewport_width, gap, desired_column_count, minimum, maximum)
     }
 
     /// Shared preferences are reconciled by each renderer when it next paints.
@@ -207,9 +238,19 @@ impl ReaderView {
     }
 
     pub(in crate::epub) fn adjust_column_width(&self, delta: f64, cx: &mut Context<Self>) {
-        let width = (ReaderSettings::preferences(cx).synchronized.max_line_width_px() + delta).clamp(LINE_WIDTH_MIN, LINE_WIDTH_MAX);
+        let current = ReaderSettings::preferences(cx);
+        let shift = delta.signum() * 5.0;
+        let minimum = (current.synchronized.min_line_width_ch() + shift).clamp(LINE_WIDTH_CH_MIN, LINE_WIDTH_CH_MAX);
+        let maximum = (current.synchronized.max_line_width_ch() + shift).clamp(minimum, LINE_WIDTH_CH_MAX);
+        self.set_line_width_range((minimum, maximum), cx);
+    }
+
+    pub(in crate::epub) fn set_line_width_range(&self, range: (f64, f64), cx: &mut Context<Self>) {
+        let minimum = range.0.clamp(LINE_WIDTH_CH_MIN, LINE_WIDTH_CH_MAX);
+        let maximum = range.1.clamp(minimum, LINE_WIDTH_CH_MAX);
         self.apply_style_override(cx, |preferences| {
-            preferences.apply_preference(ReaderPreferencePatch::MaxLineWidthPx(width));
+            preferences.apply_preference(ReaderPreferencePatch::MinLineWidthCh(minimum));
+            preferences.apply_preference(ReaderPreferencePatch::MaxLineWidthCh(maximum));
         });
     }
 

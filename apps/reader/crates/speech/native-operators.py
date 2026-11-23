@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 
 
-def generate(models, destination):
+def generate(models, destination, voice=None):
     import onnx
     import onnxruntime as ort
     from onnxruntime.tools.ort_format_model import OrtFormatModelProcessor, OperatorTypeUsageManager
@@ -81,6 +81,8 @@ def generate(models, destination):
     # Basic minimal builds load pre-optimized ORT graphs. NCHWc depends on
     # the conversion host's CPU layout, so exclude it from portable assets.
     for name, expected in pins["models"].items():
+        if voice is not None and Path(name).parts[0] != voice:
+            continue
         path = models / name
         with path.open("rb") as source:
             actual = hashlib.file_digest(source, "sha256").hexdigest()
@@ -139,7 +141,7 @@ def generate(models, destination):
                              for (domain, version), operators in sorted(required.items())}
     evidence["note"] = ("Analysis uses the pinned 1.28.0 wheel; native runtime is 1.28.2. "
                         "Operator types cover the packaged ORT graphs. "
-                        "Validate both voices against the built runtime before rollout.")
+                        "Validate the packaged voices against the built runtime before rollout.")
     evidence["element_types"] = sorted(element_types)
     evidence["value_types"] = sorted(kind for kind in value_types if kind)
     evidence["operator_type_reduction"] = True
@@ -153,5 +155,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--models", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--voice", choices=("alba", "george"))
     args = parser.parse_args()
-    print(generate(args.models, args.output))
+    print(generate(args.models, args.output, args.voice))

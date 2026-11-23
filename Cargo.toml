@@ -5,6 +5,8 @@ members = [
     "shared/description-storage",
     "client/ui/path-label",
     "client/ui/html-components",
+    "client/ui/paginator",
+    "client/ui/graph-layout",
     "client/dictionaries/catalog",
     "client/dictionaries/core",
     "client/app",
@@ -32,6 +34,7 @@ members = [
     "apps/reader/crates/speech",
     "shared/book-model",
     "shared/book-inspection-contract",
+    "shared/book-normalization",
     "shared/thumbnail-contract",
     "shared/audiobook-archive",
     "client/library-backend/crates/audiobook-folder",
@@ -85,6 +88,9 @@ panic = "unwind"
 # Optimize application UI/control code for size. The rendering engine, font
 # shaping, image decoding and native inference libraries retain opt-level 3.
 [profile.release.package.browser-ui]
+opt-level = "s"
+
+[profile.release.package.ui-paginator]
 opt-level = "s"
 
 [profile.web-release]

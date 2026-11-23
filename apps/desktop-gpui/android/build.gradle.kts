@@ -111,7 +111,7 @@ val generateBookFormats by tasks.registering {
         val document = factory.newDocumentBuilder().parse(file("AndroidManifest.xml"))
         val activities = document.getElementsByTagName("activity")
         val activity = (0 until activities.length).map { activities.item(it) as org.w3c.dom.Element }
-            .single { it.getAttributeNS(androidNamespace, "name").endsWith("MainActivity") }
+            .single { it.getAttributeNS(androidNamespace, "name").endsWith("LibrarySetupActivity") }
         val filter = document.createElement("intent-filter")
         for ((tag, value) in listOf("action" to "android.intent.action.VIEW", "category" to "android.intent.category.DEFAULT")) {
             val element = document.createElement(tag)
@@ -304,6 +304,16 @@ val prepareSpeech by tasks.registering(Exec::class) {
             providers.gradleProperty("bokheim.speechSourceWork").orNull?.let { args("--source-work", it) }
             if (gradle.startParameter.isOffline) args("--offline")
         }
+    } else {
+        doFirst {
+            args("--ndk", configuredNdk().absolutePath,
+                "--sdk", System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
+                    ?: configuredNdk().parentFile.parentFile.absolutePath,
+                "--jobs", providers.gradleProperty("bokheim.nativeJobs").orNull
+                    ?: Runtime.getRuntime().availableProcessors().toString())
+            providers.gradleProperty("bokheim.speechSourceWork").orNull?.let { args("--source-work", it) }
+            if (gradle.startParameter.isOffline) args("--offline")
+        }
     }
 }
 
@@ -312,6 +322,7 @@ val buildRustDebug by tasks.registering(Exec::class) {
     dependsOn(preparePdfium, prepareSpeech)
     workingDir(workspaceRoot)
     commandLine(
+        "python3", "scripts/ci/build-native.py",
         "cargo",
         "build",
         "-p",
@@ -351,6 +362,7 @@ val buildRustRelease by tasks.registering(Exec::class) {
     dependsOn(preparePdfium, prepareSpeech)
     workingDir(workspaceRoot)
     commandLine(
+        "python3", "scripts/ci/build-native.py",
         "cargo",
         "build",
         "-p",

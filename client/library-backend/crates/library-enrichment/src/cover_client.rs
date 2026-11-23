@@ -4,7 +4,7 @@
 use std::{collections::BTreeSet, io::Cursor, sync::Arc, time::Duration};
 
 use book_model::{canonical_isbn, BookRecord, Scheme, Scope};
-use client_platform_runtime::{executor, transfers};
+use client_platform_runtime::executor;
 use image::ImageReader;
 use metadata_contract::matching::{author_credits, author_match_keys, matching_author_count, NormalizedTitle};
 use reqwest::StatusCode;
@@ -162,16 +162,14 @@ impl CoverClient {
     }
 
     async fn get(&self, url: Url, limit: usize) -> Result<Option<Vec<u8>>, MetadataClientError> {
-        transfers::retry(|| {
-            MetadataClient::with_deadline(30_000, async {
-                self.pace_request().await?;
-                let response = self.http.get(url.clone()).send().await.map_err(|error| MetadataClientError::new(error.without_url()))?;
-                if response.status() == StatusCode::NOT_FOUND {
-                    return Ok(None);
-                }
-                let response = response.error_for_status().map_err(|error| MetadataClientError::new(error.without_url()))?;
-                MetadataClient::response_bytes(response, limit).await.map(Some)
-            })
+        MetadataClient::with_deadline(30_000, async {
+            self.pace_request().await?;
+            let response = self.http.get(url).send().await.map_err(|error| MetadataClientError::new(error.without_url()))?;
+            if response.status() == StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            let response = response.error_for_status().map_err(|error| MetadataClientError::new(error.without_url()))?;
+            MetadataClient::response_bytes(response, limit).await.map(Some)
         })
         .await
     }

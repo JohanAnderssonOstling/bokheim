@@ -88,7 +88,7 @@ impl LibraryHandle {
         let resources = self.owner.resources.clone();
         let task = self.owner.executor.spawn(async move {
             resources.events.sync.request_remote_refresh();
-            resources.events.assets.wake();
+            resources.events.wake_assets();
             resources.events.files.wake();
             let observers = observe_account(resources.account.clone(), resources.events.clone());
             let workers = run_workers(&resources, observers);

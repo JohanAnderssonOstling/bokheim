@@ -62,6 +62,8 @@ fn run(activation: ReaderActivation) -> Result<(), String> {
             return Ok(());
         }
     }
+    #[cfg(target_os = "macos")]
+    desktop_gpui::macos_updates::initialize(backend_context.app_data_dir()).map_err(|error| format!("failed to select taxonomy: {error}"))?;
     #[cfg(target_os = "linux")]
     match desktop_gpui::linux_updates::initialize(backend_context.app_data_dir()).map_err(|error| format!("failed to recover application update: {error}"))? {
         desktop_gpui::linux_updates::Startup::Run => {}

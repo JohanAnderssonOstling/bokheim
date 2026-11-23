@@ -2,7 +2,8 @@
 
 use super::recovery::{identity_key, pending_key, storage_identity};
 use super::{LibraryEntry, LocalRegistry, RegistryResult, platform};
-use std::fs;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem as fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use sync_common::LibraryId;
@@ -22,8 +23,8 @@ impl LocalRegistry {
         if self.is_detached(id)? {
             return Err("this library cannot be moved".into());
         }
-        let destination = destination.canonicalize()?;
-        if !destination.is_dir() {
+        let destination = fs::canonicalize(&destination)?;
+        if !fs::is_dir(&destination) {
             return Err("select a folder for the library".into());
         }
         if destination.starts_with(source) || source.starts_with(&destination) {

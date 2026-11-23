@@ -53,6 +53,9 @@ cleanup() {
         echo "activation failed before publication; restoring the previous database and release" >&2
         systemctl stop bokheim-sync.service || true
         if [[ ${migration_started} == true ]]; then
+            if [[ $(<"${backup}/payload-marker-existed") == f ]]; then
+                runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d bokheim -c 'DROP TABLE IF EXISTS sync_payload_migration' >/dev/null
+            fi
             if [[ $(<"${backup}/archive-existed") == f ]]; then
                 runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d bokheim -c 'DROP SCHEMA IF EXISTS bokheim_upgrade_archive CASCADE' >/dev/null
             fi
@@ -105,6 +108,7 @@ maintenance_created=true
 systemctl daemon-reload
 service_stopped=true
 systemctl stop bokheim-sync.service
+runuser -u postgres -- psql -X -A -t -v ON_ERROR_STOP=1 -d bokheim -c "SELECT to_regclass('sync_payload_migration') IS NOT NULL" >"${backup}/payload-marker-existed"
 runuser -u postgres -- pg_dump --format=custom --dbname=bokheim >"${backup}/database.dump"
 pg_restore --list "${backup}/database.dump" >/dev/null
 install -o root -g root -m 0755 "${candidate}/sync-server" /usr/local/bin/sync-server
@@ -113,6 +117,9 @@ install -o root -g root -m 0644 "${candidate}/bokheim-sync.service" /etc/systemd
 systemctl daemon-reload
 systemctl reset-failed bokheim-sync.service || true
 migration_started=true
+# Complete both relational and payload migrations while the serving instance is stopped.
+runuser -u bokheim -- env DATABASE_URL="${database_url}" "${migration_environment[@]}" /usr/local/bin/sync-server upgrade
+runuser -u bokheim -- env DATABASE_URL="${database_url}" /usr/local/bin/sync-server verify-schema
 systemctl start bokheim-sync.service
 ready=false
 startup_deadline=$((SECONDS + 300))

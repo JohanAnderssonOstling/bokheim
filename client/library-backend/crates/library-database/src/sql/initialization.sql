@@ -1,8 +1,6 @@
 -- Library initialization, local policy reset and database integrity checks.
 
 -- name: initialization_reset_enrichment_policy &
-UPDATE local_book_draft SET retry_at=NULL
-WHERE NOT EXISTS(SELECT 1 FROM library_local_state WHERE singleton=1 AND enrichment_policy='books_v4_direct_covers');
 UPDATE book_transfer SET cover_checked=0
 WHERE NOT EXISTS(SELECT 1 FROM library_local_state WHERE singleton=1 AND enrichment_policy='books_v4_direct_covers');
 UPDATE library_local_state SET enrichment_policy='books_v4_direct_covers'

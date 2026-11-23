@@ -1,0 +1,117 @@
+{
+  "captured_utc": "2026-11-18T03:01:16.161299+00:00",
+  "pid": 9300,
+  "status_kib": {
+    "VmPeak": 478024,
+    "VmSize": 392624,
+    "VmHWM": 336804,
+    "VmRSS": 227736,
+    "VmData": 228084,
+    "VmStk": 224,
+    "VmExe": 75348,
+    "VmLib": 4628,
+    "VmSwap": 0
+  },
+  "threads": 16,
+  "smaps_totals_kib": {
+    "Rss": 230952,
+    "Pss": 229315,
+    "Shared_Clean": 2624,
+    "Shared_Dirty": 0,
+    "Private_Clean": 66696,
+    "Private_Dirty": 161632,
+    "Swap": 0
+  },
+  "unique_set_size_kib": 228328,
+  "system_kib": {
+    "MemTotal": 507600,
+    "MemFree": 30612,
+    "MemAvailable": 250012,
+    "Buffers": 3480,
+    "Cached": 225472,
+    "SwapTotal": 0,
+    "SwapFree": 0
+  },
+  "largest_regions": [
+    {
+      "path": "[anonymous]",
+      "Rss": 128080,
+      "Pss": 128080,
+      "Shared_Clean": 0,
+      "Shared_Dirty": 0,
+      "Private_Clean": 0,
+      "Private_Dirty": 128080,
+      "Swap": 0
+    },
+    {
+      "path": "/mnt/onboard/.adds/bokheim/desktop-gpui-kobo",
+      "Rss": 59268,
+      "Pss": 59268,
+      "Shared_Clean": 0,
+      "Shared_Dirty": 0,
+      "Private_Clean": 58244,
+      "Private_Dirty": 1024,
+      "Swap": 0
+    },
+    {
+      "path": "[heap]",
+      "Rss": 30472,
+      "Pss": 30472,
+      "Shared_Clean": 0,
+      "Shared_Dirty": 0,
+      "Private_Clean": 0,
+      "Private_Dirty": 30472,
+      "Swap": 0
+    },
+    {
+      "path": "/mnt/onboard/.adds/bokheim/taxonomy.sqlite3",
+      "Rss": 5344,
+      "Pss": 3731,
+      "Shared_Clean": 2596,
+      "Shared_Dirty": 0,
+      "Private_Clean": 2748,
+      "Private_Dirty": 0,
+      "Swap": 0
+    },
+    {
+      "path": "/mnt/onboard/.adds/bokheim/pdfium/libpdfium.so",
+      "Rss": 2176,
+      "Pss": 2172,
+      "Shared_Clean": 8,
+      "Shared_Dirty": 0,
+      "Private_Clean": 2104,
+      "Private_Dirty": 64,
+      "Swap": 0
+    },
+    {
+      "path": "/mnt/onboard/.adds/bokheim/runtime/libc.so.6",
+      "Rss": 1184,
+      "Pss": 1184,
+      "Shared_Clean": 0,
+      "Shared_Dirty": 0,
+      "Private_Clean": 1172,
+      "Private_Dirty": 12,
+      "Swap": 0
+    },
+    {
+      "path": "[stack:9304]",
+      "Rss": 1040,
+      "Pss": 1040,
+      "Shared_Clean": 0,
+      "Shared_Dirty": 0,
+      "Private_Clean": 0,
+      "Private_Dirty": 1040,
+      "Swap": 0
+    },
+    {
+      "path": "/mnt/onboard/.adds/bokheim/fonts/NV_Garamond-Bold.ttf",
+      "Rss": 476,
+      "Pss": 476,
+      "Shared_Clean": 0,
+      "Shared_Dirty": 0,
+      "Private_Clean": 476,
+      "Private_Dirty": 0,
+      "Swap": 0
+    }
+  ]
+}

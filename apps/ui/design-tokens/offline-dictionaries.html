@@ -282,8 +282,8 @@ function render(){
  const installedList=document.querySelector('#installed');installedList.replaceChildren();
  for(const [index,item] of installed.entries()){
   const controls=element('div','controls');
-  controls.append(button(item.enabled?'Enabled':'Disabled',()=>{item.enabled=!item.enabled;render()}),button('Move up',()=>move(index,-1),index===0),button('Move down',()=>move(index,1),index===installed.length-1),button('Remove',()=>{installed.splice(index,1);render()}),button('Details',()=>{details=details===item.spec.id?null:item.spec.id;render()}));
-  installedList.append(row(item.spec.name,`${(item.spec.bytes/(1024*1024)).toFixed(1)} MiB download · searched in this order`,controls,'installed'));
+  controls.append(button('Move up',()=>move(index,-1),index===0),button('Move down',()=>move(index,1),index===installed.length-1),button('Remove',()=>{installed.splice(index,1);render()}),button('Details',()=>{details=details===item.spec.id?null:item.spec.id;render()}));
+  installedList.append(row(item.spec.name,'',controls,'installed'));
   if(details===item.spec.id)installedList.append(sourceDetails(item.spec));
  }
 }
@@ -292,7 +292,7 @@ function download(spec){
  document.querySelector('#picker').close();
  active=spec.id;
  const status=document.querySelector('#status');status.hidden=false;status.textContent=`Downloading ${spec.name} dictionary (preview simulation)`;render();
- setTimeout(()=>{installed.push({spec,enabled:true});active=null;status.textContent=`${spec.name} dictionary installed in this preview. No files were downloaded.`;render()},900);
+ setTimeout(()=>{installed.push({spec});active=null;status.textContent=`${spec.name} dictionary installed in this preview. No files were downloaded.`;render()},900);
 }
 function move(index,direction){const next=index+direction;[installed[index],installed[next]]=[installed[next],installed[index]];render()}
 document.querySelector('#download-dictionary').addEventListener('click',()=>{downloadDetails=null;render();document.querySelector('#picker').showModal()});

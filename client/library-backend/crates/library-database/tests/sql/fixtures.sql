@@ -76,8 +76,8 @@ INSERT INTO book(content_hash,title,format) VALUES(:arg_1,'Book',1);
 
 -- name: fixtures_seed_draft_retry !
 -- param: arg_1: &SqlParam<'_>
-INSERT INTO local_book_draft(content_hash,body,retry_at) VALUES(:arg_1,X'00',999999)
-ON CONFLICT(content_hash) DO UPDATE SET retry_at=999999;
+INSERT INTO book_transfer(content_hash,enrichment_retry_at) VALUES(:arg_1,999999)
+ON CONFLICT(content_hash) DO UPDATE SET enrichment_retry_at=999999;
 -- name: fixtures_seed_cover_check !
 -- param: arg_1: &SqlParam<'_>
 INSERT INTO book_transfer(content_hash,cover_checked) VALUES(:arg_1,1)
@@ -117,7 +117,7 @@ INSERT INTO book(row_id,content_hash,title,search_title,format) VALUES(:arg_1,un
 -- param: arg_1: &SqlParam<'_>
 -- param: arg_2: &SqlParam<'_>
 -- param: arg_3: &SqlParam<'_>
-INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES(:arg_1,:arg_2,:arg_3,'',1);
+INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES(:arg_1,:arg_2,:arg_3,NULL,1);
 
 -- name: fixtures_insert_book_unified_concept_2 !
 -- param: arg_1: &SqlParam<'_>
@@ -182,7 +182,7 @@ DETACH curated; ATTACH ':' || 'memory' || ':' AS curated;
 -- param: arg_2: &SqlParam<'_>
 -- param: arg_3: &SqlParam<'_>
 -- param: arg_4: &SqlParam<'_>
-INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES(:arg_1,:arg_2,:arg_3,'',:arg_4);
+INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES(:arg_1,:arg_2,:arg_3,NULL,:arg_4);
 
 -- name: fixtures_insert_book_unified_concept_4 !
 -- param: arg_1: &SqlParam<'_>
@@ -221,7 +221,7 @@ INSERT INTO book(content_hash,title,format,search_title) VALUES(unhex(:arg_1),:a
 -- param: arg_1: &SqlParam<'_>
 -- param: arg_2: &SqlParam<'_>
 -- param: arg_3: &SqlParam<'_>
-INSERT OR IGNORE INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES(:arg_1,:arg_2,:arg_3,'',1);
+INSERT OR IGNORE INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES(:arg_1,:arg_2,:arg_3,NULL,1);
 
 -- name: fixtures_insert_book_language_3 !
 -- param: arg_1: &SqlParam<'_>
@@ -295,7 +295,7 @@ DELETE FROM book_unified_concept;
 -- param: arg_1: &SqlParam<'_>
 -- param: arg_2: &SqlParam<'_>
 -- param: arg_3: &SqlParam<'_>
-INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT :arg_1,row_id,'copy.epub','',:arg_3 FROM book WHERE content_hash=:arg_2;
+INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT :arg_1,row_id,'copy.epub',NULL,:arg_3 FROM book WHERE content_hash=:arg_2;
 
 -- name: fixtures_update_book_dir_is_downloaded !
 UPDATE book_dir SET is_downloaded=0;
@@ -375,11 +375,11 @@ UPDATE book SET entry_count=7 WHERE content_hash=:arg_1;
 UPDATE book SET duration_ms=NULL WHERE content_hash=:arg_1;
 
 -- name: fixtures_read_numbers_numbers_n_n &
-WITH RECURSIVE numbers(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM numbers WHERE n<2999) INSERT INTO book(content_hash,title,format) SELECT printf('%064x',n),'Other book',1 FROM numbers;
+WITH RECURSIVE numbers(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM numbers WHERE n<2999) INSERT INTO book(content_hash,title,format) SELECT unhex(printf('%064x',n)),'Other book',1 FROM numbers;
 
 -- name: fixtures_insert_book_dir_5 !
 -- param: arg_1: &SqlParam<'_>
-INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT :arg_1,row_id,content_hash || '.epub','',1 FROM book WHERE title='Other book';
+INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT :arg_1,row_id,lower(hex(content_hash)) || '.epub',NULL,1 FROM book WHERE title='Other book';
 
 -- name: fixtures_read_numbers_numbers_n_n_2 !
 -- param: arg_1: &SqlParam<'_>
@@ -416,7 +416,7 @@ SELECT COUNT(*) FROM book;
 
 -- name: fixtures_read_sync_book_record_count ->
 -- param: arg_1: &SqlParam<'_>
-SELECT count(*) FROM sync_book_record WHERE content_hash=:arg_1;
+SELECT count(*) FROM sync_state_version WHERE state_kind='book_add' AND state_key=:arg_1 AND state_subkey='' AND body IS NOT NULL;
 
 -- name: fixtures_read_sync_state_version_count ->
 -- param: arg_1: &SqlParam<'_>
@@ -435,7 +435,7 @@ SELECT SUM(value) FROM transaction_probe;
 SELECT COUNT(*) FROM transaction_probe;
 
 -- name: fixtures_read_enrichment_work ->
-SELECT draft.retry_at,t.cover_checked FROM local_book_draft draft JOIN book_transfer t USING(content_hash);
+SELECT enrichment_retry_at,cover_checked FROM book_transfer;
 
 -- name: fixtures_read_dir_name ->
 -- param: arg_1: &SqlParam<'_>

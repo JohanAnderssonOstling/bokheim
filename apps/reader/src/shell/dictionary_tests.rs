@@ -16,7 +16,7 @@ fn empty_popup(anchor: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Dic
         backend: None,
         settings: None,
         query: "Haus".into(),
-        result: Some(Ok(DictionaryLookup { dictionaries: Vec::new(), enabled_count: 0, errors: Vec::new() })),
+        result: Some(Ok(DictionaryLookup { dictionaries: Vec::new(), installed_count: 0, errors: Vec::new() })),
         dictionary_index: 0,
         definitions_scroll: ScrollHandle::new(),
         wheel_delta: 0.0,
@@ -48,12 +48,12 @@ fn empty_popup(anchor: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Dic
 }
 
 fn dictionary_match() -> DictionaryLookup {
-    DictionaryLookup { dictionaries: vec![DictionaryMatches { dictionary: "Offline".into(), definitions: vec![DictionaryDefinition { word: "Haus".into(), text: "A building.".into() }] }], enabled_count: 1, errors: Vec::new() }
+    DictionaryLookup { dictionaries: vec![DictionaryMatches { dictionary: "Offline".into(), definitions: vec![DictionaryDefinition { word: "Haus".into(), text: "A building.".into() }] }], installed_count: 1, errors: Vec::new() }
 }
 
 fn multiple_dictionary_matches() -> DictionaryLookup {
     DictionaryLookup {
-        enabled_count: 3,
+        installed_count: 3,
         errors: Vec::new(),
         dictionaries: vec![
             DictionaryMatches { dictionary: "No match".into(), definitions: Vec::new() },
@@ -97,7 +97,7 @@ impl DictionaryClient for SettingsClient {
     fn download(&self, _: String) -> ClientFuture<'_, Vec<DictionaryInfo>> {
         unexpected_request()
     }
-    fn configure(&self, _: String, _: bool, _: i8) -> ClientFuture<'_, Vec<DictionaryInfo>> {
+    fn reorder(&self, _: String, _: i8) -> ClientFuture<'_, Vec<DictionaryInfo>> {
         unexpected_request()
     }
     fn remove(&self, _: String) -> ClientFuture<'_, Vec<DictionaryInfo>> {
@@ -205,7 +205,7 @@ fn successful_wikipedia_is_restored_without_retry_when_dictionary_availability_c
         fixture.update(visual, |fixture, cx| {
             fixture.0.update(cx, |popup, cx| {
                 popup.downloading = false;
-                popup.result = Some(Ok(DictionaryLookup { dictionaries: Vec::new(), enabled_count: 0, errors: Vec::new() }));
+                popup.result = Some(Ok(DictionaryLookup { dictionaries: Vec::new(), installed_count: 0, errors: Vec::new() }));
                 popup.refresh_wikipedia(cx);
                 assert_eq!(popup.visible_wikipedia().unwrap().title, "Haus");
                 cx.notify();

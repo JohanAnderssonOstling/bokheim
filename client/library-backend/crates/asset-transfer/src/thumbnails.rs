@@ -3,13 +3,14 @@ use crate::deadline::transfer_deadline;
 use crate::policy::SMALL_REQUEST_TIMEOUT;
 use crate::TransferError;
 use crate::transfer::AssetExecutor;
-use cpu_host::resize;
+use cpu_contract::resize;
 use library_files::AssetStore;
 use library_model::BlobKind;
 use std::collections::HashSet;
 use sync_common::BookId;
 const MAX_THUMBNAIL_BYTES: usize = sync_common::MAX_THUMBNAIL_BYTES as usize;
 use sync_common::api::assets::ThumbnailBatchEntry;
+use thumbnail_contract::BROWSE_THUMBNAIL_WIDTH;
 
 impl AssetExecutor {
     async fn upload_pair(&self, hash: BookId) -> Result<Option<ThumbnailBatchEntry>, TransferError> {
@@ -22,9 +23,9 @@ impl AssetExecutor {
             self.discard_invalid_thumbnail(&assets, hash).await?;
             return Ok(None);
         }
-        let browse_bytes = match assets.read_named(library_files::asset_store::thumbnail_variant_name(&hash, thumbnail::BROWSE_THUMBNAIL_WIDTH)).await? {
+        let browse_bytes = match assets.read_named(library_files::asset_store::thumbnail_variant_name(&hash, BROWSE_THUMBNAIL_WIDTH)).await? {
             Some(bytes) => bytes,
-            None => resize(&*self.cpu, bytes.clone(), thumbnail::BROWSE_THUMBNAIL_WIDTH).await.map_err(TransferError::retryable)?,
+            None => resize(&*self.cpu, bytes.clone(), BROWSE_THUMBNAIL_WIDTH).await.map_err(TransferError::retryable)?,
         };
         if browse_bytes.len() > MAX_THUMBNAIL_BYTES || !browse_bytes.starts_with(&[0xff, 0xd8, 0xff]) {
             self.discard_invalid_thumbnail(&assets, hash).await?;

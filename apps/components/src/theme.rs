@@ -330,13 +330,16 @@ pub fn apply_appearance(preferences: &BrowsingPreferences, cx: &mut App) {
         application_theme.mode = gpui_component::ThemeMode::Light;
         application_theme.shadow = false;
         application_theme.scrollbar_show = gpui_component::scroll::ScrollbarShow::Always;
-        application_theme.colors = kobo::widget_colours(theme);
     }
     application_theme.font_family = font_family.into();
     application_theme.font_size = px(preferences.ui_font_size_px() as f32);
     application_theme.radius = px(0.0);
     application_theme.radius_lg = px(0.0);
     apply_widget_colours(theme, application_theme);
+    #[cfg(feature = "kobo")]
+    {
+        application_theme.colors = kobo::widget_colours(theme);
+    }
     application_theme.tokens = ThemeTokens::from(application_theme.colors);
     cx.refresh_windows();
 }
@@ -388,6 +391,16 @@ fn apply_widget_colours(theme: BrowserTheme, application: &mut Theme) {
     colors.list_even = theme.page_bg;
     colors.list_head = theme.page_bg;
     colors.list_hover = theme.hover;
+    colors.table = theme.page_bg;
+    colors.table_active = theme.accent_wash;
+    colors.table_active_border = theme.rule;
+    colors.table_even = theme.page_bg;
+    colors.table_head = theme.page_bg;
+    colors.table_head_foreground = theme.text_muted;
+    colors.table_foot = theme.page_bg;
+    colors.table_foot_foreground = theme.text_muted;
+    colors.table_hover = theme.hover;
+    colors.table_row_border = theme.rule;
     colors.selection = theme.accent.opacity(f32::from(SELECTION_ALPHA) / 255.0);
     colors.sidebar = theme.page_bg;
     colors.sidebar_accent = theme.accent_wash;
@@ -415,6 +428,12 @@ fn apply_widget_colours(theme: BrowserTheme, application: &mut Theme) {
     colors.button_danger_foreground = theme.danger_surface;
     colors.warning = theme.warning;
     colors.warning_foreground = theme.warning_surface;
+    // Informational notices use the accent; completed actions use neutral ink.
+    // Neither should inherit stock toolkit colors when the appearance changes.
+    colors.info = theme.text_accent;
+    colors.info_foreground = theme.page_bg;
+    colors.success = theme.text;
+    colors.success_foreground = theme.page_bg;
     colors.ring = theme.accent;
 }
 

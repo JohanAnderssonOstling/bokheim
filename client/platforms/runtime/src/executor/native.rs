@@ -4,6 +4,7 @@ use super::{BackendExecutorError, BackendFuture, BackendOutput, BackendSend, Bac
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
 use std::thread;
+use tokio::runtime::Handle;
 
 /// Native async-I/O execution boundary owned by the backend.
 #[derive(Clone)]
@@ -12,7 +13,7 @@ pub struct BackendExecutor {
 }
 
 struct BackendExecutorInner {
-    handle: tokio::runtime::Handle,
+    handle: Handle,
     runtime: Option<tokio::runtime::Runtime>,
 }
 
@@ -60,12 +61,18 @@ impl BackendExecutor {
 
     /// Runs synchronous storage work on this runtime's blocking pool.
     pub fn dispatch_storage(&self, operation: impl FnOnce() + Send + 'static) -> Result<(), BackendExecutorError> {
+        // Keep each operation's type out of Tokio's task machinery, while
+        // retaining its concrete type for per-operation profiling.
+        self.dispatch_storage_job(Box::new(move || crate::profiling::operation(operation)));
+        Ok(())
+    }
+
+    fn dispatch_storage_job(&self, operation: Box<dyn FnOnce() + Send>) {
         let executor = self.clone();
         self.inner.handle.spawn_blocking(move || {
             let _executor = executor;
-            crate::profiling::operation(operation);
+            operation();
         });
-        Ok(())
     }
 
     pub fn storage_cleanup(&self, operation: impl FnOnce() + Send + 'static) {
@@ -79,10 +86,15 @@ impl BackendExecutor {
 }
 
 pub async fn run_blocking<T: BackendOutput>(operation: impl FnOnce() -> T + BackendSend + 'static) -> Result<T, BackendExecutorError> {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle.spawn_blocking(move || crate::profiling::operation(operation)).await.map_err(|error| BackendExecutorError(format!("backend blocking task failed: {error}"))),
+    match Handle::try_current() {
+        Ok(handle) => run_blocking_on(handle, Box::new(move || crate::profiling::operation(operation))).await,
         Err(_) => crate::storage_queue::run(operation).await.map_err(BackendExecutorError),
     }
+}
+
+// Share Tokio's task machinery between operations with the same result type.
+async fn run_blocking_on<T: BackendOutput>(handle: Handle, operation: Box<dyn FnOnce() -> T + Send>) -> Result<T, BackendExecutorError> {
+    handle.spawn_blocking(operation).await.map_err(|error| BackendExecutorError(format!("backend blocking task failed: {error}")))
 }
 
 pub fn spawn_detached(future: impl BackendFuture<()>) {

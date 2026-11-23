@@ -11,7 +11,7 @@ metadata-contract = { path = "../../../../shared/metadata-contract" }
 client-platform-runtime = { path = "../../../platforms/runtime" }
 client-protocol = { path = "../../../client-protocol" }
 library-catalog = { path = "../library-catalog" }
-cpu-host = { path = "../cpu-host" }
+cpu-contract = { path = "../../../cpu-contract" }
 blake3 = "1"
 content-address = { path = "../../../../shared/content-address" }
 library-database = { path = "../library-database" }
@@ -46,6 +46,7 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+cpu-host = { path = "../cpu-host" }
 library-annotation-export = { path = "../library-annotation-export" }
 zip.workspace = true
 audiobook-folder = { path = "../audiobook-folder" }

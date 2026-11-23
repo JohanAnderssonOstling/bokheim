@@ -171,7 +171,7 @@ until a real provider adapter is configured.
 
 ## Installation
 
-Fresh databases use `sync-server migrate`, now atomically installing schema 20.
+Fresh databases use `sync-server migrate`, now atomically installing schema 22.
 Existing schemas 14, 17, 18 and 19 upgrade automatically on startup before
 workers and listeners start. Current databases skip migration after reading
 the schema marker. Billing upgrades preserve accounts, base quotas, storage

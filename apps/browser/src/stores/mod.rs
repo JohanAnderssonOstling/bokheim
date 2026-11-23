@@ -2,4 +2,7 @@
 
 pub(crate) mod preferences;
 
-pub(crate) use preferences::{CoverTextSetting, GeneratedCoversOnly, Preferences, current_catalog_grouping, current_catalog_languages, current_cover_text, generated_covers_only, save_catalog_grouping, save_catalog_languages};
+pub(crate) use preferences::{
+    BookListViewSetting, CoverTextSetting, GeneratedCoversOnly, Preferences, current_book_list_view, current_catalog_grouping, current_catalog_languages, current_cover_text, generated_covers_only, save_book_list_view,
+    save_catalog_grouping, save_catalog_languages,
+};

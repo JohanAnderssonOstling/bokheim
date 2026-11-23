@@ -1,7 +1,7 @@
 //! Filesystem discovery, inspection, and scan status for one library.
 
-use crate::BackendError;
 use crate::library::{LibraryHandle, LibraryResources};
+use crate::BackendError;
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
 use library_model::LibraryUpdate;
 use std::sync::atomic::Ordering;
@@ -9,13 +9,11 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
-use crate::library::events::LibraryEvent;
-#[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
 use client_platform_runtime::profiling::ProfileSpan;
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
 use client_platform_runtime::task_scope::OnDrop;
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
-use filesystem_scanner::filesystem_scan::{PUBLISH_BATCH_SIZE, ScanBookIndex, discover, inspect_files};
+use filesystem_scanner::filesystem_scan::{discover, inspect_files, ScanBookIndex, PUBLISH_BATCH_SIZE};
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
 use library_database::{ContributorNameMatcher, ScanApplyResult};
 
@@ -46,7 +44,12 @@ impl Drop for ScanProfileStage {
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
 pub(crate) enum FolderScan {
     Complete,
+    /// Concurrent edits made observations stale; retry promptly.
+    ChangedDuringScan,
+    /// Pending file work excluded paths; wait for progress or a slow retry.
     Deferred,
+    /// Discovery or inspection failed; retry without reporting a completed scan.
+    Incomplete,
 }
 
 impl LibraryHandle {
@@ -62,7 +65,7 @@ impl LibraryResources {
     }
 
     /// Completes one walk even when concurrent changes require a follow-up.
-    /// Releasing the scanning flag lets file replay run before that next pass.
+    /// Scanning activity is separate from committed contents notifications.
     #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
     pub(crate) async fn scan_folder(&self) -> Result<FolderScan, BackendError> {
         let _profile = ScanProfileStage::new("scan", 0);
@@ -75,23 +78,28 @@ impl LibraryResources {
         let scanning = OnDrop::new(|| {
             self.scanning.store(false, Ordering::Release);
             self.events.updates.publish(LibraryUpdate::Scanning(false));
-            self.events.emit(LibraryEvent::ContentsChanged);
         });
         let profile = ScanProfileStage::new("snapshot", 0);
         let snapshot = self.database.scan_snapshot(book_inspection::inspection_version(book_model::BookFormat::Pdf)).await?;
         drop(profile);
         let excluded = !snapshot.excluded_paths.is_empty();
-        let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(self.scan_once(snapshot))).await.unwrap_or_else(|_| Err(BackendError::message("library scan panicked")))?;
-        let outcome = if excluded || result == ScanApplyResult::AppliedNeedsRescan { FolderScan::Deferred } else { FolderScan::Complete };
+        let (result, readable) = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(self.scan_once(snapshot))).await.unwrap_or_else(|_| Err(BackendError::message("library scan panicked")))?;
+        let outcome = if !readable {
+            FolderScan::Incomplete
+        } else if result == ScanApplyResult::AppliedNeedsRescan {
+            FolderScan::ChangedDuringScan
+        } else if excluded {
+            FolderScan::Deferred
+        } else {
+            FolderScan::Complete
+        };
         drop(scanning);
-        // A completed scan can leave lifecycle and metadata mutations
-        // that need a sync pass before dependent asset work is ready.
-        self.events.sync.wake();
         Ok(outcome)
     }
 
     #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
-    async fn scan_once(&self, snapshot: library_database::ScanSnapshot) -> Result<ScanApplyResult, BackendError> {
+    async fn scan_once(&self, snapshot: library_database::ScanSnapshot) -> Result<(ScanApplyResult, bool), BackendError> {
+        let mut contents_revision = self.database.scan_content_revision().await?;
         let assets = self.state.read().await.assets().clone();
         let root_access = assets.lock_root_shared().await;
         // Walking directories and fingerprinting files is blocking I/O.
@@ -157,8 +165,7 @@ impl LibraryResources {
             drop(profile);
             needs_rescan |= result == ScanApplyResult::AppliedNeedsRescan;
             discovery.directories.clear();
-            self.events.emit(LibraryEvent::ContentsChanged);
-            self.events.sync.wake();
+            self.publish_scan_changes(&mut contents_revision).await?;
             // Deliver queries and partial contents before inspecting another batch.
             tokio::task::yield_now().await;
         }
@@ -171,9 +178,17 @@ impl LibraryResources {
             .apply_filesystem_scan_batch(&mut snapshot, &discovery, library_database::InspectedFilesystemScan { readable, books: vec![] }, true, Some(ContributorNameMatcher::Normalized))
             .await
             .map_err(BackendError::operation)?;
-        if !discovery.readable {
-            return Err(BackendError::message("filesystem scan was incomplete"));
+        self.publish_scan_changes(&mut contents_revision).await?;
+        Ok((if needs_rescan { ScanApplyResult::AppliedNeedsRescan } else { result }, readable))
+    }
+
+    #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
+    async fn publish_scan_changes(&self, previous: &mut i64) -> Result<(), BackendError> {
+        let current = self.database.scan_content_revision().await?;
+        if current != *previous {
+            *previous = current;
+            self.events.notify_contents_changed();
         }
-        Ok(if needs_rescan { ScanApplyResult::AppliedNeedsRescan } else { result })
+        Ok(())
     }
 }

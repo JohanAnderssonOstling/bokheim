@@ -17,7 +17,7 @@ impl Render for ContentsFixture {
         let parent_mouse_downs = self.parent_mouse_downs.clone();
         let reset: ContentsReadReset = Rc::new(move |_, _, _| resets.set(resets.get() + 1));
         div().w(px(400.0)).child(
-            contents_row("chapter-five", ContentsRow { read: true, ..Default::default() }, None::<Div>, "Chapter five", None, Some(reset), BrowserTheme::default())
+            contents_row("chapter-five", ContentsRow { read: true, ..Default::default() }, None::<Div>, "Chapter five", Some(reset), BrowserTheme::default())
                 .debug_selector(|| "test-contents-row".into())
                 .on_mouse_down(MouseButton::Left, move |_, _, _| parent_mouse_downs.set(parent_mouse_downs.get() + 1))
                 .on_click(move |_, _, _| navigations.set(navigations.get() + 1)),

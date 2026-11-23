@@ -85,6 +85,8 @@ async fn server_card_variants_preserve_finished_jpegs() {
         }
     }
 
+    let cache = tempfile::tempdir().unwrap();
+    configure_cover_cache(cache.path(), COVER_CACHE_MAX_BYTES).await.unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let _restore = RestoreOrigin(std::env::var_os("BOKHEIM_CATALOG_ORIGIN"));
     std::env::set_var("BOKHEIM_CATALOG_ORIGIN", format!("http://{}", listener.local_addr().unwrap()));
@@ -94,7 +96,7 @@ async fn server_card_variants_preserve_finished_jpegs() {
         let key = CardKey::from(BookId::from_bytes([index as u8 + 150; 32]));
         let mut expected = b"\xff\xd8\xff".to_vec();
         expected.extend_from_slice(format!("finished server image {index}").as_bytes());
-        let versioned = thumbnail::card_thumbnail_suffix(width);
+        let versioned = thumbnail_contract::card_thumbnail_suffix(width);
         replies.push((format!("/covers/{key}-{versioned}.jpg"), (available == "versioned").then(|| expected.clone())));
         cases.push((key, width, expected));
     }

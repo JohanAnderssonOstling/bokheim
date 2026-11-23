@@ -1,16 +1,21 @@
 //! Explicit file-operation and thumbnail jobs, also available while signed out.
 pub(crate) use super::LibraryResources;
-pub(crate) use crate::library::events::LibraryEvent;
 pub(crate) use crate::BackendError;
 pub(crate) use crate::BookId;
-use asset_transfer::thumbnail_jobs::{ThumbnailExtractor, ThumbnailJobs};
+pub(crate) use crate::library::events::LibraryEvent;
+use asset_transfer::thumbnail_jobs::ThumbnailJobs;
 
 impl LibraryResources {
     pub(crate) async fn run_file_jobs(&self) -> Result<(), BackendError> {
         let database = &self.database;
+        let before = database.file_work_revision().await?;
         let had_file_work = database.has_pending_file_work().await?;
         let result = library_placement::run_file_jobs(&self.state).await;
-        if had_file_work {
+        let progressed = database.file_work_revision().await? != before;
+        if progressed {
+            self.events.file_work_progressed();
+        }
+        if had_file_work && progressed {
             // Replay completion refreshes views and sync, but is not another
             // request for replay. Durable work can remain queued (for example
             // while a book is leased); ContentsChanged would self-wake forever.
@@ -35,15 +40,14 @@ impl LibraryResources {
     }
 
     pub(crate) async fn run_thumbnail_members(&self, hashes: Vec<BookId>) -> Result<(), BackendError> {
-        let extractor = ThumbnailExtractor::new(self.cpu.clone());
         let mut failure = None;
         for hash in hashes {
             let result = async {
                 let assets = self.state.read().await.assets().clone();
-                let prepared = ThumbnailJobs::new(&self.database, &assets, &extractor).prepare(hash).await?;
+                let prepared = ThumbnailJobs::new(&self.database, &assets).prepare(hash).await?;
                 if let Some(job) = prepared {
                     let events = self.events.clone();
-                    job.run(&extractor, move |has_cover| {
+                    job.run(&*self.cpu, move |has_cover| {
                         events.emit(LibraryEvent::ThumbnailFinished { book_id: hash, result: Ok(has_cover) });
                     })
                     .await?;

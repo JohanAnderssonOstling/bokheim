@@ -8,14 +8,15 @@ use crate::query::run_database;
 use crate::serve::resolution::{authoritative_author_resolutions, match_author_resolutions, merge_rich_matches, rich_subjects, sibling_consensus_subjects};
 use crate::serve::{alternatives, related_isbn};
 use crate::{MetadataError, MetadataService};
-use book_model::{AUTHOR_MARC_RELATOR_CODE, AgentId, BookMetadata, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, Scheme, Scope};
+use book_model::{AgentId, BookMetadata, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE};
 use metadata_contract::audible::{LookupRequest, LookupResponse, LookupStatus as AudibleStatus};
-use metadata_contract::books::{BookEnrichment, BookEnrichmentFailure, BookEnrichmentRequest, BookEnrichmentResponse, BookEnrichmentStatus, BookFacts, MAX_BOOKS_PER_REQUEST, TitleReading};
-use metadata_contract::{ClassificationMethod, EditionClassificationConsensus, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, LookupStatus, MAX_ISBNS_PER_REQUEST, RichIsbnMetadataResult, RichWorkMetadataMatch};
+use metadata_contract::books::{BookEnrichment, BookEnrichmentFailure, BookEnrichmentRequest, BookEnrichmentResponse, BookEnrichmentStatus, BookFacts, TitleReading, MAX_BOOKS_PER_REQUEST};
+use metadata_contract::{ClassificationMethod, ClassificationScheme, EditionClassificationConsensus, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, LookupStatus, RichIsbnMetadataResult, RichWorkMetadataMatch, MAX_ISBNS_PER_REQUEST};
 use std::collections::{BTreeSet, HashMap};
+use subject_projection::{BISAC_SYSTEM_ID, LCC_SYSTEM_ID, has_unified_subjects};
 
 /// Bump whenever a lookup or merge rule below changes; clients ask again.
-pub const POLICY: &str = "books_v29";
+pub const POLICY: &str = "books_v31";
 
 // A work union larger than this is replaced by edition consensus when the
 // consensus is smaller.
@@ -38,20 +39,19 @@ struct AudibleEnrichment {
     recording: AudibleRecording,
 }
 
-struct EnrichmentError {
-    stage: BookEnrichmentFailure,
-    error: MetadataError,
-}
+#[derive(Default)]
+struct LookupFailures(Vec<(BookEnrichmentFailure, String)>);
 
-impl From<MetadataError> for EnrichmentError {
-    fn from(error: MetadataError) -> Self {
-        Self { stage: BookEnrichmentFailure::Lookup, error }
-    }
-}
-
-impl EnrichmentError {
-    fn cover(error: MetadataError) -> Self {
-        Self { stage: BookEnrichmentFailure::Cover, error }
+impl LookupFailures {
+    fn keep<T>(&mut self, stage: BookEnrichmentFailure, result: Result<T, MetadataError>) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                tracing::warn!(?stage, %error, "book enrichment stage failed; retaining other results");
+                self.0.push((stage, error.to_string()));
+                None
+            }
+        }
     }
 }
 
@@ -62,21 +62,18 @@ impl MetadataService {
         }
         // Books wait on independent network fallbacks; database work is
         // already bounded by the query slots.
-        let results = futures_util::future::join_all(request.books.into_iter().map(|facts| async move {
-            let key = facts.key.clone();
-            match self.enrich_book(facts).await {
-                Ok(result) => result,
-                Err(error) => BookEnrichment { key, status: BookEnrichmentStatus::Failed, record: None, toc: None, cover: None, failure: Some(error.stage), detail: error.error.to_string() },
-            }
-        }))
-        .await;
+        let results = futures_util::future::join_all(request.books.into_iter().map(|facts| self.enrich_book(facts))).await;
         Ok(BookEnrichmentResponse { policy: POLICY.to_owned(), results })
     }
 
-    async fn enrich_book(&self, facts: BookFacts) -> Result<BookEnrichment, EnrichmentError> {
+    async fn enrich_book(&self, facts: BookFacts) -> BookEnrichment {
+        use BookEnrichmentFailure::{Cover, Lookup};
+
+        let mut failures = LookupFailures::default();
         let mut record = facts.record.clone();
         record.description.clear();
-        record.book.infer_embedded_subject_isbns().map_err(|error| MetadataError(error.to_string()))?;
+        let original = record.clone();
+        failures.keep(Lookup, record.book.infer_embedded_subject_isbns().map_err(|error| MetadataError(error.to_string())));
         let mut lookups = Lookups::new();
         let mut found = false;
 
@@ -92,10 +89,10 @@ impl MetadataService {
                     && !(subject.authority().is_some_and(|authority| matches!(authority.to_ascii_lowercase().as_str(), "lcc" | "bisac" | "ddc" | "unified")) && BORROWED_CLASSIFICATION_SOURCES.contains(&subject.source()))
             });
             found |= record.book.subjects.len() != previous_count;
-            found |= self.classify_new_isbns(&mut record, &mut checked, &mut lookups).await?;
+            found |= failures.keep(Lookup, self.classify_new_isbns(&mut record, &mut checked, &mut lookups).await).unwrap_or(false);
             if !has_specific_lcc(&record.book) && !record.title.trim().is_empty() {
-                found |= self.apply_edition_identity(&mut record, &facts.readings).await?;
-                found |= self.classify_new_isbns(&mut record, &mut checked, &mut lookups).await?;
+                found |= failures.keep(Lookup, self.apply_edition_identity(&mut record, &facts.readings).await).unwrap_or(false);
+                found |= failures.keep(Lookup, self.classify_new_isbns(&mut record, &mut checked, &mut lookups).await).unwrap_or(false);
             }
             // Raw headings are a fallback only without usable LCC, including
             // supported sibling subtrees stored as unified assignments.
@@ -104,8 +101,8 @@ impl MetadataService {
 
         let isbns = canonical_isbns(&record);
         if !isbns.is_empty() {
-            self.lookup_isbns(&isbns, &mut lookups).await?;
-            found |= apply_authors(&mut record, &isbns, &lookups)?;
+            failures.keep(Lookup, self.lookup_isbns(&isbns, &mut lookups).await);
+            found |= failures.keep(Lookup, apply_authors(&mut record, &isbns, &lookups)).unwrap_or(false);
             if let Some(description) = unique_description(&isbns, &lookups) {
                 record.description = description;
                 found = true;
@@ -118,31 +115,42 @@ impl MetadataService {
             let response = audible_lookup(request).await;
             match response.status {
                 AudibleStatus::Supported => {
-                    let enrichment = apply_audible(&mut record, &response)?;
-                    toc = enrichment.toc;
-                    if facts.needs_cover {
-                        cover = self.resolve_audible_cover(&enrichment.recording.asin, &enrichment.recording.region).await.map_err(EnrichmentError::cover)?;
+                    if let Some(enrichment) = failures.keep(Lookup, apply_audible(&mut record, &response)) {
+                        toc = enrichment.toc;
+                        found = true;
+                        if facts.needs_cover {
+                            cover = failures.keep(Cover, self.resolve_audible_cover(&enrichment.recording.asin, &enrichment.recording.region).await).flatten();
+                        }
                     }
-                    found = true;
                 }
-                AudibleStatus::Unavailable => return Err(MetadataError(format!("audiobook lookup unavailable: {}", response.detail)).into()),
+                AudibleStatus::Unavailable => {
+                    failures.keep::<()>(Lookup, Err(MetadataError(format!("audiobook lookup unavailable: {}", response.detail))));
+                }
                 AudibleStatus::NoMatch | AudibleStatus::Ambiguous => {}
             }
         }
         if facts.needs_cover && cover.is_none() {
             let isbns = canonical_isbns(&record);
             if !isbns.is_empty() {
-                cover = self.resolve_isbn_cover(&isbns).await.map_err(EnrichmentError::cover)?;
+                cover = failures.keep(Cover, self.resolve_isbn_cover(&isbns).await).flatten();
             }
         }
 
-        found |= cover.is_some();
-        let status = if found { BookEnrichmentStatus::Found } else { BookEnrichmentStatus::NoMatch };
-        Ok(BookEnrichment { key: facts.key, status, record: found.then_some(record), toc, cover, failure: None, detail: String::new() })
+        found |= cover.is_some() || record != original;
+        let status = if found {
+            BookEnrichmentStatus::Found
+        } else if failures.0.is_empty() {
+            BookEnrichmentStatus::NoMatch
+        } else {
+            BookEnrichmentStatus::Failed
+        };
+        let failure = failures.0.iter().find(|(stage, _)| *stage == Lookup).or_else(|| failures.0.first()).map(|(stage, _)| *stage);
+        let detail = failures.0.into_iter().map(|(_, detail)| detail).collect::<Vec<_>>().join("; ");
+        BookEnrichment { key: facts.key, status, record: found.then_some(record), toc, cover, failure, detail }
     }
 
-    /// Looks up every ISBN not already in `lookups`. An ISBN the lookup
-    /// omits fails the book, so the client asks again.
+    /// Looks up every ISBN not already in `lookups`. Retains completed batches
+    /// even when a later batch fails; other enrichment stages can use them.
     async fn lookup_isbns(&self, isbns: &[String], lookups: &mut Lookups) -> Result<(), MetadataError> {
         let missing = isbns.iter().filter(|isbn| !lookups.contains_key(*isbn)).cloned().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
         for chunk in missing.chunks(MAX_ISBNS_PER_REQUEST) {
@@ -248,17 +256,11 @@ impl MetadataService {
 
         let supported = |query: &EditionIdentityQuery, result: &EditionIdentityResult| {
             result.sibling_subjects.as_ref().is_some_and(|consensus| !consensus.subjects.is_empty())
-                || !alternatives::classifications(query, &resource_isbns, result)
-                    .iter()
-                    .flat_map(|classification| match classification.scheme {
-                        metadata_contract::ClassificationScheme::LibraryOfCongress => subject_projection::unified_subject_paths(subject_projection::LCC_SYSTEM_ID, &classification.notation),
-                        metadata_contract::ClassificationScheme::Bisac => subject_projection::unified_subject_paths(subject_projection::BISAC_SYSTEM_ID, &classification.notation),
-                        _ => Vec::new(),
-                    })
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .is_empty()
+                || alternatives::classifications(query, &resource_isbns, result).iter().any(|classification| match classification.scheme {
+                    ClassificationScheme::LibraryOfCongress => has_unified_subjects(LCC_SYSTEM_ID, &classification.notation),
+                    ClassificationScheme::Bisac => has_unified_subjects(BISAC_SYSTEM_ID, &classification.notation),
+                    _ => false,
+                })
         };
         let mut result = results.get(&base.query_id);
         let mut query = base.clone();
@@ -463,7 +465,7 @@ fn subject_key(subject: &BookSubject) -> (String, String) {
 mod tests {
     use super::*;
     use crate::build::tests::snapshot_from;
-    use subject_projection::{BISAC_SYSTEM_ID, LCC_SYSTEM_ID, project_subject_codes, project_subject_concepts, unified_concept_id, unified_subject_paths};
+    use subject_projection::{project_subject_codes, project_subject_concepts, unified_concept_id, unified_subject_paths, BISAC_SYSTEM_ID, LCC_SYSTEM_ID};
 
     #[test]
     fn ebook_release_year_does_not_rank_print_editions_or_rewrite_the_year() {
@@ -581,7 +583,11 @@ mod tests {
         let provider = axum::Router::new().route(
             "/b/isbn/:file",
             axum::routing::get(|axum::extract::Path(file): axum::extract::Path<String>| async move {
-                if file == "9780306406157-L.jpg" { (axum::http::StatusCode::OK, b"resolved artwork".to_vec()) } else { (axum::http::StatusCode::NOT_FOUND, Vec::new()) }
+                if file == "9780306406157-L.jpg" {
+                    (axum::http::StatusCode::OK, b"resolved artwork".to_vec())
+                } else {
+                    (axum::http::StatusCode::NOT_FOUND, Vec::new())
+                }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

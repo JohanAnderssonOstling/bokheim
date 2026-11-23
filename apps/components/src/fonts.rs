@@ -1,7 +1,9 @@
 //! Interface and book fonts shared by every application platform.
 mod bundled;
 mod catalog;
-pub use catalog::{FontCatalog, FontCatalogTarget, load_font_catalog, observe_font_catalog};
+mod picker;
+pub use catalog::FontCatalog;
+pub use picker::{FontPicker, FontPickerEvent};
 
 #[cfg(any(target_arch = "wasm32", target_os = "android"))]
 use std::borrow::Cow;
@@ -129,8 +131,7 @@ pub fn configure_bundled_font_source(source: impl Fn(&str) -> Result<Cow<'static
 
 /// A host-provided catalog of installed families, without GPUI's synthetic
 /// fallback aliases. Android supplies this after registering device fonts.
-pub struct SystemFontFamilies(pub Vec<String>);
-impl Global for SystemFontFamilies {}
+pub use gpui::SystemFontFamilies;
 
 /// Install only the default interface family and its display face. Hosts with
 /// saved preferences use `register_interface_fonts` through `apply_appearance`.

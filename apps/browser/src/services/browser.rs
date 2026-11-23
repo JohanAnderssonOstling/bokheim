@@ -2,8 +2,8 @@
 use app_preferences::BrowsingPreferences;
 #[cfg(not(target_arch = "wasm32"))]
 use embedded_browser::{BrowserEvent, BrowserFeedback, BrowserWindow};
-use library_backend::{BackendError, LibraryClient};
 use library_backend::executor::BackendExecutor;
+use library_backend::{BackendError, LibraryClient};
 #[cfg(not(target_arch = "wasm32"))]
 use library_backend::{Url, executor::run_blocking};
 #[cfg(not(target_arch = "wasm32"))]
@@ -20,13 +20,15 @@ pub(crate) async fn available(_executor: &BackendExecutor) -> bool {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn open(executor: &BackendExecutor, library: LibraryClient, preferences: BrowsingPreferences) -> Result<(), BackendError> {
-    executor.with_io_context(async {
-        let downloads = library.browser_downloads().await?;
-        let url = Url::parse("about:blank").map_err(BackendError::operation)?;
-        let window = embedded_browser::open(&url, "Bokheim – Browser", downloads.directory(), preferences).await?;
-        attach_downloads(executor, downloads, window);
-        Ok(())
-    }).await
+    executor
+        .with_io_context(async {
+            let downloads = library.browser_downloads().await?;
+            let url = Url::parse("about:blank").map_err(BackendError::operation)?;
+            let window = embedded_browser::open(&url, "Bokheim – Browser", downloads.directory(), preferences).await?;
+            attach_downloads(executor, downloads, window);
+            Ok(())
+        })
+        .await
 }
 
 #[cfg(target_arch = "wasm32")]

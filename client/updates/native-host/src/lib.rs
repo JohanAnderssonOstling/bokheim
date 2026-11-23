@@ -1,8 +1,7 @@
-#![cfg(any(target_os = "linux", target_os = "android", target_os = "windows"))]
+#![cfg(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos"))]
 //! Native update lifecycle and platform installation policies. Application
 //! activation precedes workers; reference-only preparation runs in the background.
 
-pub use update_client::UpdateError;
 use serde::{Deserialize, Serialize};
 use std::env::consts::ARCH;
 use std::{
@@ -10,7 +9,9 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+pub use update_client::UpdateError;
 use update_client::native_files::parent_directory;
+use update_client::taxonomy::{Reference, Selection};
 use update_client::{
     DiscoveryConfig,
     activation::{self, Journal, Replacement, State},
@@ -57,7 +58,7 @@ pub fn device(version: &str, taxonomy: Option<&ActiveTaxonomy>) -> Result<Device
     Ok(DeviceVersion {
         application: version.parse().map_err(UpdateError::operation)?,
         schema: library_database::LIBRARY_SCHEMA_VERSION as u32,
-        taxonomy_formats: vec![1],
+        taxonomy_formats: subject_projection::runtime_format::DOWNLOAD_FORMATS.to_vec(),
         taxonomy_release: taxonomy.map(|t| t.release).unwrap_or(subject_projection::bundled::RELEASE_ID),
         target: if cfg!(target_os = "android") {
             format!("android-{}-apk", ARCH)
@@ -77,7 +78,7 @@ pub fn prepare_candidate(job_path: &Path, version: &str) -> Result<(), UpdateErr
         if Some(actual) != job.expected_taxonomy {
             return Err("taxonomy version differs from signed manifest".into());
         }
-        subject_projection::installed::prepare(&path)?;
+        subject_projection::installed::validate(&path, actual)?;
         Some(ActiveTaxonomy { path, release: actual.0 })
     } else {
         job.previous_taxonomy
@@ -92,6 +93,29 @@ pub fn prepare_candidate(job_path: &Path, version: &str) -> Result<(), UpdateErr
         .map_err(UpdateError::operation)?;
     }
     activation::write_json(&job.result, &Prepared { device: device(version, taxonomy.as_ref())?, taxonomy })
+}
+
+/// A data-only host shares signed discovery, approval, staging and selection.
+/// Its target never selects an application package from the feed.
+pub struct ReferenceOnly {
+    running_release: u64,
+}
+pub type TaxonomyHost = NativeHost<ReferenceOnly>;
+impl Platform for ReferenceOnly {
+    fn target(&self) -> String {
+        "taxonomy-only".into()
+    }
+}
+impl TaxonomyHost {
+    pub fn open(data: &Path, version: &str, config: DiscoveryConfig) -> Result<Self, UpdateError> {
+        let mut host = Self::open_platform(data, version, config, ReferenceOnly { running_release: 0 })?;
+        host.select_taxonomy()?;
+        host.platform.running_release = host.installed()?.taxonomy_release;
+        Ok(host)
+    }
+    pub fn taxonomy_view(&self) -> UpdateView {
+        if self.installed().is_ok_and(|device| device.taxonomy_release > self.platform.running_release) { UpdateView::Ready { action: update_client::coordinator::UpdateAction::Restart } } else { self.view() }
+    }
 }
 
 pub enum Startup {
@@ -226,9 +250,71 @@ impl Host {
         migration.promote(self.version.clone(), prepared.device.application.to_string(), self.appimage.clone())
     }
 }
-fn active(root: &Path) -> Result<Option<ActiveTaxonomy>, UpdateError> {
+fn selection(root: &Path) -> Result<Option<Selection>, UpdateError> {
     let path = root.join("active-taxonomy.json");
-    if path.try_exists().map_err(UpdateError::operation)? { activation::read_json(&path) } else { Ok(None) }
+    if !path.try_exists().map_err(UpdateError::operation)? {
+        return Ok(None);
+    }
+    let selected: Option<Selection> = activation::read_json(&path)?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    Ok(Some(selected))
+}
+
+fn bundled_reference(root: &Path) -> Result<Reference, UpdateError> {
+    let source = subject_projection::bundled::path()?;
+    let identity = subject_projection::installed::bundled_source();
+    let digest = identity.rsplit(':').next().ok_or("missing bundled identity")?;
+    let directory = root.join("generations").join(format!("bundled-{digest}"));
+    let path = directory.join("taxonomy.sqlite3");
+    if !path.exists() {
+        fs::create_dir_all(&directory).map_err(UpdateError::operation)?;
+        activation::copy_file(&source, &path)?;
+        activation::sync_dir(&directory)?;
+    }
+    let (release, format) = subject_projection::installed::metadata(&source)?;
+    let reference = Reference { path: path.to_str().ok_or("taxonomy path is not UTF-8")?.into(), release, format, artifact: None };
+    reference.validate()?;
+    Ok(reference)
+}
+
+fn recover_selection(root: &Path) -> Result<(), UpdateError> {
+    let selected = match selection(root) {
+        Ok(selected) => selected,
+        Err(error) => {
+            log::warn!("taxonomy selection is unreadable; selecting the bundled runtime: {error}");
+            activation::write_json(&root.join("active-taxonomy.json"), &Selection::new(bundled_reference(root)?))?;
+            return Ok(());
+        }
+    };
+    if let Some(selected) = selected {
+        let recovered = match selected.recover() {
+            Ok(recovered) => recovered,
+            Err(error) => {
+                log::warn!("taxonomy references are unreadable; selecting the bundled runtime: {error}");
+                Selection::new(bundled_reference(root)?)
+            }
+        };
+        let recovered = if recovered.current.release < subject_projection::installed::BUNDLED_RELEASE_ID { recovered.stage(bundled_reference(root)?)? } else { recovered };
+        if recovered.current.path != selected.current.path {
+            activation::write_json(&root.join("active-taxonomy.json"), &recovered)?;
+        }
+    }
+    Ok(())
+}
+
+fn active(root: &Path) -> Result<Option<ActiveTaxonomy>, UpdateError> {
+    Ok(selection(root)?.map(|selected| ActiveTaxonomy { path: selected.current.path.into(), release: selected.current.release }))
+}
+
+fn next_selection(root: &Path, taxonomy: &ActiveTaxonomy, artifact: Option<update_client::Artifact>) -> Result<Selection, UpdateError> {
+    let next = Reference { path: taxonomy.path.to_str().ok_or("taxonomy path is not UTF-8")?.into(), release: taxonomy.release, format: subject_projection::installed::metadata(&taxonomy.path)?.1, artifact };
+    let previous = match selection(root)? {
+        Some(selected) => selected,
+        None => Selection::new(bundled_reference(root)?),
+    };
+    if previous.current.path == next.path { Ok(previous) } else { previous.stage(next) }
 }
 
 #[cfg(all(test, target_os = "linux"))]

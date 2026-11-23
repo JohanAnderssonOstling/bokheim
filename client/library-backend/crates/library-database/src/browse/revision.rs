@@ -54,6 +54,9 @@ pub(crate) fn install(connection: &Connection) -> Result<(), DatabaseError> {
         ("languages", "book_language", "metadata,facets", "book_row_id,language", true),
         ("placement_visibility", "book_dir", "visibility,facets", "book_row_id,deleted_at", true),
         ("placement_availability", "book_dir", "availability", "book_row_id,deleted_at,is_downloaded", true),
+        ("placement_size", "book_dir", "metadata", "book_row_id,size_bytes", true),
+        ("content_size", "book_content", "metadata", "book_id,size_bytes", true),
+        ("upload_size", "book_transfer", "metadata", "content_hash,upload_size", false),
         ("placements", "book_dir", "folders", "book_row_id,dir_id,file_name,deleted_at", true),
         ("files", "local_file_projection", "availability", "content_hash", true),
         ("folders", "dir", "folders", "id,parent_id,name,deleted_at", true),
@@ -70,6 +73,10 @@ pub(crate) fn install(connection: &Connection) -> Result<(), DatabaseError> {
         }
     }
     for (event, record) in [("INSERT", "NEW"), ("DELETE", "OLD")] {
+        connection.execute_batch(&format!(
+            "CREATE TRIGGER IF NOT EXISTS browse_upload_size_{} AFTER {event} ON book_transfer WHEN {record}.upload_size IS NOT NULL BEGIN UPDATE browse_revision SET metadata=metadata+1 WHERE singleton=1; END;",
+            event.to_ascii_lowercase()
+        ))?;
         connection.execute_batch(&format!(
             "CREATE TRIGGER IF NOT EXISTS browse_download_request_{} AFTER {event} ON book_transfer WHEN {record}.book_download IS NOT NULL BEGIN UPDATE browse_revision SET availability=availability+1 WHERE singleton=1; END;",
             event.to_ascii_lowercase()

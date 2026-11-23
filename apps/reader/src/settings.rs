@@ -24,11 +24,7 @@ use app_preferences::{DEFAULT_WORD_SPACING_PERCENT, ReaderFirstLineIndent, Reade
 pub use app_preferences::PdfZoomMode as PdfZoomModePreference;
 use gpui::{App, Global};
 
-/// A host can register device fonts in the background. Closing the sender
-/// releases every book waiting to create its text shaper.
-pub struct SystemFontsLoading(pub async_channel::Receiver<()>);
-
-impl Global for SystemFontsLoading {}
+pub use gpui::SystemFontsLoading;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReaderFontRole {

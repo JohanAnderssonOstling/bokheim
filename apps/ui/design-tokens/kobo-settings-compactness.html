@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bokheim · Compact reader settings</title>
+  <style>
+    @font-face { font-family: NVGaramond; src: url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf'); }
+    @font-face { font-family: NVJost; src: url('../../desktop-gpui/assets/fonts/NV_Jost-Regular.ttf'); }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    :root { color-scheme: light; --ink: #171714; --paper: #fff; --rule: #aaa9a3; --muted: #605f57; }
+    body { margin: 0; background: #efeee9; color: var(--ink); font: 15px/1.45 NVJost, sans-serif; }
+    button, select { font: inherit; color: inherit; }
+    button, summary { cursor: pointer; }
+    button:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+    main { max-width: 1320px; margin: auto; padding: 28px 32px; }
+    .masthead { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--rule); padding-bottom: 20px; }
+    .eyebrow { text-transform: uppercase; letter-spacing: .13em; font-size: 11px; color: var(--muted); }
+    h1 { font: 36px/1.1 NVGaramond, serif; margin: 8px 0 0; }
+    .masthead p { margin: 0; color: var(--muted); font-size: 13px; }
+    .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; margin: 20px 0 16px; }
+    .tools label { display: flex; align-items: center; gap: 10px; }
+    select, .tools button { min-height: 40px; padding: 6px 12px; border: 1px solid var(--rule); background: transparent; border-radius: 3px; }
+    .proposals { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
+    .proposals button { flex: 1 1 190px; min-height: 62px; text-align: left; border: 1px solid var(--rule); border-radius: 3px; padding: 9px 14px; background: transparent; }
+    .proposals small { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .proposals [aria-pressed=true] { background: var(--paper); border-color: var(--ink); box-shadow: inset 0 -2px var(--ink); }
+    .workbench { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 32px; align-items: start; }
+    .preview { min-width: 0; }
+    .preview-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-bottom: 10px; font-size: 12px; color: var(--muted); }
+    .stage { position: relative; width: 100%; }
+    .screen { --ui: 16px; --target: calc(var(--ui) * 3); --inset: 16px; --gap: 16px; --tile-height: 70px; position: absolute; top: 0; left: 50%; transform-origin: top center; width: 632px; height: 840px; display: flex; flex-direction: column; overflow: hidden; border: 1px solid #777; background: var(--paper); color: #111; font: var(--ui)/1.3 NVGaramond, serif; }
+    .screen button, .screen summary { background: var(--paper); border: 0; border-radius: 0; min-height: var(--target); font: inherit; }
+    .screen button:hover:enabled, .screen summary:hover { background: #f0efeb; }
+    .screen button:disabled { color: #888; cursor: default; }
+    .screen [aria-pressed=true] { box-shadow: inset 0 -2px #111; }
+    .screen-header { flex: none; display: flex; align-items: center; gap: 12px; padding: 0 var(--inset); min-height: 56px; border-bottom: 1px solid var(--rule); }
+    .screen-header strong { font-weight: 400; font-feature-settings: 'smcp' 1, 'c2sc' 1; }
+    .device { margin-left: auto; font-size: .875em; }
+    .screen-header .close { width: var(--target); padding: 0; font-size: 1.5em; }
+    .scroller { min-height: 0; flex: 1; overflow: auto; scrollbar-width: none; }
+    .scroller::-webkit-scrollbar { display: none; }
+    .settings { width: 100%; }
+    .setting-group { padding: var(--inset); border-bottom: 1px solid var(--rule); display: flex; flex-direction: column; gap: var(--gap); }
+    .fields { display: flex; flex-wrap: wrap; gap: var(--gap); align-items: start; width: 100%; }
+    .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; max-width: 100%; flex: 1 1 max-content; }
+    .name { font-size: .875em; color: #555; font-feature-settings: 'smcp' 1, 'c2sc' 1; }
+    .picture-fields > .field { flex-basis: calc(var(--ui) * 20); }
+    .steps > .field { flex-basis: calc(var(--ui) * 11); }
+    .spacing > .field { flex-basis: calc(var(--ui) * 15); }
+    .choices { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(max-content, 1fr); min-width: 0; width: 100%; border: 1px solid var(--rule); border-radius: 3px; overflow: hidden; }
+    .choices > button { min-width: var(--target); padding: 3px 8px; border-right: 1px solid var(--rule); }
+    .choices > button:last-child { border-right: 0; }
+    .pictures { border: 0; gap: 8px; overflow: visible; }
+    .pictures > button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: max(var(--target), var(--tile-height)); border: 1px solid var(--rule); border-radius: 3px; padding: 4px; }
+    .pictures > button:last-child { border-right: 1px solid var(--rule); }
+    .pictures > [aria-pressed=true] { outline: 1px solid #111; outline-offset: -2px; box-shadow: none; }
+    .sample { font-size: 1.5em; height: 1.5em; display: flex; align-items: center; }
+    .sample.sans { font-family: NVJost, sans-serif; }
+    .picture { width: 2.25em; height: 2.25em; }
+    .stepper { display: flex; align-items: stretch; min-width: 0; width: 100%; border: 1px solid var(--rule); border-radius: 3px; }
+    .stepper > button { flex: 0 0 var(--target); padding: 0; font-size: 1.25em; }
+    .stepper output { flex: 1 1 calc(var(--ui) * 3.5); min-width: calc(var(--ui) * 3); display: flex; align-items: center; justify-content: center; padding: 0 4px; white-space: nowrap; }
+    .override { display: flex; align-items: stretch; gap: 8px; min-width: 0; }
+    .override > .choices { flex: 0 0 auto; width: auto; }
+    .override .stepper { flex: 1; }
+    .override .book-options { min-height: max(var(--target), var(--tile-height)); }
+    .book-options > button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 4px; }
+    .stepper > .tile-value { flex: 1 1 calc(var(--ui) * 3.5); min-width: calc(var(--ui) * 3); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 4px; font-size: 1em; }
+    .tile-value .picture, .book-options .picture, .value-menu .picture { flex: none; }
+    .ruler > .field:first-child { flex-grow: 2; }
+    .ruler > .field:last-child { flex: 1 1 calc(var(--ui) * 11); }
+    .ruler .choices button { padding-inline: 8px; }
+    .bottom { flex: none; min-height: 60px; display: flex; align-items: stretch; border-top: 1px solid var(--rule); }
+    .bottom button { flex: 1; padding: 6px 8px; font-size: .875em; }
+    .trim, .inline, .value { --inset: 12px; --gap: 10px; }
+    .inline .picture-fields > .field, .value .picture-fields > .field { flex-basis: max-content; }
+    .inline .pictures > button, .value .pictures > button { flex-direction: row; gap: 4px; min-height: var(--target); }
+    .inline .pictures, .value .pictures { gap: 6px; }
+    .inline .sample, .value .sample { font-size: 1.25em; height: auto; }
+    .inline .pictures [data-choice="Custom"] .sample, .value .pictures [data-choice="Custom"] .sample { display: none; }
+    .inline .picture, .value .picture { width: 1.25em; height: 1.25em; }
+    .inline .book-options, .value .book-options { min-height: var(--target); }
+    .inline .book-options > button, .inline .stepper > .tile-value { flex-direction: row; gap: 4px; }
+    .inline .spacing > .field:has(.override) { flex-basis: max-content; }
+    .inline .stepper > .tile-value { min-width: max-content; }
+    .value .spacing > .field { flex-basis: calc(var(--ui) * 11); }
+    .value-menu { position: relative; flex: 1 1 calc(var(--ui) * 3.5); min-width: calc(var(--ui) * 3); }
+    .value-menu > summary { list-style: none; height: 100%; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 0 4px; white-space: nowrap; }
+    .value-menu > summary::-webkit-details-marker { display: none; }
+    .value-menu > summary::after { content: '⌄'; color: #555; font-size: .75em; }
+    .value-menu .menu { position: absolute; top: calc(100% + 4px); left: 50%; transform: translateX(-50%); z-index: 5; min-width: max-content; border: 1px solid #555; background: var(--paper); box-shadow: 0 3px 8px #0002; padding: 4px; }
+    .value-menu .menu button { display: block; width: 100%; text-align: left; padding: 4px 12px; }
+    .value-menu .menu button[aria-pressed=true] { box-shadow: none; text-decoration: underline; text-underline-offset: 5px; }
+    .inactive output { color: #888; }
+    .metrics { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 12px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    aside h2 { font: 30px/1.1 NVGaramond, serif; margin: 7px 0 14px; }
+    aside p { margin: 12px 0; font-size: 14px; }
+    aside .tradeoff { border-top: 1px solid var(--rule); padding-top: 12px; color: var(--muted); }
+    .comparison { border-collapse: collapse; width: 100%; margin: 24px 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+    .comparison caption { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .1em; padding-bottom: 10px; color: var(--muted); }
+    .comparison th, .comparison td { text-align: left; padding: 9px 0; border-bottom: 1px solid #cfcec8; font-weight: 400; }
+    .comparison th:last-child, .comparison td:last-child { text-align: right; }
+    .comparison tr.active td { font-weight: 500; }
+    .recommendation { border-left: 2px solid var(--ink); padding-left: 14px; }
+    .notes { max-width: 940px; font-size: 12px; color: var(--muted); margin-top: 24px; }
+    .notes a { color: inherit; }
+    .measure { position: fixed !important; left: -20000px !important; top: 0; visibility: hidden; transform: none !important; pointer-events: none; }
+    @media(max-width: 1050px) { .workbench { grid-template-columns: 1fr; } aside { max-width: 700px; } }
+    @media(max-width: 650px) { main { padding: 20px 14px; } h1 { font-size: 30px; } .proposals button { flex-basis: 40%; padding: 8px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header class="masthead"><div><div class="eyebrow">Bokheim / reader settings / compactness study</div><h1>Keep the controls. Find more room.</h1></div><p>Interactive mockups · Reader implementation unchanged</p></header>
+  <div class="tools">
+    <label>Orientation <select id="orientation"><option value="portrait">Portrait · 632 × 840</option><option value="landscape">Landscape · 840 × 632</option></select></label>
+    <label>UI text <select id="text-size"><option>16</option><option>18</option><option>20</option><option>22</option></select></label>
+    <button id="reset" type="button">Reset sample values</button>
+  </div>
+  <nav class="proposals" aria-label="Compactness proposals">
+    <button type="button" data-variant="baseline" aria-pressed="false">Current layout<small>Reference · shared rows</small></button>
+    <button type="button" data-variant="trim" aria-pressed="false">A · Less whitespace<small>Same tiles, closer groups</small></button>
+    <button type="button" data-variant="inline" aria-pressed="true">B · Shorter picture tiles<small>A + pictures beside labels</small></button>
+    <button type="button" data-variant="value" aria-pressed="false">C · Book in the value<small>B + combined default / value</small></button>
+  </nav>
+  <div class="workbench">
+    <section class="preview" aria-label="Kobo settings mockup">
+      <div class="preview-meta"><span id="dimensions"></span><span id="scale"></span></div>
+      <div class="stage"><div id="screen" class="screen inline"></div></div>
+      <div class="metrics" aria-live="polite"><span id="visible"></span><span id="scroll"></span><span id="target"></span></div>
+    </section>
+    <aside>
+      <div class="eyebrow" id="proposal-label"></div><h2 id="proposal-title"></h2><div id="proposal-copy"></div>
+      <table class="comparison"><caption>Content height · same settings</caption><thead><tr><th>Proposal</th><th>Height</th><th>Saved</th></tr></thead><tbody id="comparison"></tbody></table>
+      <p class="recommendation">Start with A + B: less empty space and shorter tiles, with every option still directly visible.</p>
+      <p class="notes">Small-caps headings stay above controls. All rows use the full width. Reading ruler stays at the bottom. Controls keep their touch-target size.</p>
+    </aside>
+  </div>
+  <p class="notes">Design proposals, not screenshots of GPUI. Heights compare these mockups at the selected orientation and text size; they are not measurements from the Kobo. Touch targets are at least 48 logical pixels at 16px UI text and grow with the text size. <a href="kobo-settings-layouts.html#portrait">Previous layout study</a>.</p>
+</main>
+<script>
+(() => {
+  const root = document.querySelector('main');
+  const screen = root.querySelector('#screen');
+  const defaults = { font: 'Serif', alignment: 'Justify', weight: 'Normal', hyphenation: 'Book', size: 24, word: 100, width: 560, line: 1.4, paragraph: .6, indent: 1.2, side: 16, vertical: 16, gap: 24, ruler: 'Off', lines: 1 };
+  let values = { ...defaults }, modes = { line: 'Book', paragraph: 'Book', indent: 'Book' };
+  let variant = 'inline', orientation = 'portrait', ui = 16;
+  const numbers = {
+    size: ['Font size', 12, 48, 1, 'px'], word: ['Word spacing', 50, 200, 5, '%'], width: ['Column width', 240, 1000, 40, 'px'],
+    line: ['Line spacing', .8, 3, .1, '×'], paragraph: ['Paragraph spacing', 0, 3, .1, 'em'], indent: ['First-line indent', 0, 3, .2, 'em'],
+    side: ['Side margins', 0, 120, 8, 'px'], vertical: ['Top / bottom margins', 0, 120, 8, 'px'], gap: ['Column gap', 0, 120, 8, 'px'], lines: ['Ruler lines', 1, 5, 1, '']
+  };
+  const descriptions = {
+    baseline: ['Reference', 'Current arrangement.', '<p>Small-caps headings above controls, intrinsic width for the font weight / hyphenation pair, and shared stepper rows.</p><p>Picture tiles keep their vertical sample and label. Book remains a separate option beside the spacing stepper.</p><p class="tradeoff">A schematic reference for comparing space, rather than a pixel-perfect copy of the app.</p>'],
+    trim: ['Proposal A', 'Trim the whitespace.', '<p>Reduce group insets from 16 to 12px and gaps from 16 to 10px. Headings and controls retain their current size.</p><p>Keep the same borders, samples, labels, and choices. This is the smallest visual change.</p><p class="tradeoff">Less separation between settings. The larger picture tiles still take up vertical space.</p>'],
+    inline: ['Proposal B · Recommended', 'Short tiles, same choices.', '<p>Includes A. Put each typeface sample or alignment picture beside its label in a 48px-high tile. Custom keeps its label without a generic sample.</p><p>Use their intrinsic widths to place typeface and alignment beside each other whenever they fit, including normal-size portrait.</p><p class="tradeoff">The sample pictures are smaller. Increasing UI text can make these controls stack again.</p>'],
+    value: ['Proposal C', 'Let Book be the value.', '<p>Includes B. Replace the separate Book tile with a value button between − and +. It reads Book while the publication controls that setting.</p><p>Press − or + to start a custom value. Press the centre button to choose Book, Custom, or Off for first-line indent.</p><p class="tradeoff">Saves enough width for more spacing controls to share a row, but returning to Book takes an extra tap. Try the centre of a spacing stepper.</p>']
+  };
+  function choice(key, options, pictures = false) {
+    return `<div class="choices ${pictures ? 'pictures' : ''}" role="group" aria-label="${key}">${options.map(option => {
+      const art = !pictures ? '' : key === 'font' ? `<span class="sample ${option === 'Sans' ? 'sans' : ''}">Aa</span>` : `<img class="picture" src="assets/reader-settings/align-${option.toLowerCase()}.svg" alt="">`;
+      return `<button type="button" data-key="${key}" data-choice="${option}" aria-pressed="${values[key] === option}">${art}<span>${option}</span></button>`;
+    }).join('')}</div>`;
+  }
+  function field(key, title, content) { return `<div class="field" data-field="${key}"><span class="name">${title}</span>${content}</div>`; }
+  function spacingIcon(mode) {
+    const name = mode === 'Book' ? 'align-book' : mode === 'Off' ? 'align-left' : 'line-spacing-normal';
+    return `<img class="picture" src="assets/reader-settings/${name}.svg" alt="">`;
+  }
+  function stepper(key, layout) {
+    const [label, min, max, step, unit] = numbers[key];
+    const inherited = key in modes && modes[key] !== 'Custom';
+    const inactive = key === 'lines' && values.ruler === 'Off';
+    const value = (step < 1 ? values[key].toFixed(1) : values[key]) + unit;
+    const nudge = delta => `<button type="button" data-key="${key}" data-delta="${delta}" aria-label="${delta < 0 ? 'Decrease' : 'Increase'} ${label}" ${inactive || (!inherited && (delta < 0 ? values[key] <= min : values[key] >= max)) ? 'disabled' : ''}>${delta < 0 ? '−' : '+'}</button>`;
+    let centre = `<output>${value}</output>`;
+    if (key in modes) centre = `<button type="button" class="tile-value" data-source="Custom" data-key="${key}" aria-label="Use custom ${label}: ${value}" aria-pressed="${modes[key] === 'Custom'}">${spacingIcon('Custom')}<span>${value}</span></button>`;
+    if (layout === 'value' && key in modes) {
+      centre = `<details class="value-menu"><summary aria-label="${label}: ${inherited ? modes[key] : value}. Choose source.">${spacingIcon(modes[key])}<span>${inherited ? modes[key] : value}</span></summary><div class="menu" role="group" aria-label="${label} source">${['Book', ...(key === 'indent' ? ['Off'] : []), 'Custom'].map(mode => `<button type="button" data-source="${mode}" data-key="${key}" aria-pressed="${modes[key] === mode}">${mode === 'Book' ? 'Use book value' : mode === 'Custom' ? 'Use custom value' : 'No indentation'}</button>`).join('')}</div></details>`;
+    }
+    const stepper = `<div class="stepper ${inactive ? 'inactive' : ''}" role="group" aria-label="${label}">${nudge(-1)}${centre}${nudge(1)}</div>`;
+    if (!(key in modes) || layout === 'value') return field(key, label, stepper);
+    const book = `<div class="choices book-options" role="group" aria-label="${label} source">${['Book', ...(key === 'indent' ? ['Off'] : [])].map(mode => `<button type="button" data-source="${mode}" data-key="${key}" aria-pressed="${modes[key] === mode}">${spacingIcon(mode)}<span>${mode}</span></button>`).join('')}</div>`;
+    return field(key, label, `<div class="override">${book}${stepper}</div>`);
+  }
+  function content(layout) {
+    const font = field('font', 'Typeface', choice('font', ['Book', 'Serif', 'Sans', 'Custom'], true));
+    const alignment = field('alignment', 'Alignment', choice('alignment', ['Book', 'Left', 'Justify'], true));
+    const weight = field('weight', 'Font weight', choice('weight', ['Light', 'Normal', 'Heavy']));
+    const hyphenation = field('hyphenation', 'Hyphenation', choice('hyphenation', ['Book', 'Off', 'On']));
+    const steps = keys => keys.map(key => stepper(key, layout)).join('');
+    return `<header class="screen-header"><strong>Reader settings</strong><span class="device">☼ 60% · ▰ 82%</span><button class="close" type="button" aria-label="Return to reader" data-close>×</button></header><div class="scroller" tabindex="0" aria-label="Scrollable reader settings"><div class="settings"><section class="setting-group"><div class="fields picture-fields">${font}${alignment}</div><div class="fields">${weight}${hyphenation}</div><div class="fields steps">${steps(['size', 'word', 'width'])}</div></section><section class="setting-group"><div class="fields spacing">${steps(['line', 'paragraph', 'indent', 'side', 'vertical', 'gap'])}</div></section><section class="setting-group"><div class="fields ruler">${field('ruler', 'Reading ruler', choice('ruler', ['Off', 'Band', 'Focus', 'Lines']))}${stepper('lines', layout)}</div></section></div></div><nav class="bottom" aria-label="Reader navigation">${['Contents', 'Notes', 'Bookmarks', 'Settings'].map(label => `<button type="button" data-nav="${label}" aria-pressed="${label === 'Settings'}">${label}</button>`).join('')}</nav>`;
+  }
+  function render(keepScroll = false) {
+    const scroll = keepScroll ? screen.querySelector('.scroller')?.scrollTop || 0 : 0;
+    screen.className = `screen ${variant}`;
+    screen.style.setProperty('--ui', ui + 'px');
+    screen.innerHTML = content(variant);
+    screen.querySelector('.scroller').scrollTop = scroll;
+    screen.querySelector('.scroller').addEventListener('scroll', visibleMetrics, { passive: true });
+    root.querySelectorAll('[data-variant]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.variant === variant)));
+    const [label, title, copy] = descriptions[variant];
+    root.querySelector('#proposal-label').textContent = label;
+    root.querySelector('#proposal-title').textContent = title;
+    root.querySelector('#proposal-copy').innerHTML = copy;
+    resize();
+  }
+  function resize() {
+    const [width, height] = orientation === 'portrait' ? [632, 840] : [840, 632];
+    const stage = root.querySelector('.stage');
+    const scale = Math.min(1, stage.clientWidth / width);
+    screen.style.width = width + 'px'; screen.style.height = height + 'px';
+    screen.style.transform = `translateX(-50%) scale(${scale})`;
+    stage.style.height = height * scale + 'px';
+    root.querySelector('#dimensions').textContent = `Kobo Libra 2 · ${width} × ${height} logical pixels`;
+    root.querySelector('#scale').textContent = `Preview ${Math.round(scale * 100)}%`;
+    root.querySelector('#target').textContent = `${ui * 3}px minimum touch targets`;
+    requestAnimationFrame(() => { comparison(); visibleMetrics(); });
+  }
+  function comparison() {
+    const measurements = Object.keys(descriptions).map(layout => {
+      const clone = document.createElement('div');
+      clone.className = `screen measure ${layout}`;
+      clone.style.width = screen.style.width; clone.style.height = screen.style.height;
+      clone.style.setProperty('--ui', ui + 'px'); clone.innerHTML = content(layout);
+      root.append(clone);
+      const height = Math.ceil(clone.querySelector('.settings').getBoundingClientRect().height);
+      clone.remove(); return { layout, height };
+    });
+    root.querySelector('#comparison').innerHTML = measurements.map(({ layout, height }, index) => `<tr class="${layout === variant ? 'active' : ''}"><td>${['Current', 'A · Whitespace', 'B · Short tiles', 'C · Book value'][index]}</td><td>${height}px</td><td>${index ? Math.round((1 - height / measurements[0].height) * 100) + '%' : '—'}</td></tr>`).join('');
+  }
+  function visibleMetrics() {
+    const scroller = screen.querySelector('.scroller');
+    if (!scroller) return;
+    const bounds = scroller.getBoundingClientRect();
+    const fields = [...scroller.querySelectorAll('.field')];
+    const visible = fields.filter(field => { const box = field.getBoundingClientRect(); return box.top >= bounds.top - 1 && box.bottom <= bounds.bottom + 1; }).length;
+    root.querySelector('#visible').textContent = `${visible} of ${fields.length} settings fully visible`;
+    const overflow = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    root.querySelector('#scroll').textContent = overflow > 1 ? `${overflow}px scrollable below` : 'All settings fit without scrolling';
+  }
+  root.addEventListener('click', event => {
+    const button = event.target.closest('button'); if (!button) return;
+    if (button.dataset.variant) { variant = button.dataset.variant; render(); return; }
+    if (button.id === 'reset') { values = { ...defaults }; modes = { line: 'Book', paragraph: 'Book', indent: 'Book' }; render(); return; }
+    if (button.hasAttribute('data-close') || (button.dataset.nav && button.dataset.nav !== 'Settings')) {
+      screen.innerHTML = `<div style="margin:auto; text-align:center; padding:20px">${button.dataset.nav || 'Back to the reader'}<p><button type="button" data-reopen>Reopen settings</button></p></div>`;
+      root.querySelector('#visible').textContent = 'Preview navigation'; root.querySelector('#scroll').textContent = ''; return;
+    }
+    if (button.hasAttribute('data-reopen')) { render(); return; }
+    const key = button.dataset.key; if (!key) return;
+    if (button.dataset.source) modes[key] = button.dataset.source;
+    else if (button.dataset.choice) values[key] = button.dataset.choice;
+    else if (button.dataset.delta) {
+      const [, min, max, step] = numbers[key];
+      if (key in modes) { if (modes[key] === 'Off') values[key] = 0; modes[key] = 'Custom'; }
+      values[key] = Math.round(Math.max(min, Math.min(max, values[key] + Number(button.dataset.delta) * step)) * 100) / 100;
+    }
+    const selector = Object.entries(button.dataset).filter(([name]) => ['key', 'delta', 'source', 'choice'].includes(name));
+    render(true);
+    [...screen.querySelectorAll('button')].find(candidate => selector.every(([name, value]) => candidate.dataset[name] === value))?.focus({ preventScroll: true });
+  });
+  root.querySelector('#orientation').addEventListener('change', event => { orientation = event.target.value; render(); });
+  root.querySelector('#text-size').addEventListener('change', event => { ui = Number(event.target.value); render(); });
+  new ResizeObserver(resize).observe(root.querySelector('.stage'));
+  document.fonts.ready.then(resize);
+  render();
+})();
+</script>
+</body>
+</html>

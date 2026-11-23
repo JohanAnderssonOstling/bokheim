@@ -120,7 +120,7 @@ impl Database {
                 return Err(DatabaseError::message("move source changed; please try again"));
             }
             tx.execute(
-                "INSERT INTO local_file_projection(content_hash,dir_id,relative_path) VALUES(?1,?2,?3) ON CONFLICT(content_hash,dir_id) DO UPDATE SET relative_path=excluded.relative_path",
+                "INSERT INTO local_file_projection(content_hash,dir_id,relative_path) VALUES(?1,?2,'/'||ltrim(?3,'/')) ON CONFLICT(content_hash,dir_id) DO UPDATE SET relative_path=excluded.relative_path",
                 (&source.book, source.directory.to_string(), staged.as_str()),
             )?;
             queue_materialization(tx, &source.book, &source.directory)?;

@@ -124,7 +124,7 @@ SELECT dir_id FROM book_dir WHERE book_row_id=:book_row_id AND deleted_at IS NUL
 -- name: directory_clear_placement_hash !
 -- param: dir_id: &SqlParam<'_>
 -- param: content_hash: &SqlParam<'_>
-UPDATE book_dir SET local_hash='' WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash);
+UPDATE book_dir SET local_hash=NULL WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash);
 
 -- name: directory_clear_placement_download !
 -- param: dir_id: &SqlParam<'_>

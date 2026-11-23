@@ -9,11 +9,12 @@ use client_protocol::BackendError;
 use library_replica::filenames;
 use sync_common::DirId;
 
-use super::{ImportMode, ReadestBook, ReadestConfig, import_book_in_batch};
+#[cfg(test)]
+use super::ImportMode;
+use super::{ReadestBook, ReadestConfig, import_book_in_batch};
 use crate::LibraryImport;
-use crate::reader_batch::ReaderImportBatch;
 use crate::reader_import::{ReaderImportBook, ReaderImportSource, import_books};
-use crate::reader_transfer::ReaderBookResult;
+use crate::reader_transfer::{ReaderBookResult, ReaderImportOperation};
 
 pub use crate::reader_import::ReaderBookCounts as ReadestBookCounts;
 pub use crate::reader_import::ReaderGroup as ReadestGroup;
@@ -122,7 +123,7 @@ impl ReaderImportBook for ReadestImportBook<'_> {
         group_components(self.book.group_name.as_deref().unwrap_or_default())
     }
 
-    async fn import(self, importer: &LibraryImport<'_>, parent: DirId, mode: ImportMode, batch: Option<&mut ReaderImportBatch>) -> Result<ReaderBookResult, BackendError> {
+    async fn import(self, importer: &LibraryImport<'_>, parent: DirId, operation: ReaderImportOperation<'_>) -> Result<ReaderBookResult, BackendError> {
         // Validate the hash before using it as a config path, including books
         // whose source lives outside Readest's managed directory.
         let hash = filenames::validate_component(&self.book.hash)?;
@@ -135,7 +136,7 @@ impl ReaderImportBook for ReadestImportBook<'_> {
             }
         })
         .await??;
-        import_book_in_batch(importer, self.directory, parent, &self.book, &config, mode, batch).await
+        import_book_in_batch(importer, self.directory, parent, &self.book, &config, operation).await
     }
 }
 
@@ -242,18 +243,18 @@ mod tests {
         let report = ReadestLibrary::open(source_root.path()).unwrap().import(&importer, options.clone()).await.unwrap();
         assert_eq!(report.imported, 2);
         assert!(report.failures.is_empty());
-        assert_eq!(importer.storage.database().book_count().unwrap(), 2);
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 2);
         assert!(destination.path().join("Target/Readest/Dator/Programmering/first.epub").is_file());
         assert!(destination.path().join("Target/Readest/Dator/Programmering/Rust/second.epub").is_file());
         assert!(!destination.path().join("Readest").exists());
         let hash = importer.storage.database().book_for_local_content(blake3::hash(FIRST).into()).await.unwrap().unwrap();
-        assert_eq!(importer.storage.database().reading_position(&hash).unwrap().as_deref(), Some("epub-location-v2:epubcfi(/6/4)"));
+        assert_eq!(importer.storage.database().reading_position(&hash).await.unwrap().as_deref(), Some("epub-location-v2:epubcfi(/6/4)"));
         let annotations = importer.storage.database().annotations(hash).await.unwrap();
         assert_eq!(annotations.len(), 1);
         assert_eq!(annotations[0].note, "Fixture note");
         let repeated = ReadestLibrary::open(source_root.path()).unwrap().import(&importer, options).await.unwrap();
         assert_eq!((repeated.imported, repeated.already_present), (0, 2));
-        assert_eq!(importer.storage.database().annotations(hash).unwrap(), annotations);
+        assert_eq!(importer.storage.database().annotations(hash).await.unwrap(), annotations);
         assert_eq!(fs::read(source_root.path().join("library.json")).unwrap(), original_json);
         assert_eq!(fs::read(source_root.path().join("first.epub")).unwrap(), FIRST);
         assert_eq!(fs::read_dir(destination.path().join("Target")).unwrap().filter_map(Result::ok).filter(|entry| entry.file_name().to_string_lossy().starts_with("Readest")).count(), 1);
@@ -292,6 +293,6 @@ mod tests {
         assert_eq!(report.failures.len(), 1);
         assert!(source_root.path().join("first.epub").is_file());
         assert!(!destination.path().join("Readest").exists());
-        assert_eq!(importer.storage.database().book_count().unwrap(), 0);
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 0);
     }
 }

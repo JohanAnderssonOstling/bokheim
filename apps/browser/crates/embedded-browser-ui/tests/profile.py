@@ -75,7 +75,7 @@ processes = []
 def launch(root, profile, stage, log):
     request = {'url': f'http://127.0.0.1:{server.server_port}/?stage={stage}',
                'title': f'Bokheim profile regression {stage}', 'data_directory': str(profile),
-               'downloads': str(root / 'downloads'), 'history_file': str(root / 'history.json'), 'preferences': {'keyboard_shortcuts': {}, 'allow_metered_transfers': False, 'text_search': True, 'animations': True, 'custom_ui_font_enabled': False, 'generated_covers_only': False, 'catalog_grouping': 'subject', 'keyboard_layouts': ['SV'], 'ui_font_family': 'serif', 'theme': 'cool', 'ui_font_size_px': 16, 'cover_text': 'always'}}
+               'downloads': str(root / 'downloads'), 'history_file': str(root / 'history.json'), 'preferences': {'keyboard_shortcuts': {}, 'text_search': True, 'animations': True, 'custom_ui_font_enabled': False, 'generated_covers_only': False, 'catalog_grouping': 'subject', 'keyboard_layouts': ['SV'], 'ui_font_family': 'serif', 'theme': 'cool', 'ui_font_size_px': 16, 'cover_text': 'always'}}
     child = subprocess.Popen([args.helper, 'browser'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=log, env=env)
     processes.append(child)

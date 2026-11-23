@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+linux-update-host = { path = "../native-host" }
 http-response = { workspace = true, features = ["blocking"] }
 fs2 = "0.4"
 kobo-package = { path = "../kobo-package" }

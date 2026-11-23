@@ -126,27 +126,9 @@ create table if not exists sync_outbox(
 
 CREATE TABLE IF NOT EXISTS sync_clock(singleton INTEGER PRIMARY KEY CHECK(singleton=1), sequence INTEGER NOT NULL);
 
--- Immutable book records use only an identity, payload and transport token.
--- The token preserves the original publication during retries and recovery;
--- none of its fields participate in timestamp-based conflict resolution.
-create table if not exists sync_book_record(
-    state_kind TEXT not null check(state_kind = 'book_add'),
-    content_hash BLOB not null references book(content_hash) on delete cascade,
-    body BLOB not null,
-    publication BLOB not null,
-    primary key(state_kind,content_hash)
-);
-
--- Offline additions are local drafts, never inventory or outbox entries.
-CREATE TABLE IF NOT EXISTS local_book_draft(
-    content_hash BLOB PRIMARY KEY NOT NULL REFERENCES book(content_hash) ON DELETE CASCADE,
-    body BLOB NOT NULL,
-    retry_at INTEGER
-) STRICT;
-
 -- Canonical winning mutable registers. Domain tables are disposable projections.
 create table if not exists sync_state_version(
-    state_kind      TEXT not null check(state_kind != 'book_add'),
+    state_kind      TEXT not null,
     state_key       BLOB not null,
     state_subkey    TEXT not null default '',
     changed_at      INTEGER not null,

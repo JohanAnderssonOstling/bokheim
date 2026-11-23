@@ -1,6 +1,8 @@
 //! Start Linux writeback while the importer copies and inspects other books.
 //! These are optional hints; the batch's final filesystem sync provides durability.
-use std::fs::File;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem as fs;
+use client_platform_runtime::filesystem::File;
 use std::io::{self, Error, ErrorKind};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread::{self, JoinHandle};
@@ -69,8 +71,8 @@ mod tests {
     use super::*;
     use std::io::{Seek, SeekFrom, Write};
     use std::os::unix::fs::FileExt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     #[test]

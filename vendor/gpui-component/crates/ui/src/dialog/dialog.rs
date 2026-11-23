@@ -470,7 +470,8 @@ impl RenderOnce for Dialog {
         let on_cancel = self.button_props.on_cancel.clone();
 
         let window_paddings = crate::window_border::window_paddings(window);
-        let view_size = window.viewport_size()
+        let viewport = window.input_viewport();
+        let view_size = viewport.size
             - gpui::size(
                 window_paddings.left + window_paddings.right,
                 window_paddings.top + window_paddings.bottom,
@@ -507,7 +508,7 @@ impl RenderOnce for Dialog {
             Animation::new(*ANIMATION_DURATION).with_easing(cubic_bezier(0.32, 0.72, 0., 1.));
 
         anchored()
-            .position(point(window_paddings.left, window_paddings.top))
+            .position(viewport.origin + point(window_paddings.left, window_paddings.top))
             .snap_to_window()
             .child(
                 div()
@@ -600,6 +601,7 @@ impl RenderOnce for Dialog {
                             .left(if centered { px(0.) } else { x })
                             .top(y)
                             .w(self.props.width)
+                            .max_h((view_size.height - y - px(16.)).max(px(0.)))
                             .when_some(self.props.max_width, |this, w| this.max_w(w))
                             .child(
                                 v_flex()

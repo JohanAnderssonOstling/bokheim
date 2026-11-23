@@ -1,9 +1,9 @@
 use super::{LibraryFolderError, LibraryFolderStep, LibraryService};
 use crate::{BackendError, LibraryId};
+use client_platform_runtime::filesystem as fs;
 use client_protocol::Failure;
 use library_model::CloudQuotaBook;
 use std::collections::HashMap;
-use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,7 +21,7 @@ fn check_library_folder(path: &Path) -> Result<PathBuf, (LibraryFolderStep, Back
     // is_dir() hides access errors. Opening the listing keeps permission and
     // unavailable-drive failures distinct without modifying the user's files.
     let _ = fs::read_dir(path).map_err(access_error)?;
-    path.canonicalize().map_err(access_error)
+    fs::canonicalize(path).map_err(access_error)
 }
 
 impl LibraryService {
@@ -34,7 +34,7 @@ impl LibraryService {
         let mut created_ids = Vec::new();
         let mut errors = Vec::new();
         for path in paths {
-            let display_path = path.display().to_string();
+            let display_path = fs::display_path(&path.to_string_lossy());
             let failure = |step, error: BackendError| LibraryFolderError { folder_name: Some(library_name_for_folder(&path)), step, error: error.context(display_path.clone()) };
             let canonical_path = match check_library_folder(&path) {
                 Ok(path) => path,
@@ -173,7 +173,8 @@ impl LibraryService {
 }
 
 fn library_name_for_folder(path: &Path) -> String {
-    path.file_name().and_then(|name| name.to_str()).filter(|name| !name.trim().is_empty()).map(str::to_owned).unwrap_or_else(|| path.display().to_string())
+    let display = fs::display_path(&path.to_string_lossy());
+    Path::new(&display).file_name().and_then(|name| name.to_str()).filter(|name| !name.trim().is_empty()).map(str::to_owned).unwrap_or(display)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

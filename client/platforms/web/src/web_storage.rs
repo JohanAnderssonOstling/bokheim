@@ -159,6 +159,25 @@ pub fn publish_reference_database(name: &str, filename: &str) -> Result<(), Stor
     with_index(|index| index.execute("INSERT INTO reference_selection(name,filename) VALUES(?1,?2) ON CONFLICT(name) DO UPDATE SET filename=excluded.filename WHERE filename<>excluded.filename", [name, filename]).map(|_| ()))
 }
 
+/// Remove a closed generated reference cache, never an active library database.
+pub fn remove_reference_database(name: &str) -> Result<(), StorageError> {
+    let storage = storage()?;
+    if storage.exists(name).map_err(storage_error)? {
+        storage.delete_db(name).map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+pub fn prune_reference_databases_except(prefix: &str, retained: &[String]) -> Result<(), StorageError> {
+    let storage = storage()?;
+    for name in storage.list() {
+        if name.starts_with(prefix) && !retained.contains(&name) {
+            storage.delete_db(&name).map_err(storage_error)?;
+        }
+    }
+    Ok(())
+}
+
 /// Call only during startup, before any library opens an attached reference.
 pub fn prune_reference_databases(prefix: &str, selected: &str) -> Result<(), StorageError> {
     let storage = storage()?;
@@ -196,7 +215,6 @@ pub(super) fn storage_error(error: OpfsSAHError) -> StorageError {
         None => StorageError::new(error),
     }
 }
-
 
 fn storage() -> Result<Rc<OpfsSAHPoolUtil>, StorageError> {
     STORAGE.with(|slot| slot.borrow().clone().ok_or_else(|| StorageError::from("browser storage has not been initialized")))
@@ -680,6 +698,22 @@ impl Seek for FileWriterCursor {
         .ok_or_else(|| Error::new(io::ErrorKind::InvalidInput, "invalid asset seek"))?;
         Ok(self.position)
     }
+}
+
+/// Build an unpublished file and return a reader that owns its lifetime.
+/// The generation is retired when that last reader closes, including cancellation.
+pub async fn stage_file_with<F>(name: &str, write: F) -> Result<FileReader, StorageError>
+where
+    F: FnOnce(&mut FileWriterCursor) -> io::Result<()> + Send + 'static,
+{
+    let name = name.to_owned();
+    storage_call(move || async move {
+        let mut cursor = FileWriterCursor { writer: begin_write(&name).await?, position: 0 };
+        write(&mut cursor).map_err(|error| StorageError::from_error(&error))?;
+        cursor.writer.open_reader().await
+    })
+    .await
+    .map_err(|error| StorageError::from_error(&error))?
 }
 
 /// Stream into a staged generation without collecting its bytes in memory.

@@ -1,95 +1,134 @@
-//! Prepare the browser's taxonomy database from its immutable app bundle.
-//! Published taxonomy updates are installed in the background for the next start.
-use client_protocol::{BackendError, Failure, OperationError};
+//! Browser storage adapter for the shared immutable taxonomy lifecycle.
 use super::download_bundle;
 use crate::executor::spawn_detached;
 use client_platform_web::web_storage;
+use client_protocol::BackendError;
 use std::path::Path;
-use subject_projection::installed::{self, StoredMetadata};
-use update_client::DiscoveryConfig;
+use subject_projection::{installed, runtime_format};
+use update_client::{
+    DiscoveryConfig, UpdateError,
+    coordinator::{ApplicationActivation, ArtifactKind, Coordinator, DeviceVersion, Phase, Record, Store, WaitReason},
+    taxonomy::{Reference, Selection},
+};
 
 const STORED: &str = "taxonomy.sqlite3";
-/// Formats this build reads, as native `DeviceVersion::taxonomy_formats`.
-const FORMATS: [u32; 1] = [1];
+const RECORD: &str = "taxonomy-selection-v2";
+const UPDATE_STATE: &str = "taxonomy-update-state-v2";
 
-/// Activates the stored taxonomy and looks for a newer release in the
-/// background, taking effect on the next start like native updates.
-pub(crate) async fn install() -> Result<(), BackendError> {
-    let bundled = StoredMetadata::bundled();
-    let bundled_path = format!("taxonomy-{}.sqlite3", bundled.source.replace(':', "-"));
-    let selected = match web_storage::reference_database(STORED)? {
-        Some(path) if web_storage::database_exists(&path)? => Some(path),
-        _ => None,
-    };
-    let stored = if let Some(path) = selected {
-        if path == bundled_path {
-            Some((path, StoredMetadata::bundled()))
-        } else if path.starts_with("taxonomy-bundled-") {
-            // A different build's packaged reference is replaced without
-            // opening it; its filename already identifies the old artifact.
-            None
-        } else {
-            match installed::load_metadata(Path::new(&path)) {
-                Ok(stored) => Some((path, stored)),
-                Err(error) => {
-                    log::warn!("Replacing unreadable taxonomy cache: {error}");
-                    None
-                }
-            }
-        }
-    } else {
-        None
-    };
-    let (path, stored) = match stored.filter(|(_, stored)| FORMATS.contains(&stored.format) && stored.release >= installed::BUNDLED_RELEASE_ID && (!stored.source.starts_with("bundled:") || stored.source == bundled.source)) {
-        Some(stored) => stored,
-        None => {
-            let path = bundled_path;
-            if !web_storage::database_exists(&path)? {
-                let image = download_bundle(STORED).await?;
-                client_platform_web::reserve_database_capacity(1).await?;
-                web_storage::import_reference_database(&path, &image)?;
-            }
-            (path, bundled)
-        }
-    };
-    web_storage::publish_reference_database(STORED, &path)?;
-    web_storage::prune_reference_databases("taxonomy-", &path)?;
-    if !stored.source.starts_with("bundled:") {
-        client_platform_web::cpu_host::set_taxonomy(serde_json::from_str(&stored.source).map_err(BackendError::operation)?);
+struct BrowserStore;
+impl Store for BrowserStore {
+    fn load(&self) -> Result<Record, UpdateError> {
+        web_storage::reference_database(UPDATE_STATE)?.map(|json| serde_json::from_str(&json).map_err(UpdateError::operation)).transpose().map(|record| record.unwrap_or_default())
     }
-    installed::activate(Path::new(&path))?;
+    fn save(&mut self, expected_revision: u64, next: &Record) -> Result<(), UpdateError> {
+        // This synchronous adapter runs on the sole storage owner; there is no await between CAS and commit.
+        if self.load()?.revision != expected_revision {
+            return Err("taxonomy update state changed".into());
+        }
+        web_storage::publish_reference_database(UPDATE_STATE, &serde_json::to_string(next).map_err(UpdateError::operation)?).map_err(Into::into)
+    }
+}
+
+fn publish(selected: &Selection) -> Result<(), BackendError> {
+    let record = serde_json::to_string(selected).map_err(BackendError::operation)?;
+    web_storage::publish_reference_database(RECORD, &record).map_err(BackendError::operation)
+}
+
+pub(crate) async fn install() -> Result<(), BackendError> {
+    let bundled_release = installed::BUNDLED_RELEASE_ID;
+    let bundled_path = format!("taxonomy-{}.sqlite3", installed::bundled_source().replace(':', "-"));
+    let stored = web_storage::reference_database(RECORD)?.and_then(|record| serde_json::from_str::<Selection>(&record).ok());
+    let stored = stored.and_then(|selected| selected.recover().ok()).filter(|selected| selected.current.release >= bundled_release && (selected.current.artifact.is_some() || selected.current.path == bundled_path));
+    let selected = match stored {
+        Some(selected) => selected,
+        None => {
+            let reference = Reference { path: bundled_path, release: bundled_release, format: runtime_format::FORMAT_VERSION, artifact: None };
+            if reference.validate().is_err() {
+                let image = download_bundle(STORED).await?;
+                installed::validate_image(&image, (reference.release, reference.format))?;
+                client_platform_web::reserve_database_capacity(1).await?;
+                web_storage::import_reference_database(&reference.path, &image)?;
+            }
+            Selection::new(reference)
+        }
+    };
+    publish(&selected)?;
+    let mut retained = vec![selected.current.path.clone()];
+    if let Some(previous) = &selected.previous {
+        retained.push(previous.path.clone());
+    }
+    web_storage::prune_reference_databases_except("taxonomy-", &retained)?;
+    if let Some(artifact) = &selected.current.artifact {
+        client_platform_web::cpu_host::set_taxonomy(artifact.clone());
+    }
+    installed::activate(Path::new(&selected.current.path))?;
     spawn_detached(async move {
-        if let Err(error) = download_newer(stored.release).await {
+        if let Err(error) = download_newer(selected).await {
             log::warn!("Taxonomy update will retry on next start: {error}");
         }
     });
     Ok(())
 }
 
-/// CPU workers use the same packaged reference on their first inspection.
 pub async fn install_bundled_matching() -> Result<(), BackendError> {
     installed::install_snapshot(&download_bundle(STORED).await?).map_err(BackendError::operation)
 }
 
-/// Downloads, prepares and stores the published taxonomy when it is newer
-/// than `installed` and this build can read it.
-async fn download_newer(installed: u64) -> Result<(), BackendError> {
+async fn download_newer(selected: Selection) -> Result<(), BackendError> {
     let config = DiscoveryConfig::bundled()?;
     let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(BackendError::operation)?.as_secs();
-    let manifest = update_client::fetch::discover(&config, now, 0).await?;
-    // The deployed bundle is always the current application, so only the
-    // format and schema decide compatibility.
-    let schema = library_database::LIBRARY_SCHEMA_VERSION as u32;
-    let Some(release) = manifest.manifest().taxonomy.as_ref().filter(|release| release.release_id > installed && FORMATS.contains(&release.format_version) && release.minimum_schema_version <= schema) else {
+    let mut device = DeviceVersion {
+        application: update_client::APPLICATION_VERSION.parse().map_err(BackendError::operation)?,
+        schema: library_database::LIBRARY_SCHEMA_VERSION as u32,
+        taxonomy_formats: subject_projection::runtime_format::DOWNLOAD_FORMATS.to_vec(),
+        taxonomy_release: selected.current.release,
+        target: "taxonomy-only".into(),
+    };
+    let mut updates = Coordinator::open(BrowserStore, config, device.clone(), js_sys::Date::now().to_string(), ApplicationActivation::Restart)?;
+    match update_client::fetch::manifest_bytes(updates.config()).await {
+        Ok(envelope) => {
+            updates.discovered(envelope, now)?;
+        }
+        Err(error) => {
+            updates.discovery_failed(error.clone())?;
+            if updates.record().approved.is_none() {
+                return Err(error.into());
+            }
+        }
+    }
+    updates.approve_taxonomy(now)?;
+    let Some(_) = updates.record().approved.as_ref().filter(|plan| plan.phase != Phase::Quarantined) else {
         return Ok(());
     };
-    let path = format!("taxonomy-{}-{}.sqlite3", release.release_id, release.artifact.sha256);
-    if !web_storage::database_exists(&path)? {
-        let snapshot = update_client::fetch::download(&release.artifact).await?;
-        let source = serde_json::to_string(&release.artifact).map_err(BackendError::operation)?;
-        let image = installed::prepare_image(&snapshot, (release.release_id, release.format_version), &source)?;
-        client_platform_web::reserve_database_capacity(1).await?;
-        web_storage::import_reference_database(&path, &image)?;
+    let manifest = updates.approved_manifest()?;
+    let release = manifest.taxonomy.as_ref().ok_or("missing approved taxonomy")?;
+    if !update_client::taxonomy::compatible(release, &device.application, device.schema, &device.taxonomy_formats) {
+        updates.quarantine_after_recovery("approved taxonomy needs a supported runtime publication".into())?;
+        return Ok(());
     }
-    web_storage::publish_reference_database(STORED, &path).map_err(BackendError::operation)
+    let reference = Reference { path: format!("taxonomy-{}-{}.sqlite3", release.release_id, release.artifact.sha256), release: release.release_id, format: release.format_version, artifact: Some(release.artifact.clone()) };
+    if reference.validate().is_err() {
+        if !updates.needs_preparation() {
+            updates.activation_recovered_for_retry(WaitReason::Retry, "prepared taxonomy image is missing".into())?;
+        }
+        let snapshot = match update_client::fetch::download(&release.artifact).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                updates.preparation_failed(WaitReason::from_error(&error), error.clone())?;
+                return Err(error.into());
+            }
+        };
+        update_client::taxonomy::validate_download(&snapshot, release)?;
+        client_platform_web::reserve_database_capacity(1).await?;
+        web_storage::import_reference_database(&reference.path, &snapshot)?;
+    }
+    if updates.needs_preparation() {
+        updates.artifact_prepared(ArtifactKind::Taxonomy)?;
+    }
+    let next = if selected.current.path == reference.path { selected } else { selected.stage(reference)? };
+    updates.begin_activation()?;
+    publish(&next)?;
+    device.taxonomy_release = next.current.release;
+    updates.activated(device)?;
+    Ok(())
 }

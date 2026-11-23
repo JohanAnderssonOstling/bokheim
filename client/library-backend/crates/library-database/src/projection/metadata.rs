@@ -10,7 +10,7 @@ use client_platform_runtime::profiling::ProfileSpan;
 use content_address::BookId;
 use library_replica::{BookAddition, BookDetails};
 use rusqlite::{Transaction, limits::Limit, params_from_iter, types::Value};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 const BATCH_ROWS: usize = 1024;
 const BOOK_COLUMNS: &str = "format,added_at,title,subtitle,search_title,author,search_author";
@@ -35,6 +35,40 @@ fn write_rows<const N: usize>(tx: &Transaction<'_>, rows: &[[Value; N]], prefix:
         let _profile = ProfileSpan::new("metadata_sql", prefix);
         tx.execute(&sql, params_from_iter(chunk.iter().flatten()))?;
     }
+    Ok(())
+}
+
+/// Keep complete sets untouched when their contents already match. Queries are
+/// bounded by the same parameter budget as writes, including empty incoming sets.
+fn retain_changed_sets<const N: usize>(tx: &Transaction<'_>, books: &[[Value; 1]], rows: &mut Vec<[Value; N]>, table: &str, columns: &str) -> Result<(), DatabaseError> {
+    let mut incoming = HashMap::<i64, Vec<Vec<Value>>>::new();
+    for row in rows.iter() {
+        let Value::Integer(id) = row[0] else { unreachable!("book row id") };
+        incoming.entry(id).or_default().push(row.to_vec());
+    }
+    let mut changed = HashSet::new();
+    for chunk in books.chunks(batch_rows(tx, 1)?) {
+        let sql = format!("SELECT {columns} FROM {table} WHERE book_row_id IN ({})", vec!["?"; chunk.len()].join(","));
+        let mut statement = tx.prepare(&sql)?;
+        let existing = statement.query_map(params_from_iter(chunk.iter().flatten()), |row| (0..N).map(|column| row.get::<_, Value>(column)).collect::<Result<Vec<_>, _>>())?;
+        let mut previous = HashMap::<i64, Vec<Vec<Value>>>::new();
+        for row in existing {
+            let row = row?;
+            let Value::Integer(id) = row[0] else { unreachable!("book row id") };
+            previous.entry(id).or_default().push(row);
+        }
+        for [id] in chunk {
+            let Value::Integer(id) = id else { unreachable!("book row id") };
+            let old = previous.get(id).map(Vec::as_slice).unwrap_or_default();
+            let new = incoming.get(id).map(Vec::as_slice).unwrap_or_default();
+            if old.len() != new.len() || old.iter().any(|row| !new.contains(row)) {
+                changed.insert(*id);
+            }
+        }
+    }
+    let affected = changed.iter().map(|id| [Value::Integer(*id)]).collect::<Vec<_>>();
+    write_rows(tx, &affected, &format!("DELETE FROM {table} WHERE book_row_id IN (VALUES "), ")")?;
+    rows.retain(|row| matches!(row[0], Value::Integer(id) if changed.contains(&id)));
     Ok(())
 }
 
@@ -90,7 +124,7 @@ pub(super) fn project<'a>(tx: &Transaction<'_>, inputs: impl Iterator<Item = (&'
             subjects.push([id.into(), (position as i64).into(), subject.name().to_owned().into(), subject.source().to_owned().into(), subject.authority().map(str::to_owned).into(), subject.code().map(str::to_owned).into()]);
         }
         for concept in assignments.iter().map(|(_, concept)| *concept).collect::<BTreeSet<_>>() {
-            concepts.push([id.into(), concept.into(), subject_projection::UNIFIED_MATCHER_VERSION.into()]);
+            concepts.push([id.into(), concept.into(), subject_projection::UNIFIED_PROJECTION_VERSION.into()]);
         }
         for (index, concept) in assignments {
             let code = &projected.subject_codes[index];
@@ -120,12 +154,13 @@ pub(super) fn project<'a>(tx: &Transaction<'_>, inputs: impl Iterator<Item = (&'
         " ON CONFLICT(book_row_id,position) DO UPDATE SET author_identity_id=excluded.author_identity_id,name=excluded.name,role=excluded.role WHERE (book_contributor.author_identity_id,book_contributor.name,book_contributor.role) IS NOT (excluded.author_identity_id,excluded.name,excluded.role)",
     )?;
     let affected = books.iter().map(|row| [row[0].clone()]).collect::<Vec<_>>();
-    for table in ["book_language", "book_subject", "book_unified_concept"] {
-        write_rows(tx, &affected, &format!("DELETE FROM {table} WHERE book_row_id IN (VALUES "), ")")?;
-    }
+    retain_changed_sets(tx, &affected, &mut languages, "book_language", "book_row_id,language")?;
+    retain_changed_sets(tx, &affected, &mut subjects, "book_subject", "book_row_id,position,name,source,authority,code")?;
+    retain_changed_sets(tx, &affected, &mut concepts, "book_unified_concept", "book_row_id,concept_id,mapper_version")?;
     write_rows(tx, &languages, "INSERT INTO book_language(book_row_id,language) VALUES ", " ON CONFLICT DO NOTHING")?;
     write_rows(tx, &subjects, "INSERT INTO book_subject(book_row_id,position,name,source,authority,code) VALUES ", "")?;
     write_rows(tx, &concepts, "INSERT INTO book_unified_concept(book_row_id,concept_id,mapper_version) VALUES ", "")?;
+    retain_changed_sets(tx, &affected, &mut evidence, "book_unified_concept_evidence", "book_row_id,concept_id,subject_position,source_system_id,source_code")?;
     write_rows(tx, &evidence, "INSERT INTO book_unified_concept_evidence(book_row_id,concept_id,subject_position,source_system_id,source_code) VALUES ", " ON CONFLICT DO NOTHING")?;
     Ok(())
 }

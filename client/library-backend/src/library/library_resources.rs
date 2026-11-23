@@ -13,13 +13,13 @@ use crate::executor::BackendExecutor;
 use crate::{BackendError, LibraryId};
 use account_client::Url;
 use asset_transfer::transfer::AssetExecutor;
-use cpu_host::CpuHost;
+use cpu_contract::CpuHost;
 use library_database::DatabaseClient;
 #[cfg(not(target_arch = "wasm32"))]
 use library_database::DatabaseError;
 use library_enrichment::{CoverClient, LibraryEnrichment, MetadataClient};
 use library_placement::LibraryState;
-use library_services::account::{LibraryAccount, LibraryAuthentication};
+use library_services::account::LibraryAccount;
 use library_services::interest::NotificationInterest;
 use library_sync::{LibrarySync, LibrarySyncConfig};
 use std::sync::atomic::AtomicBool;
@@ -82,17 +82,17 @@ pub(crate) struct LibraryResources {
 impl LibraryResources {
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) async fn open_assets(root: String, database: &DatabaseClient) -> Result<AssetStore, BackendError> {
+        use client_platform_runtime::filesystem as fs;
         use content_address::hash_file;
         use library_files::import_move::recover_import_moves;
-        use std::fs::File;
         use std::io;
         use std::path::Path;
 
         Ok(database
             .run(move |database| {
-                let canonical = Path::new(&root).canonicalize().map_err(DatabaseError::operation)?;
+                let canonical = client_platform_runtime::filesystem::canonicalize(Path::new(&root)).map_err(DatabaseError::operation)?;
                 let unresolved = recover_import_moves(&canonical, |path| {
-                    let checksum = hash_file(&mut File::open(path)?)?;
+                    let checksum = hash_file(&mut fs::open(path)?)?;
                     let Some(book) = database.book_for_local_content(checksum).map_err(io::Error::other)? else { return Ok(false) };
                     Ok(database.book_paths(&book).map_err(io::Error::other)?.into_iter().any(|relative| canonical.join(relative.as_str().trim_start_matches('/')) == path))
                 })
@@ -136,15 +136,14 @@ impl LibraryResources {
         let (events, event_state) = LibraryEventRouter::new();
         database.set_storage_policy(&options.storage, options.reset_cloud_presence).await?;
         let state = Arc::new(RwLock::new(LibraryState::new(database.clone(), assets, events.clone())));
-        let authentication = LibraryAuthentication::Account(options.account.clone());
-        let transfers = AssetExecutor::new(state.clone(), database.clone(), events.clone(), options.id, authentication.clone(), options.notification_interest.clone(), cpu.clone());
+        let transfers = AssetExecutor::new(state.clone(), database.clone(), events.clone(), options.id, options.account.clone(), options.notification_interest.clone(), cpu.clone());
         transfers.set_asset_storage_enabled(options.storage.uses_bokheim_assets());
         let sync = Arc::new(
             LibrarySync::new(LibrarySyncConfig {
                 database: database.clone(),
                 events: events.clone(),
                 http_client: transfers.http_client().clone(),
-                authentication,
+                account: options.account.clone(),
                 // Opening already knows the configured server. Defer account
                 // authorization until remote work actually needs credentials.
                 server_url: options.default_sync_server_url,

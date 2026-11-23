@@ -1,7 +1,6 @@
 //! Playback owners with separate ordered restoration writers.
 
 use app::AppClient;
-use operation_failure::OperationError;
 use browser_ui::{LibraryRemovalHook, LibraryRemovalPreparation, LibraryRemovalService};
 use futures_util::{
     FutureExt,
@@ -9,6 +8,7 @@ use futures_util::{
 };
 use gpui::{App, AppContext, Context, Entity, Global, Subscription, WeakEntity};
 use library_model::BookLocator;
+use operation_failure::OperationError;
 use reader_ui::ActiveAudiobook;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -25,6 +25,8 @@ const WEB_RESTORE_KEY: &str = "bokheim.active-audiobook.v1";
 /// browser shells use their own local storage; neither involves the backend.
 #[derive(Clone)]
 struct RestoreStore {
+    #[cfg(target_arch = "wasm32")]
+    key: String,
     #[cfg(not(target_arch = "wasm32"))]
     path: Option<PathBuf>,
 }
@@ -32,9 +34,23 @@ struct RestoreStore {
 impl RestoreStore {
     fn new(path: Option<PathBuf>) -> Self {
         Self {
+            #[cfg(target_arch = "wasm32")]
+            key: path.map_or_else(|| WEB_RESTORE_KEY.to_owned(), |path| format!("{WEB_RESTORE_KEY}.{}", path.display())),
             #[cfg(not(target_arch = "wasm32"))]
             path,
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn migrate_legacy(&self) -> Result<(), OperationError> {
+        let storage = web_sys::window().ok_or("browser window is unavailable")?.local_storage().map_err(OperationError::from)?.ok_or("browser local storage is unavailable")?;
+        if let Some(value) = storage.get_item(WEB_RESTORE_KEY).map_err(OperationError::from)? {
+            if storage.get_item(&self.key).map_err(OperationError::from)?.is_none() {
+                storage.set_item(&self.key, &value).map_err(OperationError::from)?;
+            }
+            storage.remove_item(WEB_RESTORE_KEY).map_err(OperationError::from)?;
+        }
+        Ok(())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -54,12 +70,8 @@ impl RestoreStore {
 
     #[cfg(target_arch = "wasm32")]
     fn load(&self) -> Result<Option<ActiveAudiobook>, OperationError> {
-        let storage = web_sys::window()
-            .ok_or_else(|| "browser window is unavailable".to_owned())?
-            .local_storage()
-            .map_err(OperationError::from)?
-            .ok_or_else(|| "browser local storage is unavailable".to_owned())?;
-        let Some(value) = storage.get_item(WEB_RESTORE_KEY).map_err(OperationError::from)? else {
+        let storage = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?.local_storage().map_err(OperationError::from)?.ok_or_else(|| "browser local storage is unavailable".to_owned())?;
+        let Some(value) = storage.get_item(&self.key).map_err(OperationError::from)? else {
             return Ok(None);
         };
         let record = serde_json::from_str::<ActiveAudiobook>(&value).map_err(OperationError::operation)?;
@@ -87,14 +99,10 @@ impl RestoreStore {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let storage = web_sys::window()
-                .ok_or_else(|| "browser window is unavailable".to_owned())?
-                .local_storage()
-                .map_err(OperationError::from)?
-                .ok_or_else(|| "browser local storage is unavailable".to_owned())?;
+            let storage = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?.local_storage().map_err(OperationError::from)?.ok_or_else(|| "browser local storage is unavailable".to_owned())?;
             match record {
-                Some(record) => storage.set_item(WEB_RESTORE_KEY, &serde_json::to_string(&record).map_err(OperationError::operation)?).map_err(OperationError::from)?,
-                None => storage.remove_item(WEB_RESTORE_KEY).map_err(OperationError::from)?,
+                Some(record) => storage.set_item(&self.key, &serde_json::to_string(&record).map_err(OperationError::operation)?).map_err(OperationError::from)?,
+                None => storage.remove_item(&self.key).map_err(OperationError::from)?,
             }
         }
         Ok(true)
@@ -228,8 +236,15 @@ impl PlaybackController {
         controller
     }
 
-    pub fn independent(backend: AppClient, restore_path: Option<PathBuf>, cx: &mut App) -> Entity<Self> {
-        let controller = cx.new(|cx| Self::new(backend, RestoreStore::new(restore_path), cx));
+    pub fn independent(backend: AppClient, restore_path: Option<PathBuf>, #[cfg(target_arch = "wasm32")] restore_legacy: bool, cx: &mut App) -> Entity<Self> {
+        let store = RestoreStore::new(restore_path);
+        #[cfg(target_arch = "wasm32")]
+        if restore_legacy {
+            if let Err(error) = store.migrate_legacy() {
+                log::warn!("could not migrate saved audiobook to the first pane: {error}");
+            }
+        }
+        let controller = cx.new(|cx| Self::new(backend, store, cx));
         Self::register(&controller, cx);
         controller
     }

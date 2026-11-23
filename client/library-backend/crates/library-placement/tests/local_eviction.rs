@@ -40,21 +40,21 @@ async fn local_book() -> (TempDir, AssetStore, DatabaseClient, BookId) {
         .unwrap();
     database.record_catalog_answer(&hash, record).await.unwrap();
     assert!(database.is_book_downloaded(&hash).await.unwrap());
-    assert!(database.transfer_snapshot(&[hash]).await.unwrap().asset_for(&hash).unwrap().upload.intent.is_some());
+    assert!(database.book_upload_snapshot(&hash).await.unwrap().intent.is_some());
     (root, assets, database, hash)
 }
 
 #[tokio::test]
 async fn unfinished_upload_keeps_its_file_and_queued_changes() {
     let (root, assets, database, hash) = local_book().await;
-    let before = database.transfer_snapshot(&[hash]).await.unwrap();
+    let before = database.book_upload_snapshot(&hash).await.unwrap();
 
     let error = evict_local_book(&assets, &database, &hash).await.unwrap_err();
 
     assert!(error.to_string().contains("upload it before removing the download"));
     assert_eq!(fs::read(root.path().join("book.epub")).unwrap(), BOOK_BYTES);
     assert!(database.is_book_downloaded(&hash).await.unwrap());
-    assert_eq!(database.transfer_snapshot(&[hash]).await.unwrap().asset_for(&hash).unwrap().upload.intent, before.asset_for(&hash).unwrap().upload.intent);
+    assert_eq!(database.book_upload_snapshot(&hash).await.unwrap().intent, before.intent);
     assert!(database.stored_sync_status().await.unwrap().has_unsynced_changes);
 }
 

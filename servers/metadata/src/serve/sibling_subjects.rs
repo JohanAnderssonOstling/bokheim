@@ -1,9 +1,9 @@
 //! A sibling fallback needs agreement between directly classified editions.
 use super::subject_identity::{self, Candidate};
-use metadata_contract::{classification_consensus_notation, ClassificationEvidence, ClassificationMethod, ClassificationScheme, ClassificationSource, EditionIdentityQuery, SiblingSubjectConsensus, SiblingSubjectSupport};
+use metadata_contract::{ClassificationEvidence, ClassificationMethod, ClassificationScheme, ClassificationSource, EditionIdentityQuery, SiblingSubjectConsensus, SiblingSubjectSupport, classification_consensus_notation};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, OnceLock};
-use subject_projection::{most_specific_concept_ids, unified_concept_id, unified_subject_paths, unified_taxonomy_revision_id, unified_taxonomy_routes, LCC_SYSTEM_ID};
+use subject_projection::{LCC_SYSTEM_ID, UnifiedTaxonomyNavigation, most_specific_concept_ids, unified_concept_paths, unified_subject_concept_ids, unified_taxonomy_navigation, unified_taxonomy_revision_id};
 
 const MIN_PERCENT: usize = 20;
 const SUPPORT_EPSILON: f64 = 1e-12;
@@ -20,41 +20,14 @@ struct SubjectSupport {
     voters: BTreeMap<String, BTreeSet<ClassificationEvidence>>,
 }
 
-struct TaxonomyGraph {
-    revision: String,
-    parents: BTreeMap<i64, BTreeSet<i64>>,
-    paths: BTreeMap<i64, BTreeSet<String>>,
-}
-
-impl TaxonomyGraph {
-    fn ancestors(&self, concept: i64, ids: &mut BTreeSet<i64>) {
-        if ids.insert(concept) {
-            if let Some(parents) = self.parents.get(&concept) {
-                for parent in parents {
-                    self.ancestors(*parent, ids);
-                }
-            }
-        }
-    }
-}
-
-fn taxonomy_graph() -> Arc<TaxonomyGraph> {
-    static GRAPH: OnceLock<Mutex<Option<Arc<TaxonomyGraph>>>> = OnceLock::new();
+fn taxonomy_graph() -> Arc<UnifiedTaxonomyNavigation> {
+    static GRAPH: OnceLock<Mutex<Option<Arc<UnifiedTaxonomyNavigation>>>> = OnceLock::new();
     let revision = unified_taxonomy_revision_id();
     let mut cached = GRAPH.get_or_init(|| Mutex::new(None)).lock().expect("consensus taxonomy cache lock");
-    if let Some(graph) = cached.as_ref().filter(|graph| graph.revision == revision) {
+    if let Some(graph) = cached.as_ref().filter(|graph| graph.revision_id == revision) {
         return graph.clone();
     }
-    let routes = unified_taxonomy_routes();
-    let identities = routes.iter().map(|route| (route.path.as_str(), route.concept_id)).collect::<BTreeMap<_, _>>();
-    let mut graph = TaxonomyGraph { revision, parents: BTreeMap::new(), paths: BTreeMap::new() };
-    for route in &routes {
-        graph.paths.entry(route.concept_id).or_default().insert(route.path.clone());
-        if let Some(parent) = identities.get(route.parent_path.as_str()) {
-            graph.parents.entry(route.concept_id).or_default().insert(*parent);
-        }
-    }
-    let graph = Arc::new(graph);
+    let graph = Arc::new(unified_taxonomy_navigation());
     *cached = Some(graph.clone());
     graph
 }
@@ -97,14 +70,10 @@ pub(super) fn consensus(query: &EditionIdentityQuery, candidates: &[Candidate]) 
             // Unmapped numeric codes still count in the denominator. Inherited
             // work unions and unclassified records cannot create observations.
             let observation = editions.entry(identity.clone()).or_default();
-            let mut concepts = BTreeSet::new();
             // Map the complete call number before climbing the taxonomy, so
             // author cutters and other meaningful suffixes retain their scope.
-            for path in unified_subject_paths(LCC_SYSTEM_ID, &classification.notation) {
-                if let Some(concept) = unified_concept_id(&path) {
-                    concepts.insert(concept);
-                }
-            }
+            let mut concepts = unified_subject_concept_ids(LCC_SYSTEM_ID, &classification.notation);
+            concepts.retain(|id| graph.parents.contains_key(id));
             let evidence = ClassificationEvidence {
                 method: ClassificationMethod::DirectEditionLcc { notation: classification.notation.clone() },
                 isbn13: candidate.canonical_isbn13.clone(),
@@ -133,16 +102,14 @@ pub(super) fn consensus(query: &EditionIdentityQuery, candidates: &[Candidate]) 
         let weight = 1.0 / assignments as f64;
         for leaf in leaves {
             let evidence = &observation.subjects[&leaf];
-            let mut ancestors = BTreeSet::new();
-            graph.ancestors(leaf, &mut ancestors);
-            for concept in ancestors {
+            for concept in graph.ancestors_including_self(leaf) {
                 let supported = support.entry(concept).or_default();
                 supported.weight += weight;
                 supported.voters.entry(identity.clone()).or_default().extend(evidence.iter().cloned());
             }
         }
     }
-    let eligible = support.iter().filter(|(concept, _)| graph.paths.get(concept).is_some_and(|paths| paths.iter().all(|path| path.contains(" / ")))).collect::<Vec<_>>();
+    let eligible = support.iter().filter(|(concept, _)| graph.parents.contains_key(concept) && !graph.roots.contains(concept)).collect::<Vec<_>>();
     let mut qualifying = eligible.iter().filter(|(_, supported)| supported.weight / editions.len() as f64 + SUPPORT_EPSILON >= MIN_PERCENT as f64 / 100.0).map(|(concept, _)| **concept).collect::<BTreeSet<_>>();
     if qualifying.is_empty() {
         let maximum = eligible.iter().map(|(_, supported)| supported.weight).fold(0.0_f64, f64::max);
@@ -153,8 +120,14 @@ pub(super) fn consensus(query: &EditionIdentityQuery, candidates: &[Candidate]) 
     }
     for concept in most_specific_concept_ids(qualifying) {
         let supported = support.remove(&concept).expect("qualifying concept votes");
-        let Some(path) = graph.paths.get(&concept).and_then(|paths| paths.iter().next()).cloned() else { continue };
-        result.subjects.push(SiblingSubjectSupport { path, supporting_editions: supported.voters.len(), support_fraction: supported.weight / editions.len() as f64, evidence: supported.voters.into_values().flatten().collect() });
+        let Some(path) = unified_concept_paths(concept).into_iter().next() else { continue };
+        result.subjects.push(SiblingSubjectSupport {
+            concept_id: Some(concept),
+            path,
+            supporting_editions: supported.voters.len(),
+            support_fraction: supported.weight / editions.len() as f64,
+            evidence: supported.voters.into_values().flatten().collect(),
+        });
     }
     result
 }

@@ -1,0 +1,12 @@
+[package]
+name = "book-normalization"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+book-model = { path = "../book-model" }
+metadata-contract = { path = "../metadata-contract" }

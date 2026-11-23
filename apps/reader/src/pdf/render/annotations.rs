@@ -6,14 +6,14 @@ use crate::invalidation::notify;
 use crate::shell::bookmarks::{self, BookmarkTarget};
 use crate::shell::marks::BookmarkChange;
 use crate::shell::sidebar_list;
-use crate::shell::toolbar::SidebarTarget;
 use crate::shell::state_panel::{AnnotationSidebarTarget, reader_state_rows, render_annotation_row};
+use crate::shell::toolbar::SidebarTarget;
 use book_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, RecurringScope};
 use gpui::prelude::*;
 use gpui::{App, Context, Window, div};
 use library_backend::Annotation;
 use pdf_reader_core::NormalizedRect;
-use pdf_view_gpui::PdfSelectionSnapshot;
+use pdf_view_gpui::{PdfDocumentSelectionSnapshot, PdfSelectionSnapshot};
 use std::collections::HashSet;
 use ui_components as components;
 
@@ -143,6 +143,7 @@ impl AnnotationSidebarTarget for PdfReaderView {
 impl PdfReaderView {
     pub(super) fn copy_selection_with_source(&self, cx: &mut Context<Self>) {
         let Some(selection) = self.pdf.read(cx).selection_snapshot() else { return };
+        let Some(selection) = selection.pages.first() else { return };
         let rects = selection.rects.iter().map(|rect| PdfAnnotationRect::new(rect.left(), rect.top(), rect.width(), rect.height())).collect();
         let anchor = AnnotationAnchor::Pdf(PdfAnnotationAnchor::new(selection.page_index as u32, rects, None));
         crate::shell::annotation_copy::copy_link(&self.locator, &self.title, self.toc.chapter_title_at(selection.page_index), anchor, cx);
@@ -214,14 +215,21 @@ impl PdfReaderView {
     pub(super) fn preferred_annotation_overlay(&self, anchor: &str, exclude: Option<&str>, cx: &App) -> Option<String> {
         let annotation_id = |overlay: &str| self.recurring.occurrences.iter().find(|occurrence| occurrence.overlay.id == overlay).map(|occurrence| occurrence.annotation_id.clone()).unwrap_or_else(|| overlay.to_owned());
         let style = self.marks.annotation(exclude.unwrap_or(&annotation_id(anchor))).map(|annotation| &annotation.style);
-        self.pdf.read(cx).overlapping_annotation_ids(anchor).into_iter().chain(std::iter::once(anchor.to_owned()))
+        self.pdf
+            .read(cx)
+            .overlapping_annotation_ids(anchor)
+            .into_iter()
+            .chain(std::iter::once(anchor.to_owned()))
             .filter_map(|overlay| {
                 let id = annotation_id(&overlay);
                 let annotation = self.marks.annotation(&id)?;
-                if Some(id.as_str()) == exclude || annotation.is_bookmark() || annotation.is_external_pdf_annotation() { return None; }
+                if Some(id.as_str()) == exclude || annotation.is_bookmark() || annotation.is_external_pdf_annotation() {
+                    return None;
+                }
                 Some(((Some(&annotation.style) != style, crate::shell::recurring::annotation_specificity(annotation)), overlay))
             })
-            .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1))).map(|(_, overlay)| overlay)
+            .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+            .map(|(_, overlay)| overlay)
     }
 
     fn editor_overlay_ids(&self, cx: &App) -> Vec<String> {
@@ -252,31 +260,36 @@ impl PdfReaderView {
         self.create_annotation_from_selection(selection, window, cx);
     }
 
-    pub(super) fn create_annotation_from_selection(&mut self, selection: PdfSelectionSnapshot, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn create_annotation_from_selection(&mut self, selection: PdfDocumentSelectionSnapshot, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(first) = selection.pages.first().cloned() else { return };
         if self.marks.selected().is_some() {
             self.save_selected_annotation(None, None, cx);
         }
         self.recurring.editor_overlay = None;
-        self.recurring.editor_passage = Some(selection.clone());
-        let rects = selection.rects.iter().map(|rect| PdfAnnotationRect::new(rect.left(), rect.top(), rect.width(), rect.height())).collect::<Vec<_>>();
-        let anchor = AnnotationAnchor::Pdf(PdfAnnotationAnchor::new(selection.page_index as u32, rects, None));
-        let now = crate::shell::marks::now_millis();
-        let annotation = Annotation {
-            id: uuid::Uuid::new_v4().to_string(),
-            book_id: self.locator.book_id(),
-            anchor,
-            exact_text: selection.text,
-            style: AnnotationStyle::Highlight,
-            color: ui_components::READER_ANNOTATION_DEFAULT_COLOR,
-            note: String::new(),
-            created_at: now,
-            toc_ordinal: self.toc.ordinal_at(selection.page_index).map(|ordinal| ordinal as i64),
-            progress: Some(book_model::pdf_page_progress(selection.page_index, self.page_count)),
-            modified_at: now,
-            deleted: false,
-        };
-        let annotation_id = annotation.id.clone();
-        self.marks.prepend(annotation, "save PDF annotation");
+        self.recurring.editor_passage = Some(first);
+        let mut annotation_id = None;
+        for selection in selection.pages.into_iter().rev() {
+            let rects = selection.rects.iter().map(|rect| PdfAnnotationRect::new(rect.left(), rect.top(), rect.width(), rect.height())).collect::<Vec<_>>();
+            let anchor = AnnotationAnchor::Pdf(PdfAnnotationAnchor::new(selection.page_index as u32, rects, None));
+            let now = crate::shell::marks::now_millis();
+            let annotation = Annotation {
+                id: uuid::Uuid::new_v4().to_string(),
+                book_id: self.locator.book_id(),
+                anchor,
+                exact_text: selection.text,
+                style: AnnotationStyle::Highlight,
+                color: ui_components::READER_ANNOTATION_DEFAULT_COLOR,
+                note: String::new(),
+                created_at: now,
+                toc_ordinal: self.toc.ordinal_at(selection.page_index).map(|ordinal| ordinal as i64),
+                progress: Some(book_model::pdf_page_progress(selection.page_index, self.page_count)),
+                modified_at: now,
+                deleted: false,
+            };
+            annotation_id = Some(annotation.id.clone());
+            self.marks.prepend(annotation, "save PDF annotation");
+        }
+        let Some(annotation_id) = annotation_id else { return };
         let note = self.marks.select(annotation_id.clone());
         self.pdf.update(cx, |pdf, cx| pdf.set_active_annotation(Some(annotation_id), cx));
         self.annotation_note_input.update(cx, |input, cx| {

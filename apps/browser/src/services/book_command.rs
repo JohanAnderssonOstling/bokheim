@@ -1,8 +1,7 @@
 //! Book operations and their failure wording, shared by overlays and selections.
 //!
-//! Book commands run without asking first: moving to Trash and removing from a
-//! folder can both be undone from Trash, so a prompt only slowed down the
-//! common case.
+//! Reversible removal commands are recorded by the caller in the library
+//! session's Undo stack; read status and local-copy eviction have no inverse.
 
 use ui_text::text;
 
@@ -25,7 +24,7 @@ pub(crate) enum BookCommand {
 }
 
 impl BookCommand {
-    pub(crate) async fn execute(self, library: &LibraryClient, books: Vec<BookId>) -> Result<(), BackendError> {
+    pub(crate) async fn execute(self, library: &LibraryClient, books: impl IntoIterator<Item = BookId>) -> Result<(), BackendError> {
         for book in books {
             match self {
                 Self::RemoveFromFolder(directory) => {

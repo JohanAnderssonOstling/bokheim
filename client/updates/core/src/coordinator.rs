@@ -189,7 +189,23 @@ impl<S: Store> Coordinator<S> {
 
             coordinator.commit(next)?;
         }
+        coordinator.reconcile_taxonomy()?;
         Ok(coordinator)
+    }
+
+    /// A newer bundled or recovered runtime makes an older reference-only plan obsolete.
+    /// Application plans still pass through their startup transaction and health receipt.
+    fn reconcile_taxonomy(&mut self) -> Result<(), UpdateError> {
+        if !self.is_taxonomy_only() {
+            return Ok(());
+        }
+        let manifest = self.approved_manifest()?;
+        if manifest.taxonomy.as_ref().is_some_and(|release| release.release_id <= self.device.taxonomy_release) {
+            let mut next = self.record.clone();
+            next.approved = None;
+            self.commit(next)?;
+        }
+        Ok(())
     }
 
     pub fn record(&self) -> &Record {
@@ -280,7 +296,25 @@ impl<S: Store> Coordinator<S> {
         if offer.application.is_some() || offer.taxonomy.is_some() { UpdateView::Available } else { UpdateView::Hidden }
     }
 
-    /// Explicit user authorization, committed before downloads can begin.
+    /// Compatible reference-only updates use the common background data policy.
+    /// An application package always requires the host's explicit approval flow.
+    pub fn approve_taxonomy(&mut self, now: u64) -> Result<bool, UpdateError> {
+        if self.record.approved.is_some() {
+            return Ok(false);
+        }
+        let Some(envelope) = &self.record.discovered else {
+            return Ok(false);
+        };
+        let manifest = verify(envelope, &self.config, now, self.record.highest_sequence)?;
+        let offer = crate::offer(&manifest, &self.device.installed());
+        if offer.application.is_some() || offer.taxonomy.is_none() {
+            return Ok(false);
+        }
+        self.approve(now)?;
+        Ok(true)
+    }
+
+    /// Persist authorization before downloads; application hosts obtain explicit user consent.
     pub fn approve(&mut self, now: u64) -> Result<(), UpdateError> {
         if self.record.approved.is_some() {
             return Ok(());

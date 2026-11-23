@@ -91,8 +91,12 @@ impl Database {
     /// Current live books with no physical work outstanding. Membership and
     /// upload revisions stay fixed while the caller prepares this batch.
     pub fn prepared_upload_batch(&self) -> Result<UploadPreparationBatch, DatabaseError> {
+        let snapshot = self.connection.is_autocommit().then(|| self.connection.unchecked_transaction()).transpose()?;
         let affected_dirs = serde_json::to_string(&crate::placements::pending_work_directories(&self.connection)?).map_err(DatabaseError::operation)?;
         let members = query_rows(|read| self.connection.prepared_upload_batch(&affected_dirs, read), |row| Ok((row.get::<_, BookId>(0)?, row.get::<_, Option<i64>>(1)?)))?;
+        if let Some(snapshot) = snapshot {
+            snapshot.commit()?;
+        }
         Ok(UploadPreparationBatch { members })
     }
 
@@ -104,8 +108,11 @@ impl Database {
 
     pub fn finish_upload_preparation(&self, batch: &UploadPreparationBatch) -> Result<(), DatabaseError> {
         let json = serde_json::to_string(&batch.members).map_err(DatabaseError::operation)?;
-        self.connection.finish_upload_preparation(json.as_str())?;
-        Ok(())
+        self.write(|tx| {
+            let affected_dirs = serde_json::to_string(&crate::placements::pending_work_directories(tx)?).map_err(DatabaseError::operation)?;
+            tx.finish_upload_preparation(json.as_str(), &affected_dirs)?;
+            Ok(())
+        })
     }
 
     /// Thumbnail candidates and their prepared-upload scope share one snapshot.
@@ -140,7 +147,7 @@ mod schema_tests {
         drop(db);
         let db = Database::open(&path).unwrap();
         db.initialize_library().unwrap();
-        assert_eq!(db.connection.fixtures_read_enrichment_work(|r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, bool>(1)?))).unwrap(), (None, false));
+        assert_eq!(db.connection.fixtures_read_enrichment_work(|r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, bool>(1)?))).unwrap(), (Some(999999), false));
         db.connection.fixtures_seed_draft_retry(&(&hash)).unwrap();
         db.connection.fixtures_seed_cover_check(&(&hash)).unwrap();
         drop(db);
@@ -155,10 +162,6 @@ use crate::sql_fixtures::FixturesSql;
 
 // Async access owns its arguments until the synchronous database call completes.
 database_methods! {
-    fn pending_thumbnail_job_count() -> u64;
-    arguments () = ();
-    execute database, arguments => database.pending_thumbnail_job_count();
-
     fn thumbnail_book_format(hash: BookId) -> Option<BookFormat>;
     arguments (BookId,) = (hash,);
     execute database, arguments => database.thumbnail_book_format(arguments.0);

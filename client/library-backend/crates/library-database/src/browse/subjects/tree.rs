@@ -480,7 +480,7 @@ fn reading_metadata_and_background_writes_preserve_structural_tree() {
     let original = db.subject_tree_for(Books::Library).unwrap();
     db.connection.execute("UPDATE book SET title='Updated',read_progress=0.5,read_at=100", []).unwrap();
     db.connection.execute("UPDATE library_local_state SET scan_state='pending'", []).unwrap();
-    db.connection.execute("UPDATE book_dir SET local_hash='new fingerprint',is_downloaded=1", []).unwrap();
+    db.connection.execute("UPDATE book_dir SET local_hash=X'0200000000000000',is_downloaded=1", []).unwrap();
     assert!(Arc::ptr_eq(&original, &db.subject_tree_for(Books::Library).unwrap()));
     db.connection.execute("DELETE FROM book_dir WHERE book_row_id=1", []).unwrap();
     assert!(!Arc::ptr_eq(&original, &db.subject_tree_for(Books::Library).unwrap()));

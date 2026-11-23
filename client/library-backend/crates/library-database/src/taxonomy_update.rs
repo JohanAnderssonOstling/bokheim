@@ -8,7 +8,7 @@ use rusqlite::OptionalExtension;
 
 pub(crate) fn revision(db: &rusqlite::Connection) -> Result<String, DatabaseError> {
     let content: Option<String> = db.taxonomy_content_revision(|r| r.get(0)).optional()?;
-    Ok(format!("{}:{}", content.as_deref().unwrap_or(subject_projection::BUNDLED_UNIFIED_TAXONOMY_REVISION_ID), subject_projection::UNIFIED_MATCHER_VERSION))
+    Ok(format!("{}:{}", content.as_deref().unwrap_or(subject_projection::BUNDLED_UNIFIED_TAXONOMY_REVISION_ID), subject_projection::UNIFIED_PROJECTION_VERSION))
 }
 
 impl Database {
@@ -46,6 +46,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sync_common::BookId;
     use subject_projection::{CATALOG_CONCEPT_SOURCE, UNIFIED_SYSTEM_ID};
 
     #[test]
@@ -53,7 +54,7 @@ mod tests {
         let db = Database::open(":memory:").unwrap();
         let library = sync_common::LibraryId::new_v4();
         db.initialize_library_for_deferred_taxonomy(library).unwrap();
-        db.connection.fixtures_insert_book_3(&("a".repeat(64))).unwrap();
+        db.connection.fixtures_insert_book_3(&BookId::from_bytes([0xaa; 32])).unwrap();
         db.connection.fixtures_insert_book_unified_concept().unwrap();
         db.connection.fixtures_update_library_local_state_taxonomy_revision().unwrap();
         db.initialize_library_for_deferred_taxonomy(library).unwrap();
@@ -66,7 +67,7 @@ mod tests {
     fn refresh_keeps_imported_catalog_concept_identity_without_external_codes() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        db.connection.fixtures_insert_book_3(&("a".repeat(64))).unwrap();
+        db.connection.fixtures_insert_book_3(&BookId::from_bytes([0xaa; 32])).unwrap();
         let subject = BookSubject::new(None, "An old display label", CATALOG_CONCEPT_SOURCE, Some(UNIFIED_SYSTEM_ID.into()), Some("concept:3915".into())).unwrap();
         let projected = project_book(&BookMetadata { subjects: vec![subject], ..Default::default() }).unwrap();
         let book: i64 = db.connection.query_row("SELECT row_id FROM book", [], |row| row.get(0)).unwrap();
@@ -83,7 +84,7 @@ mod tests {
     fn refresh_removes_stale_assignments_without_changing_canonical_data_and_is_idempotent() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        db.connection.fixtures_insert_book_3(&("a".repeat(64))).unwrap();
+        db.connection.fixtures_insert_book_3(&BookId::from_bytes([0xaa; 32])).unwrap();
         db.connection.fixtures_insert_book_subject_2().unwrap();
         db.connection.fixtures_insert_book_unified_concept().unwrap();
         db.connection.fixtures_update_library_local_state_taxonomy_revision().unwrap();
@@ -101,9 +102,9 @@ mod tests {
     fn failure_rolls_back_every_assignment_and_revision() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        db.connection.fixtures_insert_book_3(&("a".repeat(64))).unwrap();
+        db.connection.fixtures_insert_book_3(&BookId::from_bytes([0xaa; 32])).unwrap();
         db.connection.fixtures_insert_book_unified_concept().unwrap();
-        db.connection.fixtures_insert_book_4(&("b".repeat(64))).unwrap();
+        db.connection.fixtures_insert_book_4(&BookId::from_bytes([0xbb; 32])).unwrap();
         db.connection.fixtures_insert_book_subject_3(&("x".repeat(4097))).unwrap();
         db.connection.fixtures_update_library_local_state_taxonomy_revision().unwrap();
         assert!(db.refresh_taxonomy_assignments().is_err());

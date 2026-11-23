@@ -123,7 +123,7 @@ try:
                 children.append(child)
                 title = 'Bokheim password regression ' + stage
                 request = {'url': f'http://{host}:{server.server_port}/?stage={stage}&mode={mode}', 'title': title,
-                           'data_directory': str(root / 'profile'), 'downloads': str(root / 'downloads'), 'history_file': str(root / 'history.json'), 'preferences': {'keyboard_shortcuts': {}, 'allow_metered_transfers': False, 'text_search': True, 'animations': True, 'custom_ui_font_enabled': False, 'generated_covers_only': False, 'catalog_grouping': 'subject', 'keyboard_layouts': ['SV'], 'ui_font_family': 'serif', 'theme': 'cool', 'ui_font_size_px': 16, 'cover_text': 'always'}}
+                           'data_directory': str(root / 'profile'), 'downloads': str(root / 'downloads'), 'history_file': str(root / 'history.json'), 'preferences': {'keyboard_shortcuts': {}, 'text_search': True, 'animations': True, 'custom_ui_font_enabled': False, 'generated_covers_only': False, 'catalog_grouping': 'subject', 'keyboard_layouts': ['SV'], 'ui_font_family': 'serif', 'theme': 'cool', 'ui_font_size_px': 16, 'cover_text': 'always'}}
                 child.stdin.write((json.dumps(request) + '\n').encode())
                 child.stdin.flush()
                 assert select.select([child.stdout], [], [], 25)[0], 'browser did not start'

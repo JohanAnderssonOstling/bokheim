@@ -25,15 +25,8 @@ pub fn path() -> Result<PathBuf, OperationError> {
     if let Some(path) = PATH.get() {
         return Ok(path.clone());
     }
-    let executable = std::env::current_exe().map_err(|error| OperationError::operation(error).context("locate bundled taxonomy"))?;
-    let directory = executable.parent().ok_or("executable has no parent directory")?;
-    let directory = if matches!(directory.file_name().and_then(|name| name.to_str()), Some("deps" | "examples")) { directory.parent().unwrap_or(directory) } else { directory };
-    let path = directory.join("taxonomy.sqlite3");
-    if path.is_file() {
-        set_path(&path)?;
-        return Ok(path);
-    }
-    // Debug builds also support tools whose executable is in a separate target directory.
+    // A development executable must use the resource from its own compilation.
+    // A sibling resource may belong to an older packaged build.
     #[cfg(debug_assertions)]
     {
         let generated = PathBuf::from(concat!(env!("OUT_DIR"), "/unified-taxonomy-client-v2.sqlite3"));
@@ -41,6 +34,14 @@ pub fn path() -> Result<PathBuf, OperationError> {
             set_path(&generated)?;
             return Ok(generated);
         }
+    }
+    let executable = std::env::current_exe().map_err(|error| OperationError::operation(error).context("locate bundled taxonomy"))?;
+    let directory = executable.parent().ok_or("executable has no parent directory")?;
+    let directory = if matches!(directory.file_name().and_then(|name| name.to_str()), Some("deps" | "examples")) { directory.parent().unwrap_or(directory) } else { directory };
+    let path = directory.join("taxonomy.sqlite3");
+    if path.is_file() {
+        set_path(&path)?;
+        return Ok(path);
     }
     Err(format!("bundled taxonomy resource is missing: {}", path.display()).into())
 }

@@ -20,7 +20,7 @@ book-model = { path = "../../shared/book-model" }
 async-channel = "2"
 futures-util = "0.3"
 library-model = { path = "../../client/library-model" }
-ui-components = { path = "../components" }
+ui-components = { path = "../components", default-features = false }
 gpui.workspace = true
 gpui-component.workspace = true
 log = "0.4"

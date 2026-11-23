@@ -40,6 +40,8 @@ pub(super) struct BrowseNavigator {
     catalog_languages_pending: bool,
     page_failed: bool,
     loaded_query: Option<LibraryBrowseQuery>,
+    /// The bounded initial response, independent of subsequently loaded pages.
+    loaded_data: Option<LibraryBrowseData>,
     refresh_pending: bool,
     _subscriptions: [Subscription; 2],
 }
@@ -47,8 +49,21 @@ pub(super) struct BrowseNavigator {
 impl EventEmitter<Loaded> for BrowseNavigator {}
 
 impl BrowseNavigator {
+    pub(super) fn is_loading(&self) -> bool {
+        self.request.is_some() || self.refresh_pending
+    }
+
     pub(super) fn library_id(&self) -> uuid::Uuid {
         *self.ui.backend().id()
+    }
+
+    /// Folder controls act on the filters of the displayed response, including
+    /// while a replacement query is loading. Search matches folder names here.
+    pub(super) fn child_query(&self, location: BrowseLocation) -> LibraryBrowseQuery {
+        let mut query = self.loaded_query.clone().unwrap_or_else(|| self.selection.backend_query(location, false));
+        query.location = location;
+        query.search.clear();
+        query
     }
 
     /// A displayed section belongs to the installed response, even while a
@@ -92,6 +107,7 @@ impl BrowseNavigator {
             more: None,
             catalog_languages_pending,
             loaded_query: None,
+            loaded_data: None,
             refresh_pending: false,
             page_failed: false,
             _subscriptions: subscriptions,
@@ -104,12 +120,9 @@ impl BrowseNavigator {
         self.load(self.destination.clone(), false, cx);
     }
 
-    /// Refreshes scanner-driven content without replacing the current page by
-    /// a loading frame. Newly discovered covers can prepare in place while the
-    /// already-visible book cards remain painted.
-    /// Refreshes the current page from its library.
+    /// Refreshes the current page after library changes while keeping the
+    /// already-visible book cards painted until the new contents arrive.
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
-        #[cfg(not(target_arch = "wasm32"))]
         self.load(self.destination.clone(), true, cx);
     }
 
@@ -148,12 +161,9 @@ impl BrowseNavigator {
     pub(super) fn select_option(&mut self, event: BrowseOptionsEvent, cx: &mut Context<Self>) {
         if self.selection.apply(event.clone(), &self.listing.controls) {
             if self.kind == BrowseKind::Catalog {
-                match &event {
-                    BrowseOptionsEvent::ToggleLanguage(_) => {
-                        self.catalog_languages_pending = false;
-                        crate::stores::save_catalog_languages(Some(self.selection.languages.clone()), cx);
-                    }
-                    _ => {}
+                if matches!(&event, BrowseOptionsEvent::ToggleLanguage(_)) {
+                    self.catalog_languages_pending = false;
+                    crate::stores::save_catalog_languages(Some(self.selection.languages.clone()), cx);
                 }
             }
             // A grouping is another root, not a filter of this page, and the
@@ -247,7 +257,7 @@ impl BrowseNavigator {
         self.page_failed = false;
         self.request = Some(cx.spawn(async move |navigator, cx| {
             let request_stage = Stage::new("initial browse request including transport");
-            let result = fetch(&ui, query.clone()).await;
+            let result = ui.backend().browse_page(query.clone(), BrowsePageRequest::default()).await;
             drop(request_stage);
             let library_languages = if infer_languages && result.is_ok() {
                 ui.backend().library_language_counts().await.unwrap_or_else(|error| {
@@ -282,6 +292,14 @@ impl BrowseNavigator {
         self.request = None;
         match result {
             Ok(data) => {
+                // A matching revision covers later pages too. Without one,
+                // identical first-page rows cannot establish their freshness.
+                if refresh && self.loaded_query.as_ref() == Some(&query) && data.page.as_ref().is_some_and(|page| page.result_revision.is_some()) && self.loaded_data.as_ref() == Some(&data) {
+                    self.error = None;
+                    cx.notify();
+                    return;
+                }
+                self.loaded_data = Some(data.clone());
                 let left = (self.destination.location != destination.location).then_some(self.destination.location);
                 let path = {
                     let _stage = Stage::new("initial browse UI installation");
@@ -302,11 +320,6 @@ impl BrowseNavigator {
         }
         cx.notify();
     }
-}
-
-/// Fetch a page from the selected library.
-async fn fetch(ui: &LibraryContext, query: LibraryBrowseQuery) -> Result<LibraryBrowseData, BackendError> {
-    ui.backend().browse_page(query, BrowsePageRequest::default()).await
 }
 
 #[cfg(all(test, not(target_arch = "wasm32"), not(feature = "kobo")))]
@@ -377,10 +390,10 @@ mod tests {
         });
         assert_eq!(loads.get(), 0);
 
-        // Rendering the page consumes the whole burst as a single refresh.
+        // Rendering consumes the burst, but unchanged data emits no Loaded event.
         navigator.update(cx, |navigator, cx| navigator.refresh_if_needed(cx));
         cx.condition(&navigator, |navigator, _| navigator.request.is_none()).await;
-        assert_eq!(loads.get(), 1);
+        assert_eq!(loads.get(), 0);
 
         updates.update(cx, |_, cx| cx.emit(LibraryContentsChanged));
         navigator.update(cx, |navigator, cx| navigator.refresh_if_needed(cx));
@@ -392,9 +405,9 @@ mod tests {
             assert!(navigator.refresh_pending);
         });
         cx.condition(&navigator, |navigator, _| navigator.request.is_none()).await;
-        assert_eq!(loads.get(), 2);
+        assert_eq!(loads.get(), 0);
         navigator.update(cx, |navigator, cx| navigator.refresh_if_needed(cx));
         cx.condition(&navigator, |navigator, _| navigator.request.is_none()).await;
-        assert_eq!(loads.get(), 3);
+        assert_eq!(loads.get(), 0);
     }
 }

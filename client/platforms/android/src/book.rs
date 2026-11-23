@@ -1,15 +1,19 @@
 //! Book handling for Android private and shared storage.
 
-use std::fs::File;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem as fs;
+use client_platform_runtime::filesystem::File;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem::temporary;
 use std::io::{Error, ErrorKind};
-use std::sync::OnceLock;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 static LEASE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 pub fn configure_lease_root(app_data: &Path) -> std::io::Result<()> {
     let root = app_data.join("book-leases");
-    std::fs::create_dir_all(&root)?;
-    let root = root.canonicalize()?;
+    fs::create_dir_all(&root)?;
+    let root = fs::canonicalize(&root)?;
     if LEASE_ROOT.get_or_init(|| root.clone()) != &root {
         return Err(Error::other("Android book lock directory is already configured"));
     }
@@ -20,7 +24,7 @@ pub fn lease_root() -> std::io::Result<&'static Path> {
     LEASE_ROOT.get().map(PathBuf::as_path).ok_or_else(|| Error::other("Android book lock directory is not configured"))
 }
 
-pub fn persist_book_noclobber(temporary: tempfile::TempPath, destination: &Path) -> Result<(), tempfile::PathPersistError> {
+pub fn persist_book_noclobber(temporary: temporary::TempPath, destination: &Path) -> Result<(), temporary::PathPersistError> {
     match temporary.persist_noclobber(destination) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -34,8 +38,8 @@ pub fn persist_book_noclobber(temporary: tempfile::TempPath, destination: &Path)
     }
 }
 
-fn copy_after_persist_failure(mut failure: tempfile::PathPersistError, destination: &Path) -> Result<(), tempfile::PathPersistError> {
-    let result = File::open(&failure.path).and_then(|mut source| copy_book_noclobber(&mut source, destination));
+fn copy_after_persist_failure(mut failure: temporary::PathPersistError, destination: &Path) -> Result<(), temporary::PathPersistError> {
+    let result = fs::open(&failure.path).and_then(|mut source| copy_book_noclobber(&mut source, destination));
     match result {
         Ok(()) => Ok(()), // Dropping the original TempPath removes the staging file.
         Err(error) => {
@@ -56,14 +60,14 @@ fn copy_book_noclobber(source: &mut impl std::io::Read, destination: &Path) -> s
         fn drop(&mut self) {
             drop(self.file.take());
             if !self.complete {
-                let _ = std::fs::remove_file(self.path);
+                let _ = fs::remove_file(self.path);
             }
         }
     }
     // Do not replace a file that appeared after the caller checked the name.
     // Unlike the rename path, this compatibility fallback is not crash-atomic:
     // the destination is visible during copying. Ordinary errors clean it up.
-    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(destination)?;
+    let file = fs::OpenOptions::new().write(true).create_new(true).open(destination)?;
     let mut pending = PendingCopy { path: destination, file: Some(file), complete: false };
     let output = pending.file.as_mut().ok_or_else(|| Error::other("book copy output is unavailable"))?;
     // Keep this fallback to ordinary reads/writes, without filesystem-specific

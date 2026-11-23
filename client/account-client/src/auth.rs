@@ -3,9 +3,9 @@ use crate::http::{decode_response, post_empty, request, send, with_body};
 use crate::session::{AuthError, Session};
 use account_contract::{AuthResponse, DeleteAccountRequest, EmailRequest, EmailVerificationRequest, LoginRequest, PASSWORD_MAX_BYTES, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest};
 use reqwest::{Method, StatusCode};
-use serde::Serialize;
+use sync_common::http::Contract;
 
-async fn post_auth(server_url: &Url, endpoint: &str, body: &impl Serialize) -> Result<Session, AuthError> {
+async fn post_auth(server_url: &Url, endpoint: &str, body: &impl Contract) -> Result<Session, AuthError> {
     let response: AuthResponse = decode_response(with_body(request(server_url, Method::POST, endpoint)?, body)?).await?;
     Session::try_new(server_url.clone(), response.user_id, response.email, response.token, response.expires_at, response.refresh_token, response.refresh_expires_at)
 }
@@ -83,7 +83,7 @@ mod tests {
     use std::io::Write;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use sync_common::transport as wire;
+    use sync_common::http as wire;
 
     #[tokio::test]
     async fn deletion_requires_server_confirmation_and_preserves_authentication_errors() {

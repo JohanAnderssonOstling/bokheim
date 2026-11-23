@@ -99,8 +99,8 @@ impl Client for LocalClient {
     fn download(&self, id: String) -> ClientFuture<'_, Vec<DictionaryInfo>> {
         Box::pin(self.write(move |store| async move { store.download(id).await }))
     }
-    fn configure(&self, id: String, enabled: bool, direction: i8) -> ClientFuture<'_, Vec<DictionaryInfo>> {
-        Box::pin(self.write(move |store| async move { store.configure(id, enabled, direction).await }))
+    fn reorder(&self, id: String, direction: i8) -> ClientFuture<'_, Vec<DictionaryInfo>> {
+        Box::pin(self.write(move |store| async move { store.reorder(id, direction).await }))
     }
     fn remove(&self, id: String) -> ClientFuture<'_, Vec<DictionaryInfo>> {
         Box::pin(self.write(move |store| async move { store.remove(id).await }))

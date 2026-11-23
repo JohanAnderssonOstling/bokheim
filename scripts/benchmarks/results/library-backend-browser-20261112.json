@@ -1,0 +1,73 @@
+{
+  "date": "2026-11-12",
+  "browser": "Chromium 156.0.8078.47 Arch Linux",
+  "browser_scenarios": [
+    {
+      "name": "standard",
+      "requests": 2,
+      "documents": [
+        "chapter.xhtml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "unusual",
+      "requests": 3,
+      "documents": [
+        "chapter.xml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "comment",
+      "requests": 4,
+      "documents": [
+        "chapter.xhtml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "legacy",
+      "requests": 4,
+      "documents": [
+        "chapter.xhtml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "cbz",
+      "requests": 2,
+      "cached_reread": true,
+      "pages": 3,
+      "resumed_page": 1
+    },
+    {
+      "name": "cbz-deleted",
+      "requests": 3,
+      "cached_reread": true,
+      "pages": 2,
+      "resumed_page": 1
+    },
+    {
+      "name": "cbz-legacy",
+      "requests": 6,
+      "cached_reread": true,
+      "pages": 3,
+      "resumed_page": 1
+    }
+  ],
+  "native_web_platform_tests": {
+    "passed": 10,
+    "failed": 0
+  },
+  "javascript_checks": {
+    "asset_isolation": "passed",
+    "worker_signals": "passed",
+    "dictionary_files": "blocked: dictionary_files.js is absent"
+  },
+  "remaining": [
+    "Full scanner retry cycle",
+    "Browser OPFS repacking and temporary-generation lifecycle"
+  ],
+  "new_test_code": "Not added; AGENTS.md prohibits it and an exception request is pending."
+}

@@ -1,0 +1,468 @@
+{
+  "started_utc": "2026-11-18T02:56:31.929419+00:00",
+  "host": "bokheim-kobo",
+  "device": "KOBO_DEVICE model=388 product=io name=\"Kobo Libra 2\" touch=MultitouchC",
+  "experience": "KOBO_EXPERIENCE transition=LibraryFast->ReaderQuality logical=840x632 framebuffer=1680x1264 scale=2 render=QualityGrayscale reset_windows=true elapsed_ms=3",
+  "metadata": "armv7l\nBokheim shared GPUI UI for Kobo\nVersion: 0.1.15\nBuilt: 2026-11-12T00:56:56Z\nTarget: armv7-unknown-linux-gnueabihf\nPDFium: 7961 (ARM glibc)\nRuntime: glibc 2.23 (Linux 2.6.32 baseline)\nCPU profile: generic\nRust flags: -C target-cpu=cortex-a8 -C target-feature=+neon -C link-arg=-Wl,--dynamic-linker=/mnt/onboard/.adds/bokheim/runtime/ld-linux-armhf.so.3 -C link-arg=-Wl,-rpath,$ORIGIN/runtime\nC flags: -O3 -march=armv7-a -mfpu=neon -mfloat-abi=hard\nLTO: thin\nCodegen units: 1\nSupported model IDs: 310,320,330,360,370,371,373,375,374,376,377,378,379,380,381,382,383,384,386,387,388,389,390,391,393,395\nFBInk source: 886f25f13368859ad8a899b88d04c26e19cda32e\nUI crate codegen units: 16 (bounded build memory)\nTaxonomy source SHA256: b5eb501509bd1173162eefb45300689c8c3d9a99db67dd1ac7abc3f86422df35\n\nCPU governor/frequency:\ninteractive\n996000\n\nInput devices:\nI: Bus=0019 Vendor=0001 Product=0001 Version=0100\nN: Name=\"gpio-keys\"\nP: Phys=gpio-keys/input0\nS: Sysfs=/devices/platform/ntx_event0/input/input0\nU: Uniq=\nH: Handlers=event0 \nB: PROP=0\nB: EV=100013\nB: KEY=6 0 0 100000 0 8000000 0\nB: MSC=8\n\nI: Bus=0018 Vendor=0000 Product=0000 Version=0000\nN: Name=\"Elan Touchscreen\"\nP: Phys=\nS: Sysfs=/devices/platform/soc/2100000.aips-bus/21a4000.i2c/i2c-1/1-0010/input/input1\nU: Uniq=\nH: Handlers=kbd mouse0 event1 \nB: PROP=2\nB: EV=b\nB: KEY=1c01 0 0 1000 0 0 0 0 0 0 0\nB: ABS=ee18000 1000003\n\nI: Bus=0018 Vendor=001b Product=0000 Version=0000\nN: Name=\"kx122-accel\"\nP: Phys=\nS: Sysfs=/devices/platform/soc/2100000.aips-bus/21a0000.i2c/i2c-0/0-001e/input/input2\nU: Uniq=\nH: Handlers=event2 \nB: PROP=0\nB: EV=9\nB: ABS=7\n\n",
+  "probe": "/tmp/bokheim-input-probe",
+  "scope": "chapter-boundary",
+  "pairs": 6,
+  "warmup_pairs": 1,
+  "settle_seconds": 4.0,
+  "conditions": "Repeated adjacent pages or selected chapter boundary; installed build, warm caches, existing diagnostics enabled.",
+  "limitations": [
+    "Handler timings exclude hardware/input-poll latency and do not measure optical screen settling.",
+    "Partial non-flashing refresh presentation may return before the panel finishes updating.",
+    "Input-to-presentation observes the final changed-frame log, including asynchronous frames; approximately 2 ms polling resolution, plus scheduling overhead.",
+    "Observation window must include all relevant frames; multiple changed frames are retained for inspection.",
+    "Warm repeated boundary measurements are not cold-cache loading or a survey of all chapters.",
+    "Alternating inputs intend to restore position; interruptions or page boundaries can prevent restoration."
+  ],
+  "samples": [
+    {
+      "pair": 0,
+      "warmup": true,
+      "key_code": 194,
+      "log": "51.487 PROBE_INPUT_WRITTEN\n51.599 GPUI timing: force=false scrolling=true render_ms=34 changed=false total_ms=34\n51.611 GPUI scroll timing: pages=1.00 dispatch_ms=0 frame_ms=34 total_ms=34\n51.618 hardware button complete: PreviousPage total_ms=35\n824.512 GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:70,y:43,w:1540,h:1183 image_regions=0\n830.968 GPUI damage regions: count=1 pixels=1821820 bounding_pixels=1821820\n941.779 GPUI timing: force=false scrolling=false render_ms=85 changed=true schedule_ms=0 present_ms=117 total_ms=203\n1118.611 HTML_GPUI_SCENE commands=109 duration_ms=17\n1127.208 GPUI timing: force=false scrolling=false render_ms=38 changed=false total_ms=38\n1913.677 GPUI timing: force=false scrolling=false render_ms=47 changed=false total_ms=47\n1933.392 GPUI timing: force=false scrolling=false render_ms=19 changed=false total_ms=19\n",
+      "button": "PreviousPage",
+      "button_handler_ms": 35,
+      "dispatch_ms": 0,
+      "synchronous": false,
+      "changed_frames": [
+        {
+          "observed_ms": 941.779,
+          "force": "false",
+          "scrolling": "false",
+          "render_ms": "85",
+          "changed": "true",
+          "schedule_ms": "0",
+          "present_ms": "117",
+          "total_ms": "203"
+        }
+      ],
+      "input_to_first_presentation_ms": 941.779,
+      "input_to_final_presentation_ms": 941.779
+    },
+    {
+      "pair": 0,
+      "warmup": true,
+      "key_code": 193,
+      "log": "39.333 PROBE_INPUT_WRITTEN\n39.448 HTML_GPUI_SCENE commands=109 duration_ms=17\n39.460 GPUI timing: force=false scrolling=true render_ms=26 changed=false total_ms=27\n39.466 GPUI scroll timing: pages=-1.00 dispatch_ms=0 frame_ms=27 total_ms=27\n39.471 hardware button complete: NextPage total_ms=27\n523.590 GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:70,y:43,w:1540,h:1183 image_regions=0\n532.321 GPUI damage regions: count=1 pixels=1821820 bounding_pixels=1821820\n643.371 GPUI timing: force=false scrolling=false render_ms=76 changed=true schedule_ms=0 present_ms=118 total_ms=194\n1096.213 HTML_GPUI_SCENE commands=95 duration_ms=14\n1102.678 GPUI timing: force=false scrolling=false render_ms=35 changed=false total_ms=35\n1602.224 HTML_GPUI_SCENE commands=95 duration_ms=14\n1608.679 GPUI timing: force=false scrolling=false render_ms=33 changed=false total_ms=33\n2834.373 HTML_GPUI_SCENE commands=95 duration_ms=12\n2840.807 GPUI timing: force=false scrolling=false render_ms=22 changed=false total_ms=22\n3175.705 GPUI timing: force=false scrolling=false render_ms=14 changed=false total_ms=14\n",
+      "button": "NextPage",
+      "button_handler_ms": 27,
+      "dispatch_ms": 0,
+      "synchronous": false,
+      "changed_frames": [
+        {
+          "observed_ms": 643.371,
+          "force": "false",
+          "scrolling": "false",
+          "render_ms": "76",
+          "changed": "true",
+          "schedule_ms": "0",
+          "present_ms": "118",
+          "total_ms": "194"
+        }
+      ],
+      "input_to_first_presentation_ms": 643.371,
+      "input_to_final_presentation_ms": 643.371
+    },
+    {
+      "pair": 1,
+      "warmup": false,
+      "key_code": 194,
+      "log": "40.623 PROBE_INPUT_WRITTEN\n40.738 GPUI timing: force=false scrolling=true render_ms=34 changed=false total_ms=34\n40.751 GPUI scroll timing: pages=1.00 dispatch_ms=0 frame_ms=34 total_ms=34\n40.757 hardware button complete: PreviousPage total_ms=34\n819.779 GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:70,y:43,w:1540,h:1183 image_regions=0\n828.475 GPUI damage regions: count=1 pixels=1821820 bounding_pixels=1821820\n939.266 GPUI timing: force=false scrolling=false render_ms=85 changed=true schedule_ms=0 present_ms=117 total_ms=202\n1117.315 HTML_GPUI_SCENE commands=109 duration_ms=19\n1126.056 GPUI timing: force=false scrolling=false render_ms=39 changed=false total_ms=39\n1894.646 HTML_GPUI_SCENE commands=109 duration_ms=15\n1901.554 GPUI timing: force=false scrolling=false render_ms=41 changed=false total_ms=41\n1920.876 GPUI timing: force=false scrolling=false render_ms=18 changed=false total_ms=18\n",
+      "button": "PreviousPage",
+      "button_handler_ms": 34,
+      "dispatch_ms": 0,
+      "synchronous": false,
+      "changed_frames": [
+        {
+          "observed_ms": 939.266,
+          "force": "false",
+          "scrolling": "false",
+          "render_ms": "85",
+          "changed": "true",
+          "schedule_ms": "0",
+          "present_ms": "117",
+          "total_ms": "202"
+        }
+      ],
+      "input_to_first_presentation_ms": 939.266,
+      "input_to_final_presentation_ms": 939.266
+    },
+    {
+      "pair": 1,
+      "warmup": false,
+      "key_code": 193,
+      "log": "36.454 PROBE_INPUT_WRITTEN\n36.566 HTML_GPUI_SCENE commands=109 duration_ms=17\n38.701 GPUI timing: force=false scrolling=true render_ms=37 changed=false total_ms=37\n38.729 GPUI scroll timing: pages=-1.00 dispatch_ms=0 frame_ms=37 total_ms=38\n38.735 hardware button complete: NextPage total_ms=38\n529.973 GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:70,y:43,w:1540,h:1183 image_regions=0\n538.743 GPUI damage regions: count=1 pixels=1821820 bounding_pixels=1821820\n649.233 GPUI timing: force=false scrolling=false render_ms=82 changed=true schedule_ms=0 present_ms=118 total_ms=200\n1101.654 HTML_GPUI_SCENE commands=95 duration_ms=18\n1108.103 GPUI timing: force=false scrolling=false render_ms=39 changed=false total_ms=39\n1609.420 HTML_GPUI_SCENE commands=95 duration_ms=13\n1615.878 GPUI timing: force=false scrolling=false render_ms=35 changed=false total_ms=35\n2853.799 HTML_GPUI_SCENE commands=95 duration_ms=16\n2858.123 GPUI timing: force=false scrolling=false render_ms=24 changed=false total_ms=24\n",
+      "button": "NextPage",
+      "button_handler_ms": 38,
+      "dispatch_ms": 0,
+      "synchronous": false,
+      "changed_frames": [
+        {
+          "observed_ms": 649.233,
+          "force": "false",
+          "scrolling": "false",
+          "render_ms": "82",
+          "changed": "true",
+          "schedule_ms": "0",
+          "present_ms": "118",
+          "total_ms": "200"
+        }
+      ],
+      "input_to_first_presentation_ms": 649.233,
+      "input_to_final_presentation_ms": 649.233
+    },
+    {
+      "pair": 2,
+      "warmup": false,
+      "key_code": 194,
+      "log": "41.004 PROBE_INPUT_WRITTEN\n41.118 GPUI timing: force=false scrolling=true render_ms=34 changed=false total_ms=34\n41.131 GPUI scroll timing: pages=1.00 dispatch_ms=0 frame_ms=34 total_ms=34\n41.137 hardware button complete: PreviousPage total_ms=34\n824.489 GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:70,y:43,w:1540,h:1183 image_regions=0\n830.961 GPUI damage regions: count=1 pixels=1821820 bounding_pixels=1821820\n941.663 GPUI timing: force=false scrolling=false render_ms=84 changed=true schedule_ms=0 present_ms=118 total_ms=202\n1125.609 HTML_GPUI_SCENE commands=109 duration_ms=26\n1134.229 GPUI timing: force=false scrolling=false render_ms=46 changed=false total_ms=46\n1899.550 GPUI timing: force=false scrolling=false render_ms=27 changed=false total_ms=27\n2566.332 HTML_GPUI_SCENE commands=109 duration_ms=16\n2575.327 GPUI timing: force=false scrolling=false render_ms=26 changed=false total_ms=26\n",
+      "button": "PreviousPage",
+      "button_handler_ms": 34,
+      "dispatch_ms": 0,
+      "synchronous": false,
+      "changed_frames": [
+        {
+          "observed_ms": 941.663,
+          "force": "false",
+          "scrolling": "false",
+          "render_ms": "84",
+          "changed": "true",
+          "schedule_ms": "0",
+          "present_ms": "118",
+          "total_ms": "202"
+        }
+      ],
+      "input_to_first_presentation_ms": 941.663,
+      "input_to_final_presentation_ms": 941.663
+    },
+    {
+      "pair": 2,
+      "warmup": false,
+      "key_code": 193,
+      "log": "40.696 PROBE_INPUT_WRITTEN\n40.808 HTML_GPUI_SCENE commands=109 duration_ms=28\n40.819 GPUI timing: force=false scrolling=true render_ms=37 changed=false total_ms=37\n40.825 GPUI scroll timing: pages=-1.00 dispatch_ms=0 frame_ms=37 total_ms=37\n40.830 hardware button complete: NextPage total_ms=37\n527.336 GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:70,y:43,w:1540,h:1183 image_regions=0\n533.793 GPUI damage regions: count=1 pixels=1821820 bounding_pixels=1821820\n644.365 GPUI timing: force=false scrolling=false render_ms=76 changed=true schedule_ms=0 present_ms=117 total_ms=194\n1104.894 GPUI timing: force=false scrolling=false render_ms=32 changed=false total_ms=32\n1602.960 HTML_GPUI_SCENE commands=95 duration_ms=13\n1609.427 GPUI timing: force=false scrolling=false render_ms=33 changed=false total_ms=33\n2846.221 HTML_GPUI_SCENE commands=95 duration_ms=12\n2852.717 GPUI timing: force=false scrolling=false render_ms=24 changed=false total_ms=24\n",
+      "button": "NextPage",
+      "button_handler_ms": 37,
+      "dispatch_ms": 0,
+      "synchronous": false,
+      "changed_frames": [
+        {
+          "observed_ms": 644.365,
+          "force": "false",
+          "scrolling": "false",
+          "render_ms": "76",
+          "changed": "true",
+          "schedule_ms": "0",
+          "present_ms": "117",
+          "total_ms": "194"
+        }
+      ],
+      "input_to_first_presentation_ms": 644.365,
+      "input_to_final_presentation_ms": 644.365
+    },
+    {
+      "pair": 3,
+      "warmup": false,
+      "key_code": 194,
+      "log": "50.393 PROBE_INPUT_WRITTEN\n50.508 GPUI timing: force=false scrolling=true render_ms=34 changed=false total_ms=34\n50.520 GPUI scroll timing: pages=1.00 dispatch_ms=0 frame_ms=34 total_ms=35\n50.526 hardware button complete: PreviousPage total_ms=35\n822.650 GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:70,y:43,w:1540,h:1183 image_regions=0\n832.955 GPUI damage regions: count=1 pixels=1821820 bounding_pixels=1821820\n950.205 GPUI timing: force=false scrolling=false render_ms=85 changed=true schedule_ms=0 present_ms=127 total_ms=212\n1127.203 HTML_GPUI_SCENE commands=109 duration_ms=20\n1133.743 GPUI timing: force=false scrolling=false render_ms=40 changed=false total_ms=40\n1908.819 GPUI timing: force=false scrolling=false render_ms=36 changed=false total_ms=36\n1930.244 GPUI timing: force=false scrolling=false render_ms=18 changed=false total_ms=18\n",
+      "button": "PreviousPage",
+      "button_handler_ms": 35,
+      "dispatch_ms": 0,
+      "synchronous": false,
+      "changed_frames": [
+        {
+          "observed_ms": 950.205,
+          "force": "false",
+          "scrolling": "false",
+          "render_ms": "85",
+          "changed": "true",
+          "schedule_ms": "0",
+          "present_ms": "127",
+          "total_ms": "212"
+        }
+      ],
+      "input_to_first_presentation_ms": 950.205,
+      "input_to_final_presentation_ms": 950.205
+    },
+    {
+      "pair": 3,
+      "warmup": false,
+      "key_code": 193,
+      "log": "47.441 PROBE_INPUT_WRITTEN\n47.557 HTML_GPUI_SCENE commands=109 duration_ms=17\n47.570 GPUI timing: force=false scrolling=true render_ms=37 changed=false total_ms=37\n47.576 GPUI scroll timing: pages=-1.00 dispatch_ms=0 frame_ms=37 total_ms=37\n47.582 hardware button complete: NextPage total_ms=37\n530.106 GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:70,y:43,w:1540,h:1183 image_regions=0\n536.633 GPUI damage regions: count=1 pixels=1821820 bounding_pixels=1821820\n647.184 GPUI timing: force=false scrolling=false render_ms=76 changed=true schedule_ms=0 present_ms=118 total_ms=195\n1092.897 HTML_GPUI_SCENE commands=95 duration_ms=13\n1099.391 GPUI timing: force=false scrolling=false render_ms=33 changed=false total_ms=33\n1602.965 GPUI timing: force=false scrolling=false render_ms=26 changed=false total_ms=26\n2488.309 GPUI timing: force=false scrolling=false render_ms=20 changed=false total_ms=20\n2860.230 GPUI timing: force=false scrolling=false render_ms=14 changed=false total_ms=14\n",
+      "button": "NextPage",
+      "button_handler_ms": 37,
+      "dispatch_ms": 0,
+      "synchronous": false,
+      "changed_frames": [
+        {
+          "observed_ms": 647.184,
+          "force": "false",
+          "scrolling": "false",
+          "render_ms": "76",
+          "changed": "true",
+          "schedule_ms": "0",
+          "present_ms": "118",
+          "total_ms": "195"
+        }
+      ],
+      "input_to_first_presentation_ms": 647.184,
+      "input_to_final_presentation_ms": 647.184
+    },
+    {
+      "pair": 4,
+      "warmup": false,
+      "key_code": 194,
+      "log": "46.889 PROBE_INPUT_WRITTEN\n47.015 HTML_GPUI_SCENE commands=95 duration_ms=16\n47.028 GPUI timing: force=false scrolling=true render_ms=24 changed=false total_ms=24\n47.034 GPUI scroll timing: pages=1.00 dispatch_ms=0 frame_ms=24 total_ms=24\n47.039 hardware button complete: PreviousPage total_ms=24\n834.580 GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:70,y:43,w:1540,h:1183 image_regions=0\n843.184 GPUI damage regions: count=1 pixels=1821820 bounding_pixels=1821820\n953.716 GPUI timing: force=false scrolling=false render_ms=84 changed=true schedule_ms=0 present_ms=118 total_ms=202\n1124.344 HTML_GPUI_SCENE commands=109 duration_ms=17\n1131.150 GPUI timing: force=false scrolling=false render_ms=36 changed=false total_ms=36\n1916.375 GPUI timing: force=false scrolling=false render_ms=34 changed=false total_ms=34\n1935.635 GPUI timing: force=false scrolling=false render_ms=19 changed=false total_ms=19\n",
+      "button": "PreviousPage",
+      "button_handler_ms": 24,
+      "dispatch_ms": 0,
+      "synchronous": false,
+      "changed_frames": [
+        {
+          "observed_ms": 953.716,
+          "force": "false",
+          "scrolling": "false",
+          "render_ms": "84",
+          "changed": "true",
+          "schedule_ms": "0",
+          "present_ms": "118",
+          "total_ms": "202"
+        }
+      ],
+      "input_to_first_presentation_ms": 953.716,
+      "input_to_final_presentation_ms": 953.716
+    },
+    {
+      "pair": 4,
+      "warmup": false,
+      "key_code": 193,
+      "log": "46.529 PROBE_INPUT_WRITTEN\n46.642 HTML_GPUI_SCENE commands=109 duration_ms=18\n46.656 GPUI timing: force=false scrolling=true render_ms=37 changed=false total_ms=37\n46.662 GPUI scroll timing: pages=-1.00 dispatch_ms=0 frame_ms=37 total_ms=38\n46.668 hardware button complete: NextPage total_ms=38\n529.601 GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:70,y:43,w:1540,h:1183 image_regions=0\n538.459 GPUI damage regions: count=1 pixels=1821820 bounding_pixels=1821820\n649.484 GPUI timing: force=false scrolling=false render_ms=77 changed=true schedule_ms=0 present_ms=117 total_ms=194\n1102.469 HTML_GPUI_SCENE commands=95 duration_ms=19\n1109.168 GPUI timing: force=false scrolling=false render_ms=40 changed=false total_ms=40\n1611.829 GPUI timing: force=false scrolling=false render_ms=30 changed=false total_ms=30\n2858.912 HTML_GPUI_SCENE commands=95 duration_ms=11\n2863.238 GPUI timing: force=false scrolling=false render_ms=21 changed=false total_ms=21\n3247.116 HTML_GPUI_SCENE commands=95 duration_ms=10\n3251.436 GPUI timing: force=false scrolling=false render_ms=19 changed=false total_ms=19\n",
+      "button": "NextPage",
+      "button_handler_ms": 38,
+      "dispatch_ms": 0,
+      "synchronous": false,
+      "changed_frames": [
+        {
+          "observed_ms": 649.484,
+          "force": "false",
+          "scrolling": "false",
+          "render_ms": "77",
+          "changed": "true",
+          "schedule_ms": "0",
+          "present_ms": "117",
+          "total_ms": "194"
+        }
+      ],
+      "input_to_first_presentation_ms": 649.484,
+      "input_to_final_presentation_ms": 649.484
+    },
+    {
+      "pair": 5,
+      "warmup": false,
+      "key_code": 194,
+      "log": "51.818 PROBE_INPUT_WRITTEN\n51.931 GPUI timing: force=false scrolling=true render_ms=34 changed=false total_ms=34\n51.943 GPUI scroll timing: pages=1.00 dispatch_ms=0 frame_ms=34 total_ms=34\n51.949 hardware button complete: PreviousPage total_ms=34\n817.150 GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:70,y:43,w:1540,h:1183 image_regions=0\n823.592 GPUI damage regions: count=1 pixels=1821820 bounding_pixels=1821820\n943.771 GPUI timing: force=false scrolling=false render_ms=85 changed=true schedule_ms=0 present_ms=126 total_ms=212\n1117.909 HTML_GPUI_SCENE commands=109 duration_ms=18\n1126.829 GPUI timing: force=false scrolling=false render_ms=40 changed=false total_ms=40\n2014.396 HTML_GPUI_SCENE commands=109 duration_ms=24\n2023.338 GPUI timing: force=false scrolling=false render_ms=35 changed=false total_ms=35\n2042.563 GPUI timing: force=false scrolling=false render_ms=19 changed=false total_ms=19\n",
+      "button": "PreviousPage",
+      "button_handler_ms": 34,
+      "dispatch_ms": 0,
+      "synchronous": false,
+      "changed_frames": [
+        {
+          "observed_ms": 943.771,
+          "force": "false",
+          "scrolling": "false",
+          "render_ms": "85",
+          "changed": "true",
+          "schedule_ms": "0",
+          "present_ms": "126",
+          "total_ms": "212"
+        }
+      ],
+      "input_to_first_presentation_ms": 943.771,
+      "input_to_final_presentation_ms": 943.771
+    },
+    {
+      "pair": 5,
+      "warmup": false,
+      "key_code": 193,
+      "log": "47.919 PROBE_INPUT_WRITTEN\n48.048 HTML_GPUI_SCENE commands=109 duration_ms=17\n48.060 GPUI timing: force=false scrolling=true render_ms=26 changed=false total_ms=26\n48.066 GPUI scroll timing: pages=-1.00 dispatch_ms=0 frame_ms=26 total_ms=27\n48.072 hardware button complete: NextPage total_ms=27\n522.911 GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:70,y:43,w:1540,h:1183 image_regions=0\n531.499 GPUI damage regions: count=1 pixels=1821820 bounding_pixels=1821820\n644.173 GPUI timing: force=false scrolling=false render_ms=77 changed=true schedule_ms=0 present_ms=119 total_ms=197\n1102.063 HTML_GPUI_SCENE commands=95 duration_ms=18\n1108.590 GPUI timing: force=false scrolling=false render_ms=38 changed=false total_ms=38\n1602.489 GPUI timing: force=false scrolling=false render_ms=35 changed=false total_ms=35\n1617.505 GPUI timing: force=false scrolling=false render_ms=15 changed=false total_ms=15\n",
+      "button": "NextPage",
+      "button_handler_ms": 27,
+      "dispatch_ms": 0,
+      "synchronous": false,
+      "changed_frames": [
+        {
+          "observed_ms": 644.173,
+          "force": "false",
+          "scrolling": "false",
+          "render_ms": "77",
+          "changed": "true",
+          "schedule_ms": "0",
+          "present_ms": "119",
+          "total_ms": "197"
+        }
+      ],
+      "input_to_first_presentation_ms": 644.173,
+      "input_to_final_presentation_ms": 644.173
+    },
+    {
+      "pair": 6,
+      "warmup": false,
+      "key_code": 194,
+      "log": "50.919 PROBE_INPUT_WRITTEN\n51.032 GPUI timing: force=false scrolling=true render_ms=33 changed=false total_ms=33\n51.045 GPUI scroll timing: pages=1.00 dispatch_ms=0 frame_ms=33 total_ms=33\n51.050 hardware button complete: PreviousPage total_ms=33\n823.961 GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:70,y:43,w:1540,h:1183 image_regions=0\n830.714 GPUI damage regions: count=1 pixels=1821820 bounding_pixels=1821820\n941.871 GPUI timing: force=false scrolling=false render_ms=84 changed=true schedule_ms=0 present_ms=118 total_ms=203\n1118.549 HTML_GPUI_SCENE commands=109 duration_ms=16\n1125.376 GPUI timing: force=false scrolling=false render_ms=37 changed=false total_ms=37\n1899.402 GPUI timing: force=false scrolling=false render_ms=28 changed=false total_ms=28\n2485.629 HTML_GPUI_SCENE commands=109 duration_ms=18\n2494.996 GPUI timing: force=false scrolling=false render_ms=32 changed=false total_ms=32\n",
+      "button": "PreviousPage",
+      "button_handler_ms": 33,
+      "dispatch_ms": 0,
+      "synchronous": false,
+      "changed_frames": [
+        {
+          "observed_ms": 941.871,
+          "force": "false",
+          "scrolling": "false",
+          "render_ms": "84",
+          "changed": "true",
+          "schedule_ms": "0",
+          "present_ms": "118",
+          "total_ms": "203"
+        }
+      ],
+      "input_to_first_presentation_ms": 941.871,
+      "input_to_final_presentation_ms": 941.871
+    },
+    {
+      "pair": 6,
+      "warmup": false,
+      "key_code": 193,
+      "log": "36.712 PROBE_INPUT_WRITTEN\n36.825 HTML_GPUI_SCENE commands=109 duration_ms=17\n38.964 GPUI timing: force=false scrolling=true render_ms=37 changed=false total_ms=37\n38.991 GPUI scroll timing: pages=-1.00 dispatch_ms=0 frame_ms=37 total_ms=38\n38.997 hardware button complete: NextPage total_ms=38\n531.964 GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:70,y:43,w:1540,h:1183 image_regions=0\n538.749 GPUI damage regions: count=1 pixels=1821820 bounding_pixels=1821820\n647.796 GPUI timing: force=false scrolling=false render_ms=77 changed=true schedule_ms=0 present_ms=117 total_ms=194\n1101.959 HTML_GPUI_SCENE commands=95 duration_ms=19\n1106.285 GPUI timing: force=false scrolling=false render_ms=38 changed=false total_ms=38\n1611.030 GPUI timing: force=false scrolling=false render_ms=37 changed=false total_ms=37\n1626.044 GPUI timing: force=false scrolling=false render_ms=16 changed=false total_ms=16\n",
+      "button": "NextPage",
+      "button_handler_ms": 38,
+      "dispatch_ms": 0,
+      "synchronous": false,
+      "changed_frames": [
+        {
+          "observed_ms": 647.796,
+          "force": "false",
+          "scrolling": "false",
+          "render_ms": "77",
+          "changed": "true",
+          "schedule_ms": "0",
+          "present_ms": "117",
+          "total_ms": "194"
+        }
+      ],
+      "input_to_first_presentation_ms": 647.796,
+      "input_to_final_presentation_ms": 647.796
+    }
+  ],
+  "summary": {
+    "measured_turns": 12,
+    "synchronous_turns": 0,
+    "asynchronous_or_multiframe_turns": 12,
+    "input_to_final_presentation": {
+      "count": 12,
+      "median_ms": 794.375,
+      "p95_ms": 953.716,
+      "min_ms": 644.173,
+      "max_ms": 953.716
+    },
+    "synchronous_button_handler": null,
+    "render": {
+      "count": 12,
+      "median_ms": 83.0,
+      "p95_ms": 85,
+      "min_ms": 76,
+      "max_ms": 85
+    },
+    "presentation_call": {
+      "count": 12,
+      "median_ms": 118.0,
+      "p95_ms": 127,
+      "min_ms": 117,
+      "max_ms": 127
+    },
+    "dispatch": {
+      "count": 12,
+      "median_ms": 0.0,
+      "p95_ms": 0,
+      "min_ms": 0,
+      "max_ms": 0
+    },
+    "by_button": {
+      "NextPage": {
+        "count": 6,
+        "median_ms": 647.49,
+        "p95_ms": 649.484,
+        "min_ms": 644.173,
+        "max_ms": 649.484
+      },
+      "PreviousPage": {
+        "count": 6,
+        "median_ms": 942.8209999999999,
+        "p95_ms": 953.716,
+        "min_ms": 939.266,
+        "max_ms": 953.716
+      }
+    }
+  },
+  "book": "Sex with the Queen",
+  "reader_preferences": {
+    "font_size_px": 20.0,
+    "max_line_width_px": 360.0,
+    "zoom": 1.0,
+    "line_height": 1.5,
+    "override_line_height": true,
+    "paragraph_spacing_em": 1.0,
+    "override_paragraph_spacing": false,
+    "first_line_indent_em": 1.5,
+    "first_line_indent": "book",
+    "font_weight": "normal",
+    "word_spacing_percent": 100.0,
+    "flow": "paginated",
+    "font_family": "serif",
+    "text_alignment": "justify",
+    "hyphenation": "on",
+    "max_column_count": 2,
+    "horizontal_margin_px": 16.0,
+    "vertical_margin_px": 16.0,
+    "min_column_gap_px": 32.0,
+    "pdf_horizontal_margin_px": 0.0,
+    "pdf_vertical_margin_px": 0.0,
+    "pdf_page_gap_px": 0.0,
+    "comic_horizontal_margin_px": 0.0,
+    "comic_vertical_margin_px": 0.0,
+    "comic_page_gap_px": 0.0,
+    "pdf_zoom_mode": "fit_height",
+    "pdf_page_count": 1,
+    "pdf_zoom": 1.0,
+    "pdf_trim_margins": true,
+    "audiobook_speed": 1.0,
+    "reading_ruler": "Off",
+    "reading_ruler_last_style": "Focus",
+    "reading_ruler_lines": 3,
+    "pdf_reading_ruler": "Off",
+    "pdf_reading_ruler_last_style": "Band",
+    "pdf_reading_ruler_lines": 1,
+    "toc_width": 300.0,
+    "active_sidebar_tab": "Contents",
+    "chrome_hidden": true,
+    "sidebar_open": false,
+    "system_font_family": null,
+    "system_sans_serif_font_family": null,
+    "system_monospace_font_family": null,
+    "custom_fonts_enabled": false,
+    "cjk_font_choice": "publisher",
+    "system_cjk_font_family": null,
+    "narration_pauses": "Natural",
+    "narration_voice": "Alba",
+    "narration_device_voice": null,
+    "narration_voices": {},
+    "translation_languages": [
+      "en"
+    ]
+  },
+  "boundary_validation": "Visually verified first page of chapter TWO, backward destination in chapter ONE, and return to the identical chapter TWO framebuffer before sampling.",
+  "boundary": "Chapter ONE end <-> chapter TWO first page",
+  "starting_framebuffer_png_sha256": "1a4eb48678fd3e2ffdf933c01ec4d22379710d509aa7da9c9a691e1f2aff46b4"
+}

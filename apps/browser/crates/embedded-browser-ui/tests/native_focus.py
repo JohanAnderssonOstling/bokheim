@@ -48,7 +48,7 @@ with tempfile.TemporaryDirectory(prefix='browser-focus-',dir='target') as folder
     root=Path(folder).resolve()
     with (root/'helper.log').open('w') as log:
         try:
-            request={'url':f'http://127.0.0.1:{server.server_port}/','title':f'Bokheim native focus regression {os.getpid()}','data_directory':str(root/'profile'),'downloads':str(root/'downloads'), 'history_file': str(root / 'history.json'), 'preferences': {'keyboard_shortcuts': {}, 'allow_metered_transfers': False, 'text_search': True, 'animations': True, 'custom_ui_font_enabled': False, 'generated_covers_only': False, 'catalog_grouping': 'subject', 'keyboard_layouts': ['SV'], 'ui_font_family': 'serif', 'theme': 'cool', 'ui_font_size_px': 16, 'cover_text': 'always'}}
+            request={'url':f'http://127.0.0.1:{server.server_port}/','title':f'Bokheim native focus regression {os.getpid()}','data_directory':str(root/'profile'),'downloads':str(root/'downloads'), 'history_file': str(root / 'history.json'), 'preferences': {'keyboard_shortcuts': {}, 'text_search': True, 'animations': True, 'custom_ui_font_enabled': False, 'generated_covers_only': False, 'catalog_grouping': 'subject', 'keyboard_layouts': ['SV'], 'ui_font_family': 'serif', 'theme': 'cool', 'ui_font_size_px': 16, 'cover_text': 'always'}}
             process=subprocess.Popen([args.helper,'browser'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log)
             process.stdin.write((json.dumps(request)+'\n').encode()); process.stdin.flush()
             assert select.select([process.stdout],[],[],20)[0], 'helper did not open'

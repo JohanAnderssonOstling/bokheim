@@ -2,21 +2,22 @@
 //! chrome around them. Every kind has the cards; the trees also have a graph,
 //! and folders the commands that go with real directories.
 
+use app_preferences::BookListView;
 use ui_text::text;
 
 use ui_components::user_facing_error;
 
 use crate::services::{import_catalog_book_with_progress, notify_error};
 use crate::{BrowsePageSession, NavigationSession, NewWindowTarget, PaneRequest};
+use std::collections::HashSet;
 use std::rc::Rc;
-use std::time::Duration;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, DismissEvent, Div, Entity, FocusHandle, Focusable as _, IntoElement, KeyDownEvent, Pixels, Point, Render, SharedString, Stateful, Subscription, Task, Window, div, px, rems};
-use gpui_component::IconName;
+use gpui::{AnyElement, App, Context, DismissEvent, Div, Entity, FocusHandle, Focusable as _, IntoElement, KeyDownEvent, Pixels, Point, Render, SharedString, Stateful, Subscription, Task, WeakEntity, Window, div, px, rems};
 use gpui_component::input::{InputEvent, InputState};
-use gpui_component::menu::PopupMenu;
-use library_model::{BookCardRow, BookLocator, BrowseLocation, BrowsePathSegment};
+use gpui_component::menu::{DropdownMenu as _, PopupMenu};
+use gpui_component::{Disableable, Icon, IconName};
+use library_model::{BookCardRow, BookLocator, BrowseLocation, BrowsePathSegment, BrowseRow};
 use sync_common::{BookId, DirId, ROOT_DIR_ID};
 use ui_components as components;
 
@@ -27,49 +28,66 @@ use super::controls::{BrowseControls, BrowseOptionsEvent, BrowseOptionsSelection
 use super::detail::{BookDetailPage, CloseBookDetail};
 use super::drag_drop::{FolderDrop, folder_drop_target, import_drop_target};
 use super::folder_actions::{FolderActions, FolderActionsEvent, FolderTargets};
+#[cfg(all(feature = "graph", not(feature = "kobo")))]
 use super::graph::{BrowseGraph, GraphTap};
 use super::listing::{BrowseDestination, BrowseItem, BrowseKind, BrowseListing, can_download};
 use super::navigator::{BrowseNavigator, Loaded};
 use super::profile::Stage;
+use super::table::BookTableView;
 use crate::library::pages::with_retry_banner;
-use crate::library::services::{FolderPlacement, LibraryContext, LibraryScanChanged};
+use crate::library::services::{FolderPlacement, LibraryContext};
 use crate::library::widgets::mobile_context_menu::ContextMenu;
 use crate::library::widgets::{BookCardEvent, BookCardEvents, BookCardView, LoadedCover, SelectionAction, SelectionActionKind};
-use crate::{CopyBooks, CutBooks, DismissSettings, OpenContextMenu, PasteBooks, ToggleGridSelection, UndoLibraryAction};
+use crate::stores::{BookListViewSetting, current_book_list_view, save_book_list_view};
+use crate::{CopyBooks, CutBooks, DismissSettings, OpenContextMenu, PasteBooks, SelectLoadedItems, ToggleGridSelection, UndoLibraryAction};
 
 pub(crate) use ui_components::SplitSide as BrowseSplitSide;
 
-/// How the page shows its location: as cards, or as a graph whose column or
-/// circle layout is chosen separately.
+/// The shared listing presentation, with an optional page-specific graph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BrowseView {
     Cards,
+    Table,
+    #[cfg(all(feature = "graph", not(feature = "kobo")))]
     Graph,
+}
+
+impl From<BookListView> for BrowseView {
+    fn from(view: BookListView) -> Self {
+        match view {
+            BookListView::Cards => Self::Cards,
+            BookListView::Table => Self::Table,
+        }
+    }
 }
 
 pub(crate) struct BrowsePage {
     ui: LibraryContext,
     navigator: Entity<BrowseNavigator>,
     cards: Entity<CardView>,
+    table: Option<Entity<BookTableView>>,
     /// How the cards reach the page; also given to the drop targets the page
     /// draws itself.
     card_events: CardEvents,
     /// The graph, on the kinds that are trees.
+    #[cfg(all(feature = "graph", not(feature = "kobo")))]
     graph: Option<Entity<BrowseGraph>>,
-    view: BrowseView,
+    #[cfg(all(feature = "graph", not(feature = "kobo")))]
+    graph_open: bool,
     /// Folder commands and the shared copy picker on All books.
     folder_actions: Option<Entity<FolderActions>>,
     browser_actions: Option<Entity<BrowserActions>>,
     /// The book page shown over the location, and its close requests.
     detail: Option<(Entity<BookDetailPage>, Subscription)>,
     chip_menu: Option<ContextMenu>,
+    book_menu: Option<(Entity<BookCardView>, Subscription)>,
     focus: FocusHandle,
     restore_focus: bool,
     search_input: Option<Entity<InputState>>,
     search_open: bool,
-    search_debounce: Option<Task<()>>,
     /// The compact bottom-sheet counterpart to the desktop sort/filter dropdown.
     browse_options_sheet_open: bool,
+    child_download_actions: HashSet<BrowseLocation>,
     _subscriptions: Vec<Subscription>,
     /// Keep the requested trail while its asynchronous listing is still loading.
     session_path: Vec<BrowsePathSegment>,
@@ -95,7 +113,8 @@ impl BrowsePage {
         let card_events: CardEvents = Rc::new(move |event, window, cx| {
             let _ = page.update(cx, |page, cx| page.handle_card_event(event, window, cx));
         });
-        let cards = cx.new(|cx| CardView::new(navigator.clone(), folder_actions.is_some() || kind == BrowseKind::Catalog, card_events.clone(), cx));
+        let cards = cx.new(|cx| CardView::new(navigator.clone(), card_events.clone(), cx));
+        #[cfg(all(feature = "graph", not(feature = "kobo")))]
         let graph = kind.graph_layout().map(|layout| cx.new(|cx| BrowseGraph::new(navigator.clone(), layout, cx)));
         let updates = ui.updates();
         let mut subscriptions = vec![
@@ -111,13 +130,19 @@ impl BrowsePage {
                 }
             }),
             // Only repaints: the empty listing reads whether a scan is running.
-            cx.subscribe(&updates, |_, _, _: &LibraryScanChanged, cx| cx.notify()),
+            cx.observe(&updates, |_, _, cx| cx.notify()),
+            cx.observe_global::<BookListViewSetting>(|page, cx| {
+                page.dismiss_menu(cx);
+                page.clear_selection(cx);
+                cx.notify();
+            }),
         ];
+        #[cfg(all(feature = "graph", not(feature = "kobo")))]
         if let Some(graph) = &graph {
             subscriptions.push(cx.observe(graph, |_, _, cx| cx.notify()));
             subscriptions.push(cx.subscribe(graph, |page, _, tap: &GraphTap, cx| match tap {
                 GraphTap::Select(path) => page.open_path(path.clone(), cx),
-                GraphTap::Open => page.set_view(BrowseView::Cards, cx),
+                GraphTap::Open => page.set_view(current_book_list_view(cx).into(), cx),
             }));
         }
         if let Some(actions) = &folder_actions {
@@ -127,19 +152,23 @@ impl BrowsePage {
             ui,
             navigator,
             cards,
+            table: None,
             card_events,
+            #[cfg(all(feature = "graph", not(feature = "kobo")))]
             graph,
-            view: BrowseView::Cards,
+            #[cfg(all(feature = "graph", not(feature = "kobo")))]
+            graph_open: false,
             folder_actions,
             browser_actions,
             detail: None,
             chip_menu: None,
+            book_menu: None,
             focus: cx.focus_handle().tab_index(0).tab_stop(true),
             restore_focus: false,
             search_input: None,
             search_open: false,
-            search_debounce: None,
             browse_options_sheet_open: false,
+            child_download_actions: HashSet::new(),
             _subscriptions: subscriptions,
             session_path: Vec::new(),
             restoring_detail: None,
@@ -149,8 +178,26 @@ impl BrowsePage {
     }
 
     /// The graph, while it is the view shown.
+    #[cfg(all(feature = "graph", not(feature = "kobo")))]
     fn shown_graph(&self) -> Option<&Entity<BrowseGraph>> {
-        self.graph.as_ref().filter(|_| self.view == BrowseView::Graph)
+        self.graph.as_ref().filter(|_| self.graph_open)
+    }
+
+    fn is_graph_view(&self) -> bool {
+        #[cfg(all(feature = "graph", not(feature = "kobo")))]
+        {
+            self.graph_open && self.graph.is_some()
+        }
+        #[cfg(not(all(feature = "graph", not(feature = "kobo"))))]
+        false
+    }
+
+    fn view(&self, cx: &App) -> BrowseView {
+        #[cfg(all(feature = "graph", not(feature = "kobo")))]
+        if self.is_graph_view() {
+            return BrowseView::Graph;
+        }
+        current_book_list_view(cx).into()
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
@@ -172,7 +219,6 @@ impl BrowsePage {
 
     fn handle_book_event(&mut self, event: BookCardEvent, cx: &mut Context<Self>) {
         match (event, self.folder_actions.clone()) {
-            (BookCardEvent::OpenDetail(book, cover), _) => self.show_book_detail(book, cover, cx),
             (BookCardEvent::Place(books, source, placement), Some(actions)) => actions.update(cx, |actions, cx| actions.open_placement_picker(placement, FolderTargets { books, source, ..FolderTargets::default() }, cx)),
             (BookCardEvent::Remove(book, source), Some(actions)) => actions.update(cx, |actions, cx| actions.remove_books_from_folder(FolderTargets { books: vec![book], source: Some(source), ..FolderTargets::default() }, cx)),
             // Cards offer the folder commands only on a page that has them.
@@ -181,22 +227,68 @@ impl BrowsePage {
     }
 
     fn download_child(&mut self, location: BrowseLocation, cx: &mut Context<Self>) {
-        let navigator = self.navigator.read(cx);
-        if !navigator.listing.child(location).is_some_and(can_download) {
+        self.set_child_downloaded(location, true, cx);
+    }
+
+    fn set_child_downloaded(&mut self, location: BrowseLocation, downloaded: bool, cx: &mut Context<Self>) {
+        let updates = self.ui.updates();
+        let updates = updates.read(cx);
+        if self.child_download_actions.contains(&location) || if downloaded { updates.downloads_blocked() || cfg!(target_arch = "wasm32") } else { updates.files_busy() || location.folder().is_none() } {
             return;
         }
-        let query = navigator.selection.backend_query(location, false);
+        let navigator = self.navigator.read(cx);
+        if !navigator.listing.child(location).is_some_and(|row| if downloaded { can_download(row) } else { row.downloaded_book_count > 0 }) {
+            return;
+        }
+        let query = navigator.child_query(location);
         let library = self.ui.backend().clone();
+        self.child_download_actions.insert(location);
+        cx.notify();
         cx.spawn(async move |page, cx| {
-            let result = library.download_browse(query).await;
+            let result = if downloaded { library.download_browse(query).await } else { library.evict_browse_downloads(query).await.map(|_| ()) };
             let _ = page.update_in(cx, |page, window, cx| {
+                page.child_download_actions.remove(&location);
                 if let Err(error) = result {
-                    notify_error("hierarchy-download-error", format!(text!(browse::could_not_queue_downloads), user_facing_error(&error, "")), window, cx);
+                    let error = user_facing_error(&error, "");
+                    let message = if downloaded { format!(text!(browse::could_not_queue_downloads), error) } else { format!(text!(browse::could_not_remove_every_download), error) };
+                    notify_error("hierarchy-download-error", message, window, cx);
                 }
                 page.navigator.update(cx, |navigator, cx| navigator.refresh(cx));
+                cx.notify();
             });
         })
         .detach();
+    }
+
+    pub(super) fn folder_download_checkbox(page: WeakEntity<Self>, row: &BrowseRow, cx: &App) -> AnyElement {
+        let Some(folder) = row.id.folder() else { return div().into_any_element() };
+        let Some(owner) = page.upgrade() else { return div().into_any_element() };
+        let view = owner.read(cx);
+        let updates = view.ui.updates();
+        let updates = updates.read(cx);
+        let downloaded = row.book_count > 0 && row.downloaded_book_count == row.book_count;
+        let partial = row.downloaded_book_count > 0 && !downloaded;
+        let pending = view.child_download_actions.contains(&row.id);
+        let disabled = pending || row.book_count == 0 || if downloaded { updates.files_busy() } else { updates.downloads_blocked() || cfg!(target_arch = "wasm32") };
+        let theme = components::browser_theme(cx);
+        let checkbox = components::selection_checkbox(format!("folder-downloaded-{folder}"), format!("{}: {} — {}/{}", text!(browse::downloaded), row.name, row.downloaded_book_count, row.book_count), downloaded)
+            .indeterminate(partial)
+            .tooltip(if downloaded { text!(browse::remove_downloads) } else { text!(browse::download_to_this_device) })
+            .disabled(disabled)
+            .on_click(move |checked, _, cx| {
+                cx.stop_propagation();
+                let _ = page.update(cx, |page, cx| page.set_child_downloaded(BrowseLocation::Folder(folder), *checked, cx));
+            });
+        div()
+            .id(format!("folder-download-cell-{folder}"))
+            .flex()
+            .items_center()
+            .min_w_0()
+            .child(checkbox)
+            .when(pending, |row| row.child(Icon::empty().path("icons/hourglass.svg").size(rems(components::TEXT_SM))))
+            .child(div().min_w_0().text_size(rems(components::TEXT_XS)).text_color(theme.text_muted).line_clamp(2).text_ellipsis().child(format!("{}/{}", row.downloaded_book_count, row.book_count)))
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .into_any_element()
     }
 
     fn handle_folder_action(&mut self, event: FolderActionsEvent, cx: &mut Context<Self>) {
@@ -211,12 +303,12 @@ impl BrowsePage {
         // One book opens its overlay, in a folder too: its own commands
         // include the folder's.
         if let [BrowseItem::Book(book)] = items.as_slice() {
-            BookCardView::open_items_menu(std::slice::from_ref(book), position, window, cx);
+            self.open_book_menu(std::slice::from_ref(book), position, window, cx);
             return true;
         }
         if self.navigator.read(cx).destination.location.folder().is_none() && !items.is_empty() && items.iter().all(|item| matches!(item, BrowseItem::Book(_))) {
             let books = items.iter().filter_map(BrowseItem::book).cloned().collect::<Vec<_>>();
-            BookCardView::open_items_menu(&books, position, window, cx);
+            self.open_book_menu(&books, position, window, cx);
             return true;
         }
         let single_chip = match items.as_slice() {
@@ -228,7 +320,7 @@ impl BrowsePage {
         let mut new_window = Vec::new();
         let mut download_actions = Vec::new();
         let mut folder_commands = Vec::new();
-        for command in self.selection_actions(source, &items, cx) {
+        for command in self.selection_actions(source, &items, cx).into_iter().filter(|action| !action.is_disabled()) {
             match command.kind {
                 SelectionActionKind::OpenWindow => new_window.push(command),
                 SelectionActionKind::Download => download_actions.push(command),
@@ -236,6 +328,7 @@ impl BrowsePage {
             }
         }
         if new_window.is_empty() && split_target.is_none() && download_actions.is_empty() && folder_commands.is_empty() {
+            self.dismiss_menu(cx);
             return false;
         }
         let page = cx.entity();
@@ -263,9 +356,31 @@ impl BrowsePage {
         true
     }
 
+    fn open_book_menu(&mut self, books: &[Entity<BookCardView>], position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_menu(cx);
+        let table = self.view(cx) == BrowseView::Table;
+        BookCardView::open_items_menu_at(books, position, table.then_some(position), window, cx);
+        if table && let Some(book) = books.first().filter(|book| book.read(cx).has_menu()) {
+            let subscription = cx.observe(book, |page, book, cx| {
+                if !book.read(cx).has_menu() {
+                    page.book_menu = None;
+                }
+                cx.notify();
+            });
+            self.book_menu = Some((book.clone(), subscription));
+        }
+        self.restore_focus = false;
+        cx.notify();
+    }
+
     fn dismiss_menu(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.chip_menu.take().is_none() {
+        let chip_menu = self.chip_menu.take();
+        let book_menu = self.book_menu.take();
+        if chip_menu.is_none() && book_menu.is_none() {
             return false;
+        }
+        if let Some((book, _)) = book_menu {
+            book.update(cx, |book, cx| book.dismiss_menu(cx));
         }
         self.restore_focus = !self.has_popup(cx);
         cx.notify();
@@ -274,6 +389,8 @@ impl BrowsePage {
 
     /// Opens the page's one context menu at `position`, built by `items`.
     fn show_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>, items: impl Fn(PopupMenu) -> PopupMenu + 'static) {
+        self.dismiss_menu(cx);
+        self.restore_focus = false;
         self.chip_menu = Some(ContextMenu::new(position, window, cx, items, |menu, window, cx| {
             cx.subscribe_in(menu, window, |page, menu, _: &DismissEvent, window, cx| {
                 let owned_focus = menu.focus_handle(cx).contains_focused(window, cx);
@@ -302,10 +419,16 @@ impl BrowsePage {
             return;
         }
         let contents = match contents {
+            #[cfg(target_arch = "wasm32")]
+            FolderDrop::BrowserFiles(files) => {
+                self.dismiss_menu(cx);
+                self.ui.import_browser_files(destination, files.take(), cx);
+                return;
+            }
             FolderDrop::Catalog(books) => {
                 self.dismiss_menu(cx);
                 self.import_catalog_books(destination, books, window, cx);
-                self.cards.update(cx, |cards, cx| cards.clear_selection(cx));
+                self.clear_selection(cx);
                 return;
             }
             contents => contents,
@@ -344,9 +467,11 @@ impl BrowsePage {
                     }
                 }
                 FolderDrop::Catalog(_) => unreachable!("catalog drops import before opening a placement menu"),
+                #[cfg(target_arch = "wasm32")]
+                FolderDrop::BrowserFiles(_) => unreachable!("browser drops import before opening a placement menu"),
             })
         });
-        self.cards.update(cx, |cards, cx| cards.clear_selection(cx));
+        self.clear_selection(cx);
     }
 
     fn import_catalog_books(&self, destination: DirId, books: Vec<BookCardRow>, window: &mut Window, cx: &mut Context<Self>) {
@@ -373,8 +498,8 @@ impl BrowsePage {
 
     pub(super) fn select_option(&mut self, event: BrowseOptionsEvent, cx: &mut Context<Self>) {
         // Authors are not a tree: the catalog by author has no graph to show.
-        if matches!(event, BrowseOptionsEvent::ShowByAuthor(true)) {
-            self.set_view(BrowseView::Cards, cx);
+        if self.is_graph_view() && matches!(event, BrowseOptionsEvent::ShowByAuthor(true)) {
+            self.set_view(current_book_list_view(cx).into(), cx);
         }
         self.navigator.update(cx, |navigator, cx| navigator.select_option(event, cx));
     }
@@ -411,18 +536,10 @@ impl BrowsePage {
     }
 
     fn search_changed(&mut self, query: String, cx: &mut Context<Self>) {
-        self.search_debounce = None;
         if query == self.navigator.read(cx).selection.search {
             return;
         }
-        let timer = cx.background_executor().timer(Duration::from_millis(250));
-        self.search_debounce = Some(cx.spawn(async move |page, cx| {
-            timer.await;
-            let _ = page.update(cx, |page, cx| {
-                page.search_debounce = None;
-                page.navigator.update(cx, |navigator, cx| navigator.search(query, cx));
-            });
-        }));
+        self.navigator.update(cx, |navigator, cx| navigator.search(query, cx));
     }
 
     fn search_focused(&self, window: &Window, cx: &App) -> bool {
@@ -463,11 +580,11 @@ impl BrowsePage {
     }
 
     fn selection_keys_enabled(&self, cx: &App) -> bool {
-        matches!(self.navigator.read(cx).kind, BrowseKind::Folder | BrowseKind::Books | BrowseKind::Catalog) && self.menu_keys_enabled(cx)
+        self.menu_keys_enabled(cx)
     }
 
     fn menu_keys_enabled(&self, cx: &App) -> bool {
-        self.detail.is_none() && self.shown_graph().is_none() && !self.has_popup(cx)
+        self.detail.is_none() && !self.is_graph_view() && !self.has_popup(cx)
     }
 
     fn clipboard_keys_enabled(&self, cx: &App) -> bool {
@@ -491,11 +608,10 @@ impl BrowsePage {
             cx.propagate();
             return;
         }
-        let cards = self.cards.read(cx);
-        let (mut source, mut items) = cards.selected_items(cx);
+        let (mut source, mut items) = self.selected_items(cx);
         if focused.is_none()
             && items.is_empty()
-            && let Some(CardEvent::ItemsMenu(cursor_items, _)) = cards.cursor_menu(cx)
+            && let Some(CardEvent::ItemsMenu(cursor_items, _)) = self.cursor_menu(window.mouse_position(), cx)
         {
             items = cursor_items;
         }
@@ -554,7 +670,7 @@ impl BrowsePage {
     }
 
     fn has_popup(&self, cx: &App) -> bool {
-        self.chip_menu.is_some() || self.browse_options_sheet_open || self.folder_actions.as_ref().is_some_and(|actions| actions.read(cx).has_modal())
+        self.chip_menu.is_some() || self.book_menu.is_some() || self.browse_options_sheet_open || self.folder_actions.as_ref().is_some_and(|actions| actions.read(cx).has_modal())
     }
 
     fn on_toggle_grid_selection(&mut self, action: &ToggleGridSelection, window: &mut Window, cx: &mut Context<Self>) {
@@ -562,7 +678,13 @@ impl BrowsePage {
             cx.propagate();
             return;
         }
-        self.cards.update(cx, |cards, cx| cards.toggle_selection(action.0, cx));
+        if self.view(cx) == BrowseView::Table {
+            if let Some(table) = &self.table {
+                table.update(cx, |table, cx| table.toggle_selection(action.0, cx));
+            }
+        } else {
+            self.cards.update(cx, |cards, cx| cards.toggle_selection(action.0, cx));
+        }
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -578,9 +700,11 @@ impl BrowsePage {
             return;
         }
         let key = event.keystroke.key.as_str();
-        let handled = match self.shown_graph().cloned() {
-            Some(graph) => graph.update(cx, |graph, cx| graph.handle_key(key, cx)),
-            None => self.cards.update(cx, |cards, cx| cards.handle_key(key, window, cx)),
+        let handled = match self.view(cx) {
+            #[cfg(all(feature = "graph", not(feature = "kobo")))]
+            BrowseView::Graph => self.shown_graph().cloned().is_some_and(|graph| graph.update(cx, |graph, cx| graph.handle_key(key, cx))),
+            BrowseView::Table => self.table.as_ref().is_some_and(|table| (self.focus.is_focused(window) || table.read(cx).navigation_focused(window, cx)) && table.update(cx, |table, cx| table.handle_key(key, window, cx))),
+            BrowseView::Cards => self.cards.update(cx, |cards, cx| cards.handle_key(key, window, cx)),
         } || key == "backspace" && self.open_parent(cx);
         if handled {
             cx.stop_propagation();
@@ -595,7 +719,7 @@ impl BrowsePage {
             cx.propagate();
             return;
         }
-        let opened = match self.cards.read(cx).cursor_menu(cx) {
+        let opened = match self.cursor_menu(window.mouse_position(), cx) {
             Some(CardEvent::ItemsMenu(items, position)) => self.open_items_menu(items, position, window, cx),
             None if self.folder_actions.is_some() && self.navigator.read(cx).destination.location.folder().is_some() => {
                 self.open_folder_menu(window.mouse_position(), window, cx);
@@ -663,7 +787,7 @@ impl BrowsePage {
             self.close_search(cx);
             return true;
         }
-        if self.cards.update(cx, |cards, cx| cards.clear_selection(cx)) {
+        if self.clear_selection(cx) {
             return true;
         }
         self.open_parent(cx)
@@ -684,7 +808,6 @@ impl BrowsePage {
         // Opening a match leaves the search: what it found is now the page.
         if !navigator.selection.search.is_empty() {
             self.navigator.update(cx, |navigator, _| navigator.selection.search.clear());
-            self.search_debounce = None;
             if let Some(input) = &self.search_input {
                 input.update(cx, |input, cx| input.set_value("", window, cx));
             }
@@ -693,6 +816,7 @@ impl BrowsePage {
     }
 
     pub(crate) fn open_path(&mut self, path: Vec<BrowsePathSegment>, cx: &mut Context<Self>) {
+        self.dismiss_menu(cx);
         self.close_book_detail(cx);
         self.session_path = path.clone();
         let navigator = self.navigator.read(cx);
@@ -705,14 +829,28 @@ impl BrowsePage {
     }
 
     fn set_view(&mut self, view: BrowseView, cx: &mut Context<Self>) {
-        if self.graph.is_some() {
-            self.view = view;
-            cx.notify();
+        #[cfg(all(feature = "graph", not(feature = "kobo")))]
+        if view == BrowseView::Graph && self.graph.is_none() {
+            return;
         }
+        self.dismiss_menu(cx);
+        self.clear_selection(cx);
+        #[cfg(all(feature = "graph", not(feature = "kobo")))]
+        {
+            self.graph_open = view == BrowseView::Graph;
+        }
+        match view {
+            BrowseView::Cards => save_book_list_view(BookListView::Cards, cx),
+            BrowseView::Table => save_book_list_view(BookListView::Table, cx),
+            #[cfg(all(feature = "graph", not(feature = "kobo")))]
+            BrowseView::Graph => {}
+        }
+        cx.notify();
     }
 
+    #[cfg(all(feature = "graph", not(feature = "kobo")))]
     fn toggle_view(&mut self, cx: &mut Context<Self>) {
-        self.set_view(if self.view == BrowseView::Cards { BrowseView::Graph } else { BrowseView::Cards }, cx);
+        self.set_view(if self.is_graph_view() { current_book_list_view(cx).into() } else { BrowseView::Graph }, cx);
     }
 
     /// The root, then the path; the trail folds itself to the topbar's width.
@@ -759,7 +897,8 @@ impl BrowsePage {
             let navigator = self.navigator.read(cx);
             let theme = components::browser_theme(cx);
             let route = navigator.kind.route();
-            if self.view == BrowseView::Graph {
+            #[cfg(all(feature = "graph", not(feature = "kobo")))]
+            if self.is_graph_view() {
                 if crate::navigation::LIBRARY_VIEWS.contains(&route) {
                     return crate::navigation::library_root_heading(route, theme);
                 }
@@ -772,7 +911,7 @@ impl BrowsePage {
             };
             crate::navigation::library_heading(route, crumb.name.clone(), theme)
         } else {
-            components::browser_topbar_left().when(self.view == BrowseView::Cards, |heading| heading.child(self.breadcrumb(cx)))
+            components::browser_topbar_left().when(!self.is_graph_view(), |heading| heading.child(self.breadcrumb(cx)))
         }
     }
 
@@ -785,70 +924,163 @@ impl BrowsePage {
         })
     }
 
+    fn render_view_switch(&self, collapsed: bool, cx: &Context<Self>) -> AnyElement {
+        let theme = components::browser_theme(cx);
+        if collapsed {
+            let (label, icon) = match self.view(cx) {
+                BrowseView::Cards => (text!(browse::cards_view), "icons/layout-dashboard.svg"),
+                BrowseView::Table => (text!(browse::table_view), "icons/table.svg"),
+                #[cfg(all(feature = "graph", not(feature = "kobo")))]
+                BrowseView::Graph => (text!(browse::show_as_graph), "icons/network.svg"),
+            };
+            let choices = vec![(BrowseView::Cards, text!(browse::cards_view)), (BrowseView::Table, text!(browse::table_view))];
+            #[cfg(all(feature = "graph", not(feature = "kobo")))]
+            let choices = {
+                let mut choices = choices;
+                if self.graph.is_some() && !self.navigator.read(cx).selection.by_author {
+                    choices.push((BrowseView::Graph, text!(browse::show_as_graph)));
+                }
+                choices
+            };
+            let page = cx.entity();
+            let current = self.view(cx);
+            return components::outlined_icon_button("browse-view-menu", label, gpui_component::Icon::empty().path(icon))
+                .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
+                    let mut menu = menu.touch_friendly(components::touch_ui() || cfg!(feature = "kobo"));
+                    for &(view, label) in &choices {
+                        let page = page.clone();
+                        menu = menu.item(components::menu_item(label, move |_, _, cx| page.update(cx, |page, cx| page.set_view(view, cx))).checked(current == view));
+                    }
+                    menu
+                })
+                .into_any_element();
+        }
+        components::settings_choice_button_group(theme)
+            .w_auto()
+            .flex_none()
+            .h(rems(components::topbar_action_height_rem()))
+            .children([(BrowseView::Cards, text!(browse::cards_view), "icons/layout-dashboard.svg"), (BrowseView::Table, text!(browse::table_view), "icons/table.svg")].into_iter().map(|(view, label, icon)| {
+                components::settings_choice_button_content(if view == BrowseView::Table { "browse-view-table" } else { "browse-view-cards" }, gpui_component::Icon::empty().path(icon), self.view(cx) == view, theme)
+                    .min_h_0()
+                    .h_full()
+                    .flex_none()
+                    .w(rems(components::topbar_action_height_rem()))
+                    .px_0()
+                    .tooltip(label)
+                    .aria_label(label)
+                    .on_click(cx.listener(move |page, _, _, cx| page.set_view(view, cx)))
+            }))
+            .into_any_element()
+    }
+
+    fn selected_items(&self, cx: &App) -> (Option<DirId>, Vec<BrowseItem>) {
+        if self.view(cx) == BrowseView::Table
+            && let Some(table) = &self.table
+        {
+            table.read(cx).selected_items(cx)
+        } else {
+            self.cards.read(cx).selected_items(cx)
+        }
+    }
+
+    fn cursor_menu(&self, position: Point<Pixels>, cx: &App) -> Option<CardEvent> {
+        if self.view(cx) == BrowseView::Table {
+            let item = self.table.as_ref()?.read(cx).cursor_item(cx)?;
+            let (_, mut items) = self.selected_items(cx);
+            if !items.iter().any(|selected| selected.id(cx) == item.id(cx)) {
+                items = vec![item];
+            }
+            Some(CardEvent::ItemsMenu(items, position))
+        } else {
+            self.cards.read(cx).cursor_menu(cx)
+        }
+    }
+
+    fn clear_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let cleared = self.cards.update(cx, |cards, cx| cards.clear_selection(cx));
+        self.table.as_ref().is_some_and(|table| table.update(cx, |table, cx| table.clear_selection(cx))) || cleared
+    }
+
+    pub(super) fn open_table_child(&mut self, location: BrowseLocation, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_child(location, window, cx);
+    }
+
+    pub(super) fn open_table_menu(&mut self, item: BrowseItem, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let (_, mut items) = self.selected_items(cx);
+        if !items.iter().any(|selected| selected.id(cx) == item.id(cx)) {
+            items = vec![item];
+        }
+        self.open_items_menu(items, position, window, cx);
+    }
+
     fn render_topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = components::browser_theme(cx);
-        let graph_shown = self.shown_graph().cloned();
-        let compact_graph = graph_shown.is_some() && components::WindowWidthClass::for_window(window).is_compact();
+        let graph_shown = self.is_graph_view();
+        let compact_graph = graph_shown && components::WindowWidthClass::for_window(window).is_compact();
         let search_field = self.render_search();
         let search_open = search_field.is_some();
-        let (inline_search_field, mobile_search_field) = if graph_shown.is_some() {
-            (None, None)
-        } else if components::uses_mobile_navigation(window) {
-            (None, search_field)
-        } else {
-            (search_field, None)
-        };
         let search_button_label = if search_open { text!(browse::hide_search) } else { text!(browse::search_books_or_authors) };
         let navigator = self.navigator.read(cx);
         let (browse_controls, selection, folder, all_books) = (navigator.listing.controls.clone(), navigator.selection.clone(), navigator.destination.location.folder(), navigator.kind == BrowseKind::Books);
         let open_browser = self.browser_actions.clone().and_then(|actions| BrowserActions::render_browser_trigger(actions, cx));
         let searching = !selection.search.is_empty();
         let compact = components::WindowWidthClass::for_window(window).is_compact();
-        let view_toggle = (self.graph.is_some() && !selection.by_author).then(|| {
-            let (label, icon) = if graph_shown.is_some() { (text!(browse::show_as_cards), IconName::LayoutDashboard) } else { (text!(browse::show_as_graph), IconName::Network) };
-            components::outlined_icon_button("toggle-browse-view", label, icon).on_click(cx.listener(|page, _, _, cx| page.toggle_view(cx)))
+        let language_control = browse_language_control(cx.entity(), &browse_controls, &selection, compact, gpui::Anchor::TopRight, theme);
+        let trash_button = self.trash_button(cx);
+        #[cfg(all(feature = "graph", not(feature = "kobo")))]
+        let graph_available = self.graph.is_some() && !selection.by_author;
+        #[cfg(not(all(feature = "graph", not(feature = "kobo"))))]
+        let graph_available = false;
+        let actions = 2
+            + usize::from(graph_available)
+            + usize::from(self.folder_actions.is_some() && (folder.is_some() || all_books))
+            + usize::from(open_browser.is_some())
+            + usize::from(trash_button.is_some())
+            + usize::from(language_control.is_some());
+        let available = window.viewport_size().width - if components::uses_mobile_navigation(window) { px(0.0) } else { window.rem_size() * components::NAV_RAIL_SIZE_REM };
+        let collapsed_views = (compact || components::touch_ui() || cfg!(feature = "kobo")) && available < window.rem_size() * (components::topbar_action_height_rem() * (actions + 2) as f32 + 5.0);
+        #[cfg(all(feature = "graph", not(feature = "kobo")))]
+        let view_toggle = (graph_available && !collapsed_views).then(|| {
+            let (label, icon) = if graph_shown {
+                match current_book_list_view(cx) {
+                    BookListView::Cards => (text!(browse::show_as_cards), "icons/layout-dashboard.svg"),
+                    BookListView::Table => (text!(browse::table_view), "icons/table.svg"),
+                }
+            } else {
+                (text!(browse::show_as_graph), "icons/network.svg")
+            };
+            components::outlined_icon_button("toggle-browse-view", label, gpui_component::Icon::empty().path(icon)).on_click(cx.listener(|page, _, _, cx| page.toggle_view(cx)))
         });
-        let graph_layout_switch = graph_shown.as_ref().map(|graph| graph.update(cx, |graph, cx| graph.layout_control(cx)));
+        #[cfg(all(feature = "graph", not(feature = "kobo")))]
+        let graph_layout_switch = self.shown_graph().cloned().map(|graph| graph.update(cx, |graph, cx| graph.layout_control(cx)));
         let menu_anchor = gpui::Anchor::TopRight;
-        let controls = components::browser_topbar_right()
-            .when(inline_search_field.is_some(), |controls| controls.flex_1())
-            .children(inline_search_field.map(|field| div().flex_1().min_w(rems(8.0)).child(field)))
-            .when(!compact_graph, |controls| {
-                controls.child(
-                    components::selectable_button(components::outlined_icon_button("toggle-browse-search", search_button_label, IconName::Search), search_open || searching, theme)
-                        .on_click(cx.listener(|page, _, window, cx| page.toggle_search(window, cx))),
-                )
-            })
-            .children(view_toggle)
-            .children(graph_layout_switch)
+        let controls = components::browser_topbar_right().child(self.render_view_switch(collapsed_views, cx)).child(
+            components::selectable_button(components::outlined_icon_button("toggle-browse-search", search_button_label, IconName::Search), search_open || searching, theme)
+                .on_click(cx.listener(|page, _, window, cx| page.toggle_search(window, cx))),
+        );
+        #[cfg(all(feature = "graph", not(feature = "kobo")))]
+        let controls = controls.children(view_toggle).children(graph_layout_switch);
+        let controls = controls
             .when(!compact_graph, |controls| controls.children(self.folder_actions.as_ref().zip(folder).map(|(actions, parent)| FolderActions::render_trigger(actions.clone(), parent, menu_anchor, self.ui.files_busy(cx)))))
             .when(all_books, |controls| controls.children(self.folder_actions.clone().map(|actions| FolderActions::render_import_trigger(actions, ROOT_DIR_ID, menu_anchor, self.ui.files_busy(cx)))))
             .children(open_browser)
-            .children(self.trash_button(cx))
-            .children(browse_language_control(cx.entity(), &browse_controls, &selection, compact, menu_anchor, theme))
+            .children(trash_button)
+            .children(language_control)
             .child(browse_options_control(cx.entity(), &selection, compact, menu_anchor, theme));
-        if graph_shown.is_some() {
-            div()
-                .h(gpui::rems(components::topbar_height_rem()))
-                .flex_none()
-                .flex()
-                .items_center()
-                .p(px(4.0))
-                .when(cfg!(feature = "kobo"), |bar| bar.px(px(components::CONTENT_INSET)))
-                .rounded(px(8.0))
-                .bg(theme.page_bg)
-                .border_1()
-                .border_color(theme.rule)
-                .child(controls)
-                .into_any_element()
+        let topbar = if graph_shown {
+            div().h(gpui::rems(components::topbar_height_rem())).flex_none().flex().items_center().p(px(4.0)).bg(theme.page_bg).border_1().border_color(theme.rule).child(controls).into_any_element()
         } else {
-            let topbar = components::topbar(theme).child(self.navigation_heading(window, cx)).child(controls);
-            if let Some(search_field) = mobile_search_field {
-                div().w_full().flex_none().flex().flex_col().child(topbar).child(div().w_full().flex().px(px(components::CONTENT_INSET)).pb(px(components::CONTENT_INSET)).child(search_field)).into_any_element()
-            } else {
-                topbar.into_any_element()
-            }
-        }
+            components::topbar(theme).child(self.navigation_heading(window, cx)).child(controls).into_any_element()
+        };
+        div()
+            .when(!graph_shown, |bar| bar.w_full())
+            .flex_none()
+            .flex()
+            .flex_col()
+            .bg(theme.page_bg)
+            .child(topbar)
+            .children(search_field.map(|field| div().w_full().flex_none().flex().px(px(components::CONTENT_INSET)).pb(px(components::CONTENT_INSET)).child(field)))
+            .into_any_element()
     }
 
     fn render_browse_options_sheet(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -866,7 +1098,7 @@ impl BrowsePage {
             let session = NavigationSession {
                 library_id: Some(*self.ui.backend().id()),
                 route: self.navigator.read(cx).kind.route().into(),
-                pages: vec![BrowsePageSession { path: path.into_iter().map(|crumb| (crumb.id, crumb.name)).collect(), detail: None }],
+                page: Some(BrowsePageSession { path: path.into_iter().map(|crumb| (crumb.id, crumb.name)).collect(), detail: None }),
                 ..Default::default()
             };
             cx.emit(PaneRequest::Open { session, side });
@@ -889,8 +1121,11 @@ impl BrowsePage {
                         return;
                     }
                     page.restoring_detail = None;
-                    if let Ok(detail) = result {
-                        page.show_book_detail(detail.book, None, cx);
+                    match result {
+                        Ok(detail) => page.show_book_detail(detail.book, None, cx),
+                        Err(error) => {
+                            cx.with_window(cx.entity_id(), |window, cx| notify_error("book-detail-restore-error", user_facing_error(&error, text!(browse::could_not_load_book_details_please_try_again)), window, cx));
+                        }
                     }
                     cx.notify();
                 });
@@ -941,14 +1176,29 @@ impl BrowsePage {
 
     fn render_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = components::browser_theme(cx);
-        let view = match self.shown_graph().cloned() {
-            Some(graph) => {
-                let controls = self.render_topbar(window, cx);
-                let search = self.render_search();
-                let count = self.ui.updates().read(cx).book_count().unwrap_or(0);
-                graph.update(cx, |graph, cx| graph.render_panel(count, controls, search, window, cx))
+        let view = match self.view(cx) {
+            #[cfg(all(feature = "graph", not(feature = "kobo")))]
+            BrowseView::Graph => {
+                if let Some(graph) = self.shown_graph().cloned() {
+                    let controls = self.render_topbar(window, cx);
+                    let count = self.ui.updates().read(cx).book_count().unwrap_or(0);
+                    graph.update(cx, |graph, cx| graph.render_panel(count, controls, self.search_open, window, cx))
+                } else {
+                    self.cards.clone().into_any_element()
+                }
             }
-            None => self.cards.clone().into_any_element(),
+            BrowseView::Table => {
+                if self.table.is_none() {
+                    let navigator = self.navigator.clone();
+                    let page = cx.weak_entity();
+                    let updates = self.ui.updates();
+                    let table = cx.new(|cx| BookTableView::new(navigator, page, updates, window, cx));
+                    self._subscriptions.push(cx.observe(&table, |_, _, cx| cx.notify()));
+                    self.table = Some(table);
+                }
+                self.table.clone().unwrap().into_any_element()
+            }
+            BrowseView::Cards => self.cards.clone().into_any_element(),
         };
         let empty = self.cards.read(cx).is_empty(cx);
         let updates = self.ui.updates().read(cx);
@@ -973,6 +1223,10 @@ impl BrowsePage {
         }
         let body = body
             .child(view)
+            .when(empty && !self.is_graph_view() && !show_loading && !navigator.is_loading() && error.is_none(), |body| {
+                let message = if navigator.selection.search.is_empty() { text!(browse::no_items_here) } else { text!(browse::no_matches) };
+                body.child(components::absolute_full_size().flex().items_center().justify_center().child(components::reader_state_note(message, theme)))
+            })
             .when(show_loading, |body| {
                 body.child(components::absolute_full_size().debug_selector(|| "browse-loading-overlay".into()).bg(theme.page_bg).flex().items_center().justify_center().child(components::browser_loading_message(loading_label, theme)))
             })
@@ -1036,11 +1290,11 @@ impl BrowsePage {
     }
 
     fn render_selection_footer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.detail.is_some() || self.shown_graph().is_some() {
+        if self.detail.is_some() || self.is_graph_view() {
             return None;
         }
-        let (source, items) = self.cards.read(cx).selected_items(cx);
-        if items.len() < 2 {
+        let (source, items) = self.selected_items(cx);
+        if items.is_empty() {
             return None;
         }
         let theme = components::browser_theme(cx);
@@ -1055,16 +1309,17 @@ impl BrowsePage {
                 })))
                 .child(div().flex_none().debug_selector(|| "clear-browse-selection".into()).child(components::outlined_icon_button("clear-selection", text!(browse::clear_selection), IconName::Close).on_click(cx.listener(
                     |page, _, _, cx| {
-                        page.cards.update(cx, |cards, cx| cards.clear_selection(cx));
+                        page.clear_selection(cx);
                     },
                 ))))
                 .into_any_element(),
         )
     }
 
-    fn render_shell(&self, topbar: AnyElement, body: AnyElement, options_sheet: Option<AnyElement>, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_shell(&self, topbar: AnyElement, body: AnyElement, options_sheet: Option<AnyElement>, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let folder_overlay = self.folder_actions.as_ref().and_then(|actions| FolderActions::render_overlay(actions.clone(), window, cx));
         let chip_menu = self.chip_menu.as_ref().map(|active| active.render(window));
+        let book_menu = self.book_menu.as_ref().map(|(book, _)| book.update(cx, |book, cx| book.render_menu(window, cx)));
         let selection_footer = self.render_selection_footer(cx);
         let mut key_context = gpui::KeyContext::default();
         if self.selection_keys_enabled(cx) {
@@ -1087,6 +1342,17 @@ impl BrowsePage {
             .on_action(cx.listener(Self::on_dismiss))
             .on_action(cx.listener(Self::on_open_context_menu))
             .on_action(cx.listener(Self::on_toggle_grid_selection))
+            .on_action(cx.listener(|page, _: &SelectLoadedItems, _, cx| {
+                if page.selection_keys_enabled(cx) {
+                    if page.view(cx) == BrowseView::Table {
+                        if let Some(table) = &page.table {
+                            table.update(cx, |table, cx| table.select_loaded(cx));
+                        }
+                    } else {
+                        page.cards.update(cx, |cards, cx| cards.select_loaded(cx));
+                    }
+                }
+            }))
             .on_action(cx.listener(Self::on_copy_books))
             .on_action(cx.listener(Self::on_cut_books))
             .on_action(cx.listener(Self::on_focused_book_clipboard))
@@ -1097,6 +1363,7 @@ impl BrowsePage {
             .child(components::remaining_space_column().child(body))
             .children(selection_footer)
             .children(chip_menu)
+            .children(book_menu)
             .children(folder_overlay)
             .children(options_sheet)
     }
@@ -1122,7 +1389,7 @@ impl Render for BrowsePage {
             let body = div().size_full().child(detail).into_any_element();
             self.render_shell(topbar, body, None, window, cx)
         } else {
-            let topbar = if self.shown_graph().is_some() { div().h(px(0.0)).flex_none().into_any_element() } else { self.render_topbar(window, cx) };
+            let topbar = if self.is_graph_view() { div().h(px(0.0)).flex_none().into_any_element() } else { self.render_topbar(window, cx) };
             let body = self.render_body(window, cx);
             let options_sheet = self.render_browse_options_sheet(cx);
             self.render_shell(topbar, body, options_sheet, window, cx)
@@ -1145,7 +1412,7 @@ mod tests {
     use std::{cell::RefCell, fs};
 
     #[gpui::test]
-    async fn search_debounces_across_hiding_and_cancels_when_opening_a_result(cx: &mut TestAppContext) {
+    async fn search_updates_immediately_and_clears_when_opening_a_result(cx: &mut TestAppContext) {
         let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let (_directory, _session, library, _app_client) = LibrarySession::test_context(cx).await;
         let updates = library.updates();
@@ -1161,15 +1428,9 @@ mod tests {
         visual.run_until_parked();
         visual.simulate_input("Search");
         visual.run_until_parked();
-        visual.executor().advance_clock(Duration::from_millis(200));
-        visual.run_until_parked();
         visual.simulate_input(" destination");
         visual.run_until_parked();
         page.update(&mut visual, |page, cx| page.close_search(cx));
-        visual.executor().advance_clock(Duration::from_millis(249));
-        visual.run_until_parked();
-        visual.read_entity(&navigator, |navigator, _| assert!(navigator.selection.search.is_empty()));
-        visual.executor().advance_clock(Duration::from_millis(1));
         visual.run_until_parked();
         visual.condition(&navigator, |navigator, _| navigator.selection.search == "Search destination" && navigator.listing.child(BrowseLocation::Folder(folder)).is_some()).await;
         let input = visual.read_entity(&page, |page, _| page.search_input.clone().unwrap());
@@ -1179,18 +1440,13 @@ mod tests {
             assert_eq!(input.read(cx).value().as_str(), "Search destination");
         });
         visual.simulate_input(" stale");
-        visual.run_until_parked();
-        visual.read_entity(&page, |page, _| assert!(page.search_debounce.is_some()));
         visual.update(|window, cx| page.update(cx, |page, cx| page.open_child(BrowseLocation::Folder(folder), window, cx)));
-        visual.read_entity(&page, |page, _| assert!(page.search_debounce.is_none()));
         visual.condition(&navigator, |navigator, _| navigator.destination.location == BrowseLocation::Folder(folder)).await;
-        visual.executor().advance_clock(Duration::from_millis(300));
         visual.run_until_parked();
         visual.read_entity(&page, |page, cx| {
             assert_eq!(page.navigator.read(cx).destination.location, BrowseLocation::Folder(folder));
             assert!(page.navigator.read(cx).selection.search.is_empty());
             assert!(input.read(cx).value().is_empty());
-            assert!(page.search_debounce.is_none());
         });
     }
 
@@ -1212,8 +1468,8 @@ mod tests {
         assert_eq!(*side, BrowseSplitSide::Right);
         assert_eq!(session.library_id, Some(*library.backend().id()));
         assert_eq!(session.route, crate::LibraryRoute::Folders.into());
-        assert_eq!(session.pages[0].path, [(BrowseLocation::Folder(folder), "Split destination".into())]);
-        assert!(session.pages[0].detail.is_none());
+        assert_eq!(session.page.as_ref().unwrap().path, [(BrowseLocation::Folder(folder), "Split destination".into())]);
+        assert!(session.page.as_ref().unwrap().detail.is_none());
     }
 
     async fn import_clipboard_books(library: &LibraryContext) -> tempfile::TempDir {
@@ -1414,6 +1670,8 @@ mod tests {
                             download_requested: false,
                             format_category: LibraryFileTypeFilter::Book,
                             audiobook_duration_ms: None,
+                            size_bytes: None,
+                            format: None,
                             added_at: 0,
                             source_directory: None,
                         },
@@ -1479,7 +1737,7 @@ mod tests {
         navigator.update(cx, |navigator, cx| {
             use super::super::listing::{BrowseSection, chip_id};
             use library_model::BrowseRow;
-            let row = |id, name: &str| BrowseRow { id: BrowseLocation::Folder(id), name: name.into(), path: None, book_count: 0, downloaded_book_count: 0 };
+            let row = |id, name: &str| BrowseRow { id: BrowseLocation::Folder(id), name: name.into(), path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None };
             let parent_row = row(parent, "Parent");
             navigator.listing.sections = vec![BrowseSection { parent: parent_row.clone(), children: vec![row(first, "First"), row(second, "Second")], books: Vec::new(), book_count: Some(0) }];
             navigator.listing.children = Rc::new(vec![parent_row.clone()]);

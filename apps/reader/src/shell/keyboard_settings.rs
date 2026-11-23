@@ -21,7 +21,7 @@ pub(crate) fn with_keyboard_settings<C: 'static>(general: AnyElement, window: &m
     let theme = components::browser_theme(cx);
     div().size_full().min_h_0().min_w_0().flex().flex_col()
         .when(keyboard, |panel| panel.key_context("ShortcutSettings"))
-        .child(if keyboard { components::reader_settings_tab_body(theme).child(components::reader_settings_group(theme).child(editor)).into_any_element() } else { general })
+        .child(if keyboard { components::reader_settings_tab_body(theme, window).child(components::reader_settings_group(theme).child(editor)).into_any_element() } else { general })
         .into_any_element()
 }
 

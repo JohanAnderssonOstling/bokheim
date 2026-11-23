@@ -1,6 +1,7 @@
 //! Browser audiobook presentation state and lifetime leases.
-use operation_failure::OperationError;
 use crate::transport::resources::{AsyncCallback, LocalMediaLease};
+use operation_failure::OperationError;
+use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 /// Keeps browser-owned local media alive while the player uses its object URL.
@@ -35,7 +36,11 @@ where
     }
     pub fn direct_config(&self) -> Result<JsValue, OperationError> {
         let Some(config) = &self.direct else { return Ok(JsValue::UNDEFINED) };
-        let json = serde_json::to_string(config).map_err(OperationError::operation)?;
-        js_sys::JSON::parse(&json).map_err(OperationError::from)
+        playback_config(config)
     }
+}
+
+/// Preserve the playback object's JSON representation without a text round trip.
+pub fn playback_config(config: &impl Serialize) -> Result<JsValue, OperationError> {
+    config.serialize(&serde_wasm_bindgen::Serializer::json_compatible()).map_err(OperationError::operation)
 }

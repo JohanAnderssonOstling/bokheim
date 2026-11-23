@@ -5,7 +5,6 @@
 //! themselves stay with each reader, because an EPUB annotation and a PDF
 //! annotation genuinely offer different actions.
 
-
 use gpui::prelude::*;
 use gpui::{AnyElement, App, ClickEvent, Context, IntoElement, Window, div, px};
 use std::cell::Cell;
@@ -203,19 +202,22 @@ pub(crate) fn with_sidebar(sidebar: AnyElement, document: AnyElement, partial: b
 pub(crate) fn sidebar_sheet(sidebar: AnyElement, partial: bool, window: &Window) -> AnyElement {
     let mobile = ui_components::uses_mobile_reader_controls(window);
     let safe_area = window.insets().effective();
+    let bottom = if mobile { safe_area.bottom + gpui::rems(ui_components::BOTTOM_NAV_HEIGHT_REM).to_pixels(window.rem_size()) } else { px(0.0) };
+    if mobile && partial {
+        let max_height = (window.viewport_size().height * PARTIAL_SHEET_MAX_HEIGHT - safe_area.top - bottom).max(px(0.0));
+        return div().absolute().left_0().right_0().bottom(bottom).max_h(max_height).flex().flex_col().occlude().child(sidebar).into_any_element();
+    }
     let top = match (mobile, partial) {
-        (true, true) => safe_area.top + window.viewport_size().height * PARTIAL_SHEET_GAP,
-        (true, false) => safe_area.top,
+        (true, _) => safe_area.top,
         (false, _) => px(0.0),
     };
-    let bottom = if mobile { safe_area.bottom + gpui::rems(ui_components::BOTTOM_NAV_HEIGHT_REM).to_pixels(window.rem_size()) } else { px(0.0) };
     // The sheet's empty space and header must occlude the document as well
     // as its controls, including the partial Settings sheet.
     div().absolute().left_0().right_0().top(top).bottom(bottom).occlude().child(sidebar).into_any_element()
 }
 
-/// How much of a phone screen a partial sheet leaves showing above it.
-const PARTIAL_SHEET_GAP: f32 = 0.35;
+/// Maximum screen fraction for Settings, before navigation and safe-area insets.
+const PARTIAL_SHEET_MAX_HEIGHT: f32 = 0.75;
 
 #[cfg(test)]
 #[path = "chrome/pointer_tests.rs"]

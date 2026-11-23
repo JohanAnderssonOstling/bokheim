@@ -3,6 +3,8 @@
 use crate::{BookDetails, BookMetadata, BookRecord, BookSubject, Contributor, ContributorId, Identifier, LanguageTag, MarcRelatorCode, Scheme, Scope};
 use prost::Message;
 use protobuf_wire::compact::{self, Codec};
+use protobuf_wire::typed::encoding::Encoder;
+use protobuf_wire::typed::{Field, Kind, Schema, WireError, invalid, validate_message};
 use serde::{Deserializer, Serializer};
 
 #[derive(Clone, PartialEq, Message)]
@@ -78,42 +80,13 @@ impl Codec for Book {
     type Value = BookRecord;
 
     fn pack(value: &BookRecord) -> Result<Vec<u8>, String> {
-        let record = Record {
-            title: value.title.clone(),
-            subtitle: value.subtitle.clone(),
-            contributors: value.contributors.iter().map(|credit| Credit { id: credit.contributor_id().as_bytes().to_vec(), name: credit.name().into(), role: credit.role_code().0.to_vec() }).collect(),
-            book: Some(Metadata {
-                identifiers: value
-                    .book
-                    .identifiers
-                    .iter()
-                    .map(|id| Identity {
-                        value: id.value.clone(),
-                        scheme: id.scheme.label().unwrap_or_default().into(),
-                        scope: match id.scope {
-                            Scope::Book => 0,
-                            Scope::Edition => 1,
-                            Scope::Work => 2,
-                        },
-                        custom_scheme: matches!(id.scheme, Scheme::Other(_)),
-                    })
-                    .collect(),
-                publishers: value.book.publishers.clone(),
-                languages: value.book.languages.iter().map(|language| language.as_str().into()).collect(),
-                year: value.book.year,
-                subjects: value
-                    .book
-                    .subjects
-                    .iter()
-                    .map(|subject| Subject { id: subject.id.clone(), name: subject.name.clone(), sort_name: subject.sort_name.clone(), source: subject.source.clone(), authority: subject.authority.clone(), code: subject.code.clone() })
-                    .collect(),
-            }),
-            description: value.description.clone(),
-        };
-        if record.encoded_len() > protobuf_wire::MAX_DECODED_REQUEST_BYTES {
+        let length = encoded_len(value).map_err(|error| error.to_string())?;
+        if length > protobuf_wire::MAX_DECODED_REQUEST_BYTES {
             return Err("book record exceeds its transport limit".into());
         }
-        Ok(record.encode_to_vec())
+        let mut output = Vec::with_capacity(length);
+        encode_fields(value, &mut Encoder::new(&mut output)).map_err(|error| error.to_string())?;
+        Ok(output)
     }
 
     fn unpack(bytes: &[u8]) -> Result<BookRecord, String> {
@@ -312,5 +285,137 @@ mod tests {
         let compact = protobuf_wire::encoded_len(&value).unwrap();
         let previous = protobuf_wire::encoded_len(&previous).unwrap();
         assert!(compact * 2 < previous, "compact={compact} previous={previous}");
+    }
+}
+
+/// Exact protobuf size without cloning metadata or allocating a buffer.
+pub fn encoded_len(record: &BookRecord) -> Result<usize, WireError> {
+    let mut encoder = Encoder::bounded::<Record>(protobuf_wire::MAX_DECODED_REQUEST_BYTES)?;
+    encode_fields(record, &mut encoder)?;
+    Ok(encoder.len())
+}
+
+/// Write borrowed record fields into an enclosing protobuf encoder.
+pub fn encode_fields(record: &BookRecord, encoder: &mut Encoder<'_>) -> Result<(), WireError> {
+    fn string(encoder: &mut Encoder<'_>, tag: u32, value: &str) -> Result<(), WireError> {
+        if !value.is_empty() {
+            encoder.bytes(tag, value.as_bytes())?;
+        }
+        Ok(())
+    }
+    fn optional(encoder: &mut Encoder<'_>, tag: u32, value: &Option<String>) -> Result<(), WireError> {
+        if let Some(value) = value {
+            encoder.bytes(tag, value.as_bytes())?;
+        }
+        Ok(())
+    }
+    string(encoder, 1, &record.title)?;
+    optional(encoder, 2, &record.subtitle)?;
+    for credit in &record.contributors {
+        encoder.message(3, |encoder| {
+            encoder.bytes(1, credit.contributor_id().as_bytes())?;
+            string(encoder, 2, credit.name())?;
+            encoder.bytes(3, &credit.role_code().0)?;
+            Ok(())
+        })?;
+    }
+    encoder.message(4, |encoder| {
+        for id in &record.book.identifiers {
+            encoder.message(1, |encoder| {
+                string(encoder, 1, &id.value)?;
+                string(encoder, 2, id.scheme.label().unwrap_or_default())?;
+                let scope = match id.scope {
+                    Scope::Book => 0,
+                    Scope::Edition => 1,
+                    Scope::Work => 2,
+                };
+                if scope != 0 {
+                    encoder.varint(3, scope)?;
+                }
+                if matches!(id.scheme, Scheme::Other(_)) {
+                    encoder.varint(4, 1)?;
+                }
+                Ok(())
+            })?;
+        }
+        for publisher in &record.book.publishers {
+            encoder.bytes(2, publisher.as_bytes())?;
+        }
+        for language in &record.book.languages {
+            encoder.bytes(3, language.as_str().as_bytes())?;
+        }
+        if let Some(year) = record.book.year {
+            encoder.varint(4, (((year as u32) << 1) ^ ((year >> 31) as u32)) as u64)?;
+        }
+        for subject in &record.book.subjects {
+            encoder.message(5, |encoder| {
+                optional(encoder, 1, &subject.id)?;
+                string(encoder, 2, &subject.name)?;
+                optional(encoder, 3, &subject.sort_name)?;
+                string(encoder, 4, &subject.source)?;
+                optional(encoder, 5, &subject.authority)?;
+                optional(encoder, 6, &subject.code)?;
+                Ok(())
+            })?;
+        }
+        Ok(())
+    })?;
+    string(encoder, 5, &record.description)?;
+    Ok(())
+}
+
+/// Typed record bytes used inside the independently versioned sync-state schema.
+pub fn encode(record: &BookRecord) -> Result<Vec<u8>, WireError> {
+    Book::pack(record).map_err(invalid)
+}
+pub fn decode(bytes: &[u8]) -> Result<BookRecord, WireError> {
+    validate_message::<Record>(bytes, protobuf_wire::MAX_DECODED_REQUEST_BYTES)?;
+    Book::unpack(bytes).map_err(invalid)
+}
+pub fn schema() -> &'static [Field] {
+    Record::fields()
+}
+impl Schema for Record {
+    fn fields() -> &'static [Field] {
+        &[
+            Field { tag: 1, kind: Kind::Bytes(4096), count: 1 },
+            Field { tag: 2, kind: Kind::Bytes(4096), count: 1 },
+            Field { tag: 3, kind: Kind::Message(Credit::fields), count: 4096 },
+            Field { tag: 4, kind: Kind::Message(Metadata::fields), count: 1 },
+            Field { tag: 5, kind: Kind::Bytes(8 * 1024 * 1024), count: 1 },
+        ]
+    }
+}
+impl Schema for Credit {
+    fn fields() -> &'static [Field] {
+        &[Field { tag: 1, kind: Kind::Bytes(16), count: 1 }, Field { tag: 2, kind: Kind::Bytes(4096), count: 1 }, Field { tag: 3, kind: Kind::Bytes(3), count: 1 }]
+    }
+}
+impl Schema for Metadata {
+    fn fields() -> &'static [Field] {
+        &[
+            Field { tag: 1, kind: Kind::Message(Identity::fields), count: 4096 },
+            Field { tag: 2, kind: Kind::Bytes(4096), count: 4096 },
+            Field { tag: 3, kind: Kind::Bytes(4096), count: 4096 },
+            Field { tag: 4, kind: Kind::Varint(u32::MAX as u64), count: 1 },
+            Field { tag: 5, kind: Kind::Message(Subject::fields), count: 4096 },
+        ]
+    }
+}
+impl Schema for Identity {
+    fn fields() -> &'static [Field] {
+        &[Field { tag: 1, kind: Kind::Bytes(4096), count: 1 }, Field { tag: 2, kind: Kind::Bytes(4096), count: 1 }, Field { tag: 3, kind: Kind::Varint(2), count: 1 }, Field { tag: 4, kind: Kind::Varint(1), count: 1 }]
+    }
+}
+impl Schema for Subject {
+    fn fields() -> &'static [Field] {
+        &[
+            Field { tag: 1, kind: Kind::Bytes(4096), count: 1 },
+            Field { tag: 2, kind: Kind::Bytes(4096), count: 1 },
+            Field { tag: 3, kind: Kind::Bytes(4096), count: 1 },
+            Field { tag: 4, kind: Kind::Bytes(4096), count: 1 },
+            Field { tag: 5, kind: Kind::Bytes(4096), count: 1 },
+            Field { tag: 6, kind: Kind::Bytes(4096), count: 1 },
+        ]
     }
 }

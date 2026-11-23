@@ -27,5 +27,3 @@ pub mod kobo {
 
 /// Gate background side effects during a host-owned update startup trial.
 pub use client_platform_runtime::executor::defer_background_work;
-#[cfg(not(target_arch = "wasm32"))]
-pub use client_platform_runtime::transfers;

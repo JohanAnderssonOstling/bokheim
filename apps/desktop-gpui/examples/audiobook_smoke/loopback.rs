@@ -29,7 +29,7 @@ impl RemoteAudio {
         }
         if !withheld.is_file() { return Err("missing imported media: fixture layout changed".into()); }
         let hash = fixture.record.locator.book_id();
-        let sql = format!("UPDATE book_dir SET is_downloaded=0,local_hash='' WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash='{hash}'); SELECT changes();");
+        let sql = format!("UPDATE book_dir SET is_downloaded=0,local_hash=NULL WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash='{hash}'); SELECT changes();");
         let updated = std::process::Command::new("sqlite3").arg(origin.join(".bokheim/library.db")).arg(sql).output()?;
         if !updated.status.success() || String::from_utf8_lossy(&updated.stdout).trim() != "1" {
             return Err("could not mark the isolated book as remote".into());

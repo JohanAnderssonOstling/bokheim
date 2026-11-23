@@ -18,8 +18,7 @@ struct Host {
 }
 
 impl Client {
-    /// Opens device-local documents. Text search and metered-transfer changes
-    /// require the connected client supplied by the application host.
+    /// Opens device-local preference documents.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into(), store: Arc::new(OnceCell::new()), host: None }
     }
@@ -66,9 +65,6 @@ impl Client {
     }
 
     pub async fn update_browsing(&self, patch: BrowsingPreferencePatch) -> io::Result<BrowsingPreferences> {
-        if self.host.is_none() && matches!(patch, BrowsingPreferencePatch::TextSearch(_) | BrowsingPreferencePatch::AllowMeteredTransfers(_)) {
-            return Err(io::Error::new(io::ErrorKind::Unsupported, "this preference requires the connected preference client"));
-        }
         self.save(self.store().await?.update_browsing(patch)).await
     }
 

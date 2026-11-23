@@ -8,7 +8,7 @@ use crate::books::audiobook::AudiobookSql;
 use crate::books::toc::TocSql;
 use crate::import::ImportCommitSql;
 use crate::purge::remove_book;
-use crate::query_methods::query_rows;
+use crate::query_methods::{parse_uuid_column, query_rows, text_column};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shared_sql::SharedSql;
 use crate::stored_document;
@@ -45,46 +45,36 @@ pub(crate) fn project_dirty(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
     for (hash, kind) in query_rows(|callback| tx.projection_dirty_books(callback), |row| Ok((row.get::<_, BookId>(0)?, row.get::<_, String>(1)?)))? {
         books.entry(hash).or_default().insert(kind);
     }
+    let directory_scope = if directories { Some(refresh_directory_intents(tx, &dirty)?) } else { None };
     let purged = if directories || dirty.iter().any(|(kind, _, _)| matches!(kind.as_str(), "placement" | "book_projection")) {
-        let mut purged = HashSet::new();
-        let mut parents = HashMap::new();
-
-        for bytes in query_rows(|callback| tx.projection_directory_lifecycles_and_parents(callback), |row| row.get::<_, Vec<u8>>(0))? {
-            match wire::decode::<LibraryStateEntry>(&bytes, wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? {
-                LibraryStateEntry::DirectoryParent { dir_id, parent_id } => {
-                    parents.insert(dir_id, parent_id);
-                }
-                LibraryStateEntry::DirectoryLifecycle { dir_id, value: DirectoryLifecycleState::Purged } if dir_id != ROOT_DIR_ID => {
-                    purged.insert(dir_id);
-                }
-                _ => {}
+        let cached: bool = tx.query_row("SELECT valid FROM local_directory_cache WHERE singleton=1", [], |row| row.get(0))?;
+        if directories || !cached {
+            if !directories {
+                refresh_directory_intents(tx, &dirty)?;
             }
+            tx.execute("DELETE FROM local_purged_directory", [])?;
+            tx.execute(
+                "WITH RECURSIVE purged(id) AS (
+                    SELECT id FROM local_directory_intent WHERE lifecycle=2 AND id!=?1
+                    UNION SELECT d.id FROM local_directory_intent d JOIN purged p ON d.parent_id=p.id WHERE d.id!=?1
+                ) INSERT INTO local_purged_directory SELECT id FROM purged",
+                [ROOT_DIR_ID.to_string()],
+            )?;
+            tx.execute("UPDATE local_directory_cache SET valid=1 WHERE singleton=1", [])?;
         }
-        if !purged.is_empty() {
-            let mut children = HashMap::<DirId, Vec<DirId>>::new();
-            for (directory, parent) in parents {
-                if directory != ROOT_DIR_ID {
-                    children.entry(parent).or_default().push(directory);
-                }
-            }
-            let mut pending: Vec<_> = purged.iter().copied().collect();
-            while let Some(parent) = pending.pop() {
-                for child in children.remove(&parent).into_iter().flatten() {
-                    if purged.insert(child) {
-                        pending.push(child);
-                    }
-                }
-            }
-        }
-        purged
+        tx.prepare_cached("SELECT id FROM local_purged_directory")?.query_map([], |row| row.get::<_, String>(0))?.map(|id| DirId::parse_str(&id?).map_err(DatabaseError::operation)).collect::<Result<HashSet<_>, _>>()?
     } else {
         HashSet::new()
     };
-    if directories {
-        // Directory deletion cascades placements away. Reproject memberships
-        // when directory winners change, including a later explicit recreation.
-        for hash in query_rows(|callback| tx.projection_missing_directory_books(callback), |row| row.get::<_, BookId>(0))? {
-            books.entry(hash).or_default().insert("placement".into());
+    if let Some(scope) = &directory_scope {
+        // Only affected folders can restore memberships lost to a purge.
+        let mut statement = tx.prepare_cached(
+            "SELECT DISTINCT v.state_key FROM json_each(?1) affected
+            CROSS JOIN sync_state_version v INDEXED BY sync_placement_directory ON v.state_subkey=affected.value AND v.state_kind='placement' AND v.body IS NOT NULL
+            LEFT JOIN dir d ON d.id=v.state_subkey WHERE d.id IS NULL",
+        )?;
+        for hash in statement.query_map([scope], |row| row.get::<_, BookId>(0))? {
+            books.entry(hash?).or_default().insert("placement".into());
         }
     }
     let loading = ProfileSpan::new("metadata_state_loading", "projection");
@@ -146,29 +136,114 @@ pub(crate) fn project_dirty(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
             let body = wire::decode::<LibraryStateEntry>(&bytes, wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)?;
             project_value(tx, &body, &purged)?;
         }
-        project_directory_tree(tx, &purged)?;
+        project_directory_tree(tx, &purged, directory_scope.as_deref().unwrap())?;
     }
     tx.projection_clear_dirty()?;
     Ok(())
 }
 
-fn project_directory_tree(tx: &Transaction<'_>, purged: &HashSet<DirId>) -> Result<(), DatabaseError> {
-    // Directory writes invalidate folder membership; the next browse refreshes
-    // it once from the final tree, just as for local directory batches.
-    let before = query_rows(|callback| tx.projection_directory_rows(callback), |r| Ok((r.get::<_, String>(0)?, (r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?))))?.into_iter().collect::<HashMap<_, _>>();
-    // Read canonical winners; the directory columns cache those winners
-    // alongside the repaired display tree.
-    let mut intents = HashMap::new();
-    let decode = |bytes: &[u8]| wire::decode::<LibraryStateEntry>(bytes, wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation);
-    for (name, parent, lifecycle) in query_rows(|callback| tx.projection_directory_intents(callback), |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?)))? {
-        let (LibraryStateEntry::DirectoryName { dir_id: id, name }, LibraryStateEntry::DirectoryParent { parent_id, .. }, LibraryStateEntry::DirectoryLifecycle { value: lifecycle, .. }) =
-            (decode(&name)?, decode(&parent)?, decode(&lifecycle)?)
-        else {
-            return Err(DatabaseError::message("invalid canonical directory registers"));
-        };
-        if id != ROOT_DIR_ID {
-            intents.insert(id, DirectoryIntent { id, parent_id, name, lifecycle });
+/// Decode only admitted winners. The cache retains purged and incomplete
+/// intents, which cannot be recovered from the disposable display table.
+fn refresh_directory_intents(tx: &Transaction<'_>, dirty: &[(String, StateKey, String)]) -> Result<String, DatabaseError> {
+    let ready: bool = tx.query_row("SELECT intents_valid FROM local_directory_cache WHERE singleton=1", [], |row| row.get(0))?;
+    let seeds = dirty.iter().filter(|(kind, _, _)| kind.starts_with("directory_")).filter_map(|(_, key, _)| key.text()).collect::<Vec<_>>();
+    let seeds = serde_json::to_string(&seeds).map_err(DatabaseError::operation)?;
+    let descendants = |seeds: &str| -> Result<Vec<String>, DatabaseError> {
+        Ok(tx
+            .prepare_cached(
+                "WITH RECURSIVE affected(id) AS (
+            SELECT value FROM json_each(?1)
+            UNION SELECT d.id FROM local_directory_intent d JOIN affected a ON d.parent_id=a.id WHERE d.id!=?2
+            UNION SELECT d.id FROM dir d JOIN affected a ON d.parent_id=a.id WHERE d.id!=?2
+        ) SELECT id FROM affected",
+            )?
+            .query_map((seeds, ROOT_DIR_ID.to_string()), |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?)
+    };
+    let mut affected = descendants(&seeds)?;
+    // Old parents still participate in collision repair after a move.
+    let old_parents =
+        tx.prepare_cached("SELECT parent_id FROM local_directory_intent WHERE id IN (SELECT value FROM json_each(?1)) AND parent_id IS NOT NULL")?.query_map([&seeds], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+    let sql = if ready {
+        "SELECT v.body FROM sync_projection_dirty d JOIN sync_state_version v USING(state_kind,state_key,state_subkey)
+         WHERE d.state_kind IN ('directory_name','directory_parent','directory_lifecycle') AND v.body IS NOT NULL"
+    } else {
+        "SELECT body FROM sync_state_version WHERE state_kind IN ('directory_name','directory_parent','directory_lifecycle') AND body IS NOT NULL"
+    };
+    let values = tx.prepare_cached(sql)?.query_map([], |row| row.get::<_, Vec<u8>>(0))?.collect::<Result<Vec<_>, _>>()?;
+    for bytes in values {
+        let entry = wire::decode::<LibraryStateEntry>(&bytes, wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)?;
+        match entry {
+            LibraryStateEntry::DirectoryName { dir_id, name } => {
+                tx.execute("INSERT INTO local_directory_intent(id,name) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET name=excluded.name", (dir_id.to_string(), name))?;
+            }
+            LibraryStateEntry::DirectoryParent { dir_id, parent_id } => {
+                tx.execute("INSERT INTO local_directory_intent(id,parent_id) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET parent_id=excluded.parent_id", (dir_id.to_string(), parent_id.to_string()))?;
+            }
+            LibraryStateEntry::DirectoryLifecycle { dir_id, value } => {
+                let value = match value {
+                    DirectoryLifecycleState::Present => 0,
+                    DirectoryLifecycleState::Deleted => 1,
+                    DirectoryLifecycleState::Purged => 2,
+                };
+                tx.execute("INSERT INTO local_directory_intent(id,lifecycle) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET lifecycle=excluded.lifecycle", (dir_id.to_string(), value))?;
+            }
+            _ => return Err(DatabaseError::message("invalid canonical directory register")),
         }
+    }
+    tx.execute("UPDATE local_directory_cache SET intents_valid=1 WHERE singleton=1", [])?;
+    if !ready {
+        affected.extend(tx.prepare_cached("SELECT id FROM local_directory_intent UNION SELECT id FROM dir")?.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?);
+    } else {
+        affected.extend(descendants(&seeds)?);
+    }
+    affected.extend(old_parents);
+    let affected = serde_json::to_string(&affected).map_err(DatabaseError::operation)?;
+    // Ancestors supply lifecycle/cycle context. Their siblings supply all name
+    // reservations; unrelated sibling subtrees need no decoding or projection.
+    // Include repaired root children, since a cycle repair can collide at root.
+    let scope = tx
+        .prepare_cached(
+            "WITH RECURSIVE context(id) AS (
+        SELECT value FROM json_each(?1)
+        UNION SELECT id FROM local_directory_intent WHERE parent_id=?2
+        UNION SELECT id FROM dir WHERE parent_id=?2 AND deleted_at IS NULL
+        UNION SELECT d.parent_id FROM context c CROSS JOIN local_directory_intent d ON d.id=c.id WHERE d.parent_id IS NOT NULL AND d.id!=?2
+        UNION SELECT d.parent_id FROM context c CROSS JOIN dir d ON d.id=c.id WHERE d.id!=?2
+    ), parents(id) AS (
+        SELECT d.parent_id FROM context c CROSS JOIN local_directory_intent d ON d.id=c.id
+        UNION SELECT d.parent_id FROM context c CROSS JOIN dir d ON d.id=c.id
+    ), scope(id) AS (
+        SELECT id FROM context
+        UNION SELECT d.id FROM parents p CROSS JOIN local_directory_intent d ON d.parent_id=p.id
+        UNION SELECT d.id FROM parents p CROSS JOIN dir d ON d.parent_id=p.id WHERE d.deleted_at IS NULL
+    ) SELECT id FROM scope WHERE id!=?2",
+        )?
+        .query_map((&affected, ROOT_DIR_ID.to_string()), |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    serde_json::to_string(&scope).map_err(DatabaseError::operation)
+}
+
+fn project_directory_tree(tx: &Transaction<'_>, purged: &HashSet<DirId>, scope: &str) -> Result<(), DatabaseError> {
+    let before = tx
+        .prepare_cached("SELECT d.id,d.parent_id,d.name,d.deleted_at IS NOT NULL FROM json_each(?1) affected JOIN dir d ON d.id=affected.value")?
+        .query_map([scope], |r| Ok((parse_uuid_column(text_column(r, 0)?, 0)?, (parse_uuid_column(text_column(r, 1)?, 1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?))))?
+        .collect::<Result<HashMap<_, _>, _>>()?;
+    let mut intents = HashMap::new();
+    let rows = tx
+        .prepare_cached(
+            "SELECT d.id,d.parent_id,d.name,d.lifecycle FROM json_each(?1) affected JOIN local_directory_intent d ON d.id=affected.value
+        WHERE d.parent_id IS NOT NULL AND d.name IS NOT NULL AND d.lifecycle IS NOT NULL",
+        )?
+        .query_map([scope], |row| Ok((parse_uuid_column(text_column(row, 0)?, 0)?, parse_uuid_column(text_column(row, 1)?, 1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (id, parent_id, name, lifecycle) in rows {
+        let lifecycle = match lifecycle {
+            0 => DirectoryLifecycleState::Present,
+            1 => DirectoryLifecycleState::Deleted,
+            _ => DirectoryLifecycleState::Purged,
+        };
+        intents.insert(id, DirectoryIntent { id, parent_id, name, lifecycle });
     }
     let projection = library_replica::project_directories(&intents);
     let expected: BTreeMap<_, _> = intents
@@ -178,33 +253,35 @@ fn project_directory_tree(tx: &Transaction<'_>, purged: &HashSet<DirId>) -> Resu
             let suppressed = projection.suppressed.contains(id);
             let parent = if suppressed { ROOT_DIR_ID } else { projection.parents[id] };
             let name = projection.names.get(id).unwrap_or(&intent.name);
-            (*id, (parent.to_string(), name.clone(), suppressed))
+            (*id, (parent, name.clone(), suppressed))
         })
         .collect();
     // Local commands may already have installed the final display. In
     // particular, creating an empty folder must not invalidate every placement.
     let unchanged = before.iter().all(|(id, actual)| {
-        if id == &ROOT_DIR_ID.to_string() {
+        if *id == ROOT_DIR_ID {
             return true;
         }
-        let Ok(id) = DirId::parse_str(id) else {
-            return false;
-        };
-        if purged.contains(&id) {
+        if purged.contains(id) {
             return false;
         }
-        expected.get(&id).map_or(actual.2, |state| actual == state)
+        expected.get(id).map_or(actual.2, |state| actual == state)
     });
-    let unchanged = unchanged && expected.keys().all(|id| before.contains_key(&id.to_string()));
+    let unchanged = unchanged && expected.keys().all(|id| before.contains_key(id));
     if unchanged {
         return Ok(());
     }
-    tx.hide_remote_directories().map_err(DatabaseError::operation)?;
-    // Detach the old tree before installing new edges. Even hidden rows are
-    // traversed by folder queries, so intermediate cycles are unsafe.
-    tx.projection_detach_directories()?;
+    let changed = before
+        .iter()
+        .filter_map(|(id, actual)| (*id != ROOT_DIR_ID && expected.get(id) != Some(actual)).then_some(*id))
+        .collect::<Vec<_>>();
+    // Hide and detach changing edges before installing the final tree so
+    // intermediate cycles and live-name collisions cannot escape the writer.
+    for id in &changed {
+        tx.execute("UPDATE dir SET deleted_at=1,parent_id=?2 WHERE id=?1", (id.to_string(), ROOT_DIR_ID.to_string()))?;
+    }
     for id in purged {
-        if before.contains_key(&id.to_string()) {
+        if before.contains_key(id) {
             let id = id.to_string();
             #[cfg(not(target_arch = "wasm32"))]
             tx.projection_queue_purged_directory_files(&id)?;
@@ -214,20 +291,36 @@ fn project_directory_tree(tx: &Transaction<'_>, purged: &HashSet<DirId>) -> Resu
         }
     }
     for (id, (parent, name, _)) in &expected {
-        tx.ensure_remote_directory_placeholder(&id.to_string())?;
-        tx.project_remote_directory(&id.to_string(), parent, name)?;
+        if before.get(id) == expected.get(id) {
+            continue;
+        }
+        let directory = id.to_string();
+        tx.ensure_remote_directory_placeholder(&directory)?;
+        {
+            // A recreated ancestor can revive descendants whose disposable
+            // rows were removed or replaced by placeholders after a purge.
+            let intent = &intents[id];
+            tx.set_remote_directory_name(&directory, &intent.name)?;
+            tx.set_remote_directory_parent(&directory, &intent.parent_id.to_string())?;
+            let lifecycle = match intent.lifecycle {
+                DirectoryLifecycleState::Present => 0,
+                DirectoryLifecycleState::Deleted => 1,
+                DirectoryLifecycleState::Purged => 2,
+            };
+            tx.set_remote_directory_lifecycle(&directory, lifecycle)?;
+        }
+        tx.project_remote_directory(&directory, &parent.to_string(), name)?;
     }
     for id in projection.ordered_active {
-        tx.activate_remote_directory(&id.to_string()).map_err(DatabaseError::operation)?;
+        if before.get(&id) != expected.get(&id) {
+            tx.activate_remote_directory(&id.to_string()).map_err(DatabaseError::operation)?;
+        }
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
         let changed = expected
             .iter()
-            .filter_map(|(dir, state)| {
-                let id = dir.to_string();
-                (before.get(&id) != Some(state)).then_some(id)
-            })
+            .filter_map(|(id, state)| (before.get(id) != Some(state)).then(|| id.to_string()))
             .collect::<Vec<_>>();
         let mut paths = crate::placements::FolderPaths::for_directories(tx, changed.iter().map(String::as_str))?;
         for id in changed {
@@ -317,8 +410,10 @@ fn project_book(tx: &Transaction<'_>, hash: &BookId, values: &[(LibraryStateEntr
             }
         }
     }
-    if needs("annotation") {
+    if changed.contains("book_projection") {
         tx.projection_trim_annotations(&hash)?;
+    } else if needs("annotation") {
+        tx.projection_trim_dirty_annotations(&hash)?;
     }
     if needs("placement") {
         tx.projection_trim_placements(&hash)?;
@@ -516,11 +611,11 @@ mod tests {
         }
         let lookup = || conn.prepare_cached(include_str!("projection/placement_name.sql")).unwrap().query_row(rusqlite::params![directory, hash], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))).unwrap();
         assert_eq!(lookup(), ("Untitled".into(), false));
-        conn.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash) SELECT ?1,row_id,'UNTITLED','' FROM book WHERE content_hash=?2", rusqlite::params![directory, other]).unwrap();
+        conn.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash) SELECT ?1,row_id,'UNTITLED',NULL FROM book WHERE content_hash=?2", rusqlite::params![directory, other]).unwrap();
         assert_eq!(lookup(), ("Untitled".into(), true));
         conn.execute("UPDATE book_dir SET deleted_at=1", []).unwrap();
         assert_eq!(lookup(), ("Untitled".into(), false));
-        conn.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,deleted_at) SELECT ?1,row_id,'Retained','',1 FROM book WHERE content_hash=?2", rusqlite::params![directory, hash]).unwrap();
+        conn.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,deleted_at) SELECT ?1,row_id,'Retained',NULL,1 FROM book WHERE content_hash=?2", rusqlite::params![directory, hash]).unwrap();
         assert_eq!(lookup(), ("Retained".into(), false));
         conn.execute("UPDATE book_dir SET file_name='retained',deleted_at=NULL WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1)", [other]).unwrap();
         assert_eq!(lookup(), ("Retained".into(), true));
@@ -534,7 +629,7 @@ mod tests {
         for number in 1..=256 {
             let hash = BookId::new(&format!("{number:064x}"));
             connection.execute("INSERT INTO book(content_hash) VALUES(?1)", [&hash]).unwrap();
-            connection.execute("INSERT INTO sync_book_record(state_kind,content_hash,body,publication) VALUES('book_add',?1,?2,x'00')", rusqlite::params![hash, number.to_string().as_bytes()]).unwrap();
+            connection.execute("INSERT INTO sync_state_version(state_kind,state_key,state_subkey,changed_at,conflict_rank,replica_id,replica_seq,body,book_key) VALUES('book_add',?1,'',0,0,'',0,?2,?1)", rusqlite::params![hash, number.to_string().as_bytes()]).unwrap();
         }
         for (full, kinds, expected) in [(true, "[]", 1), (false, "[\"book_add\"]", 1), (false, "[\"reading_position\"]", 0)] {
             let mut bodies = Vec::new();
@@ -591,6 +686,6 @@ mod tests {
         })
         .unwrap();
         assert_eq!(db.reading_position(&hash).unwrap().as_deref(), Some("epubcfi(/6/2)"));
-        assert_eq!(db.connection.fixtures_read_transaction_probe(|row| row.get::<_, i64>(0)).unwrap(), 2);
+        assert_eq!(db.connection.fixtures_read_transaction_probe(|row| row.get::<_, i64>(0)).unwrap(), 1, "unchanged projection must not rewrite metadata");
     }
 }

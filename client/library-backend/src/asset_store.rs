@@ -2,17 +2,19 @@
 
 #[cfg(target_arch = "wasm32")]
 use crate::executor::BoxedBackendFuture;
+#[cfg(target_arch = "wasm32")]
+use cpu_contract::{CpuHost, RemoteHashSession};
 pub use library_files::asset_store::*;
 #[cfg(target_arch = "wasm32")]
 use std::sync::Arc;
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn open(locator: &str, cpu: Arc<dyn cpu_host::CpuHost>) -> Result<AssetStore, AssetStoreError> {
+pub(crate) fn open(locator: &str, cpu: Arc<dyn CpuHost>) -> Result<AssetStore, AssetStoreError> {
     AssetStore::open(locator, Arc::new(WorkerHashService(cpu)))
 }
 
 #[cfg(target_arch = "wasm32")]
-struct WorkerHashService(Arc<dyn cpu_host::CpuHost>);
+struct WorkerHashService(Arc<dyn CpuHost>);
 #[cfg(target_arch = "wasm32")]
 impl std::fmt::Debug for WorkerHashService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -24,13 +26,13 @@ impl library_files::hashing::HashService for WorkerHashService {
     fn start(&self) -> BoxedBackendFuture<'static, Result<Box<dyn library_files::hashing::HashSession>, AssetStoreError>> {
         let host = self.0.clone();
         Box::pin(async move {
-            let session = cpu_host::RemoteHashSession::new(&host).await.map_err(AssetStoreError::operation)?;
+            let session = RemoteHashSession::new(&host).await.map_err(AssetStoreError::operation)?;
             Ok(Box::new(WorkerHashSession(session)) as Box<dyn library_files::hashing::HashSession>)
         })
     }
 }
 #[cfg(target_arch = "wasm32")]
-struct WorkerHashSession(cpu_host::RemoteHashSession);
+struct WorkerHashSession(RemoteHashSession);
 #[cfg(target_arch = "wasm32")]
 impl library_files::hashing::HashSession for WorkerHashSession {
     fn update<'a>(&'a mut self, bytes: &'a [u8]) -> BoxedBackendFuture<'a, Result<(), AssetStoreError>> {

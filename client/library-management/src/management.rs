@@ -5,7 +5,7 @@ use crate::{BackendError, LibraryId};
 use account_client::{Session, Url};
 use client_platform_runtime::storage_queue;
 use client_protocol::Failure;
-use cpu_host::CpuHost;
+use cpu_contract::CpuHost;
 use library_registry::{CloudStorageReset, LibraryEntry, LibraryRegistry};
 use library_services::account::LibraryAccount;
 use library_services::interest::{InterestLease, NotificationInterest};

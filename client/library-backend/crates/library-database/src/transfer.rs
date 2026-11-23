@@ -200,7 +200,18 @@ impl Database {
                 index += 1;
             }
         }
-        let mut statement = self.connection.prepare_cached("SELECT b.content_hash, bd.dir_id, bd.file_name FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id JOIN dir d ON d.id=bd.dir_id WHERE bd.deleted_at IS NULL AND b.deleted_at IS NULL AND d.deleted_at IS NULL AND (bd.dir_id IN (SELECT value FROM json_each(?1)) OR b.content_hash IN (SELECT unhex(value) FROM json_each(?2))) ORDER BY bd.dir_id,b.content_hash")?;
+        let mut statement = self.connection.prepare_cached(
+            "WITH selected(book_row_id,dir_id) AS (
+            SELECT bd.book_row_id,bd.dir_id FROM json_each(?1) requested JOIN book_dir bd ON bd.dir_id=requested.value
+            UNION
+            SELECT bd.book_row_id,bd.dir_id FROM json_each(?2) requested JOIN book b ON b.content_hash=unhex(requested.value) JOIN book_dir bd ON bd.book_row_id=b.row_id
+        )
+        SELECT b.content_hash,bd.dir_id,bd.file_name FROM selected
+        JOIN book_dir bd ON bd.book_row_id=selected.book_row_id AND bd.dir_id=selected.dir_id
+        JOIN book b ON b.row_id=bd.book_row_id JOIN dir d ON d.id=bd.dir_id
+        WHERE bd.deleted_at IS NULL AND b.deleted_at IS NULL AND d.deleted_at IS NULL
+        ORDER BY bd.dir_id,b.content_hash",
+        )?;
         let scope_json = serde_json::to_string(&scope).map_err(DatabaseError::operation)?;
         let books_json = serde_json::to_string(&selection.books).map_err(DatabaseError::operation)?;
         enum SelectedPlacement {
@@ -307,10 +318,7 @@ impl Database {
 
     fn book_transfer_addition_in_snapshot(&self, hash: BookId) -> Result<(BookId, BookAddition), DatabaseError> {
         let kind = "book_add";
-        let bytes = match canonical_body(&self.connection, kind, &StateKey::Book(hash), "")? {
-            Some((body, _)) => body,
-            None => self.connection.query_row("SELECT body FROM local_book_draft WHERE content_hash=?1", [hash], |row| row.get::<_, Vec<u8>>(0)).optional()?.ok_or_else(|| DatabaseError::message("source book metadata is unavailable"))?,
-        };
+        let (bytes, _) = canonical_body(&self.connection, kind, &StateKey::Book(hash), "")?.ok_or_else(|| DatabaseError::message("source book metadata is unavailable"))?;
         let (book_id, addition) = match sync_common::wire::decode(&bytes, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? {
             LibraryStateEntry::BookAdd { book_id, value } => (book_id, value),
             _ => return Err(DatabaseError::message("source book metadata is invalid")),

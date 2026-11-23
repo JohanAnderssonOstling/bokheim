@@ -1,5 +1,7 @@
+use thumbnail_contract::{BROWSE_THUMBNAIL_WIDTH, THUMBNAIL_WIDTH};
+
 /// Thumbnail requests distinguish card densities from the unmodified detail
-/// image. Stored pixel widths stay owned by the thumbnail crate.
+/// image. Stored pixel widths stay owned by the thumbnail contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum ThumbnailResolution {
     /// Adjusted 300px card JPEG.
@@ -13,8 +15,8 @@ pub enum ThumbnailResolution {
 impl ThumbnailResolution {
     pub const fn width(self) -> u32 {
         match self {
-            Self::Browse => thumbnail::BROWSE_THUMBNAIL_WIDTH,
-            Self::CardHighDensity | Self::HighDensity => thumbnail::THUMBNAIL_WIDTH,
+            Self::Browse => BROWSE_THUMBNAIL_WIDTH,
+            Self::CardHighDensity | Self::HighDensity => THUMBNAIL_WIDTH,
         }
     }
 }

@@ -10,7 +10,7 @@ pub fn numbered_folder_name(base: &str, number: usize) -> String {
 }
 
 pub fn numbered_file_name(base: &str, number: usize) -> String {
-    use crate::filenames::{MAX_FILE_NAME_BYTES, truncate_utf8};
+    use crate::filenames::{truncate_utf8, MAX_FILE_NAME_BYTES};
     let path = Path::new(base);
     let suffix = format!(" {number}");
     let (stem, extension) = match (path.file_stem().and_then(|value| value.to_str()), path.extension().and_then(|value| value.to_str())) {

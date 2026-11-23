@@ -1,9 +1,9 @@
-use crate::api::{encoded_request, send, SyncCredentials};
-use crate::state::SyncRequestError;
 use crate::PerformanceTrace;
+use crate::api::{SyncCredentials, encoded_request, send};
+use crate::state::SyncRequestError;
 use sync_common::api::assets::{
-    validate_blob_manifest_response, BlobManifestEntry, BlobManifestRequest, BlobManifestResponse, ThumbnailBatchDownloadRequest, ThumbnailBatchDownloadResponse, ThumbnailBatchEntry, ThumbnailBatchUploadRequest, ThumbnailPresenceRequest,
-    ThumbnailPresenceResponse,
+    BlobManifestEntry, BlobManifestRequest, BlobManifestResponse, ThumbnailBatchDownloadRequest, ThumbnailBatchDownloadResponse, ThumbnailBatchEntry, ThumbnailBatchUploadRequest, ThumbnailPresenceRequest, ThumbnailPresenceResponse,
+    validate_blob_manifest_response,
 };
 use sync_common::{BookId, LibraryId};
 use url::{ParseError, Url};
@@ -23,7 +23,7 @@ pub enum AssetResponseError {
     #[error("{0}")]
     Rejected(#[source] reqwest::Error),
     #[error("{0}")]
-    Wire(#[source] sync_common::transport::WireError),
+    Wire(#[source] sync_common::http::WireError),
     #[error("{0}")]
     Url(#[source] ParseError),
 }
@@ -119,17 +119,17 @@ pub async fn download_thumbnail_batch(client: &reqwest::Client, server_url: &Url
     let response = request.send().await.map_err(AssetResponseError::Retryable)?;
     let response = validate_streaming_asset_response(response)?;
     let bytes = crate::body::read(response, sync_common::api::assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).await.map_err(AssetResponseError::from)?;
-    sync_common::transport::decode(&bytes, sync_common::api::assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).map_err(AssetResponseError::Wire)
+    sync_common::http::decode(&bytes, sync_common::api::assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).map_err(AssetResponseError::Wire)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use axum::{
+        Router,
         body::{Body, Bytes},
         response::Response,
         routing::post,
-        Router,
     };
     use futures_util::StreamExt;
     use std::{convert::Infallible, time::Duration};
@@ -167,7 +167,7 @@ mod tests {
     async fn thumbnail_requests_preserve_methods_headers_and_payloads() {
         use axum::http::HeaderMap;
         use reqwest::header;
-        use sync_common::transport as wire;
+        use sync_common::http as wire;
 
         fn check_headers(headers: &HeaderMap) {
             assert_eq!(headers.get(header::AUTHORIZATION).unwrap(), "Bearer test-token");

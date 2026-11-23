@@ -5,17 +5,15 @@ use std::sync::Arc;
 
 use gpui::{AnyElement, App, BorderStyle, Bounds, Entity, IntoElement, ParentElement, PathBuilder, Styled, canvas, div, point, px, quad, size};
 
-use super::layout::{GraphEdge, GraphLayout, GraphLayoutKind, PlacedNode};
+use ui_graph_layout::{GraphEdge, GraphLayout, GraphLayoutKind, PlacedNode};
 use crate::{BrowserTheme, InfiniteCanvas, InfiniteCanvasView, browser_theme, infinite_canvas};
-
-const E_INK: bool = cfg!(feature = "kobo");
 
 /// The graph on `canvas`. `departing` is a layout fading out, drawn beneath at
 /// its opacity. `node` draws one node, told whether it is from the departing
 /// layout; it is placed and sized to the node's box.
 pub fn graph_canvas(canvas: &Entity<InfiniteCanvas>, layout: Arc<GraphLayout>, departing: Option<(Arc<GraphLayout>, f32)>, node: impl Fn(&PlacedNode, bool) -> AnyElement + 'static, cx: &App) -> InfiniteCanvasView {
     let theme = browser_theme(cx);
-    infinite_canvas(canvas).visible_content(move |viewport, camera| {
+    infinite_canvas(canvas).background(theme.page_bg).visible_content(move |viewport, camera| {
         // Keep antialiased strokes at the clip edge. The margin is in screen
         // pixels, so zooming out does not clip a fixed-width connector.
         let viewport = viewport.dilate(2.0 / camera.zoom);
@@ -26,9 +24,9 @@ pub fn graph_canvas(canvas: &Entity<InfiniteCanvas>, layout: Arc<GraphLayout>, d
         let visible = |placed: &&PlacedNode| placed.opacity > 0.0 && viewport.intersects(&placed.bounds);
         let mut scene = div().size_full();
         if let Some((departing, opacity)) = departing.filter(|(_, opacity)| *opacity > 0.0) {
-            scene = scene.child(edges(&departing, theme, camera.zoom, opacity, viewport)).children(departing.nodes.iter().filter(visible).map(|placed| place(placed, true, opacity)));
+            scene = scene.child(edges(&departing, theme, camera.zoom, opacity, viewport)).children(departing.nodes().iter().filter(visible).map(|placed| place(placed, true, opacity)));
         }
-        scene.child(edges(&layout, theme, camera.zoom, 1.0, viewport)).children(layout.nodes.iter().filter(visible).map(|placed| place(placed, false, 1.0))).into_any_element()
+        scene.child(edges(&layout, theme, camera.zoom, 1.0, viewport)).children(layout.nodes().iter().filter(visible).map(|placed| place(placed, false, 1.0))).into_any_element()
     })
 }
 
@@ -41,9 +39,9 @@ fn edge_visible(edge: &GraphEdge, viewport: Bounds<f32>) -> bool {
 
 /// Curved connectors that keep their screen width at any zoom.
 fn edges(layout: &GraphLayout, theme: BrowserTheme, zoom: f32, opacity: f32, viewport: Bounds<f32>) -> impl IntoElement {
-    let edges = layout.edges.clone();
-    let radial = layout.kind == GraphLayoutKind::AdaptiveRadial;
-    let (width, path_width): (f32, f32) = if E_INK { (1.0, 1.8) } else { (1.0, 1.5) };
+    let edges = layout.shared_edges();
+    let radial = layout.kind() == GraphLayoutKind::AdaptiveRadial;
+    let (width, path_width): (f32, f32) = (1.0, 1.5);
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {

@@ -30,10 +30,6 @@ pub(crate) const RAIL_ROUTES: [Route; 9] = [
     Route::Global(GlobalRoute::Settings),
 ];
 
-pub(crate) fn rail_routes(cx: &gpui::App) -> impl Iterator<Item = Route> + '_ {
-    RAIL_ROUTES.into_iter().filter(move |route| *route != Route::Library(LibraryRoute::Search) || crate::stores::preferences::text_search_enabled(cx))
-}
-
 /// Where the keyboard is inside the open library switcher.
 ///
 /// A grid rather than a list: rows are the add button and then one per library,
@@ -48,7 +44,6 @@ pub(super) enum SwitcherCursor {
 pub(crate) struct Sidebar {
     libraries: Entity<Libraries>,
     sync_state: Entity<crate::SyncState>,
-    _account_subscription: gpui::Subscription,
     switcher_open: bool,
     library_menu: Option<(sync_common::LibraryId, Entity<gpui_component::menu::PopupMenu>, gpui::Subscription)>,
     library_name_dialog: Option<switcher_overlay::LibraryNameDialog>,
@@ -66,20 +61,7 @@ impl gpui::EventEmitter<SplitPane> for Sidebar {}
 
 impl Sidebar {
     pub(crate) fn new(libraries: Entity<Libraries>, sync_state: Entity<crate::SyncState>, navigate: Navigate, cx: &mut Context<Self>) -> Self {
-        let account_subscription = cx.observe(&sync_state, |_, _, cx| cx.notify());
-        cx.observe_global::<crate::stores::preferences::TextSearchEnabled>(|_: &mut Self, cx| cx.notify()).detach();
-        Self {
-            libraries,
-            sync_state,
-            _account_subscription: account_subscription,
-            library_menu: None,
-            library_name_dialog: None,
-            add_library_choices: None,
-            switcher_open: false,
-            navigate,
-            switcher_cursor: SwitcherCursor::Add,
-            switcher_focus: cx.focus_handle(),
-        }
+        Self { libraries, sync_state, library_menu: None, library_name_dialog: None, add_library_choices: None, switcher_open: false, navigate, switcher_cursor: SwitcherCursor::Add, switcher_focus: cx.focus_handle() }
     }
 
     /// Draws the rail or the bottom bar, whichever the window width calls for.
@@ -127,7 +109,7 @@ impl Sidebar {
             })
         };
         let mut destinations = components::nav_rail_destinations();
-        for target in rail_routes(cx).filter(|route| !matches!(route, Route::Global(GlobalRoute::Settings))) {
+        for target in RAIL_ROUTES.into_iter().filter(|route| !matches!(route, Route::Global(GlobalRoute::Settings))) {
             destinations = destinations.child(destination(target));
         }
         let split_available = crate::split_panes_available(window);

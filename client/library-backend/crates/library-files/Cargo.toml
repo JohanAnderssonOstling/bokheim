@@ -11,7 +11,7 @@ library-replica = { path = "../library-replica" }
 book-access = { path = "../book-access" }
 content-address = { path = "../../../../shared/content-address" }
 client-platform-runtime = { path = "../../../platforms/runtime" }
-thumbnail = { path = "../thumbnail" }
+thumbnail-contract = { path = "../../../../shared/thumbnail-contract" }
 sync-common = { path = "../../../../shared/sync-common" }
 blake3 = "1"
 futures-util = { version = "0.3", features = ["io"] }

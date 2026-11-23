@@ -2,18 +2,16 @@
 //! stored in the app's data directory and queried through its SQLite browse projection.
 //! Unlike application and taxonomy updates it needs no approval or restart: a
 //! newer snapshot replaces source and browse rows together, then notifies its host.
-use super::{configure_cover_cache, COVER_CACHE_MAX_BYTES};
+use super::{COVER_CACHE_MAX_BYTES, configure_cover_cache};
 #[cfg(not(target_arch = "wasm32"))]
 use client_platform_native::reserve_database_capacity;
-use client_platform_runtime::executor::{run_blocking, BackendExecutor, BackendSend};
+use client_platform_runtime::executor::{BackendExecutor, BackendSend, run_blocking};
 #[cfg(target_arch = "wasm32")]
 use client_platform_web::reserve_database_capacity;
+use client_protocol::BackendError;
+use library_database::catalog::FORMAT_VERSION;
 use std::path::{Path, PathBuf};
 use update_client::DiscoveryConfig;
-use client_protocol::BackendError;
-
-/// Snapshot formats this build reads.
-const FORMATS: [u32; 2] = [11, library_database::catalog::FORMAT_VERSION];
 
 /// Activate cached data and fetch updates in the background. Rebuilding a
 /// stored catalog for a new taxonomy must not delay opening the application.
@@ -53,6 +51,9 @@ pub fn start(app_data_dir: &Path, executor: &BackendExecutor, changed: impl Fn()
 /// Opens the stored snapshot for catalog queries and returns its release,
 /// or 0 when none is stored.
 fn activate_stored(path: &Path) -> Result<u64, BackendError> {
+    if let Err(error) = library_database::catalog::apply_pending(path) {
+        log::warn!("Pending catalog could not activate; retaining the current snapshot: {error}");
+    }
     Ok(library_database::catalog::activate_path(path).map_err(BackendError::operation)?.unwrap_or(0))
 }
 
@@ -62,14 +63,16 @@ async fn refresh(path: PathBuf, installed: u64) -> Result<bool, BackendError> {
     let config = DiscoveryConfig::bundled()?;
     let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(BackendError::operation)?.as_secs();
     let manifest = update_client::fetch::discover(&config, now, 0).await?;
-    let Some(release) = manifest.manifest().catalog.as_ref().filter(|release| release.release_id > installed && FORMATS.contains(&release.format_version)) else {
+    let Some(release) = manifest.manifest().catalog.as_ref().filter(|release| release.release_id > installed && release.format_version == FORMAT_VERSION) else {
         return Ok(false);
     };
     let image = update_client::fetch::download(&release.artifact).await?;
-    reserve_database_capacity(1).await?;
+    reserve_database_capacity(3).await?;
     let expected = (release.release_id, release.format_version);
     run_blocking(move || {
-        library_database::catalog::store(&image, &path, expected).map_err(BackendError::operation)?;
+        if !library_database::catalog::stage(&image, &path, expected).map_err(BackendError::operation)? {
+            return Ok(false);
+        }
         if installed == 0 {
             library_database::catalog::activate_path(&path).map_err(BackendError::operation)?;
         }

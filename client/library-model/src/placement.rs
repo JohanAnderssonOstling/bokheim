@@ -174,5 +174,5 @@ pub struct PublishedStagedBook {
     pub name: String,
     pub relative_path: String,
     pub published: bool,
-    pub fingerprint: Option<String>,
+    pub fingerprint: Option<u64>,
 }

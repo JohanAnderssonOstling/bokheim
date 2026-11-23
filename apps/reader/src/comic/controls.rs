@@ -83,7 +83,7 @@ impl ComicReaderView {
             ],
             theme,
         );
-        let columns = components::reader_setting_row(text!(reader::pages)).child(components::settings_stepper(
+        let columns = components::reader_setting_row(text!(reader::pages), theme).child(components::reader_settings_stepper(
             components::settings_stepper_button("comic-pages-decrease", text!(reader::minus), self.columns == 1).debug_selector(|| "comic-pages-decrease".into()).on_click(cx.listener(|view, _, _, cx| view.adjust_columns(-1, cx))),
             self.columns.to_string(),
             components::settings_stepper_button("comic-pages-increase", "+", self.columns == MAX_COLUMNS).debug_selector(|| "comic-pages-increase".into()).on_click(cx.listener(|view, _, _, cx| view.adjust_columns(1, cx))),
@@ -118,7 +118,7 @@ impl ComicReaderView {
             (SettingsRow::ColumnGap, text!(reader::page_gap), preferences.synchronized.comic_page_gap_px()),
         ];
         let spacing = spacing.into_iter().enumerate().map(|(index, (row, label, value))| {
-            components::reader_setting_row(label).child(components::settings_stepper(
+            components::reader_setting_row(label, theme).child(components::reader_settings_stepper(
                 components::settings_stepper_button(("comic-spacing-decrease", index), text!(reader::minus), value <= READER_SPACING_MIN)
                     .debug_selector(move || format!("comic-spacing-decrease-{index}"))
                     .on_click(cx.listener(move |this, _, _, cx| this.adjust_spacing(row, -SPACING_STEP_PX, cx))),
@@ -130,10 +130,10 @@ impl ComicReaderView {
             ))
         });
         let fullscreen = if window.is_fullscreen() { text!(reader::exit_full_screen) } else { text!(reader::enter_full_screen) };
-        components::reader_settings_tab_body(theme)
+        components::reader_settings_tab_body(theme, window)
             .child(components::reader_settings_section(text!(reader::page_display), theme).child(fit))
             .child(components::reader_settings_group(theme).child(columns))
-            .child(components::reader_settings_group(theme).child(components::reader_stepper_rows().children(spacing)))
+            .child(components::reader_settings_group(theme).child(components::reader_stepper_rows(spacing)))
             .child(components::reader_settings_section(text!(reader::reading_direction), theme).child(direction))
             .child(components::reader_settings_section(text!(reader::zoom), theme).child(zoom))
             .when(super::super::shell::settings_navigation::DESKTOP_FULLSCREEN, |panel| {

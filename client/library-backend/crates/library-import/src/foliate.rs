@@ -18,9 +18,10 @@ use sync_common::DirId;
 use url::Url;
 
 use crate::LibraryImport;
-use crate::reader_batch::ReaderImportBatch;
-use crate::reader_import::{ImportMode, ReaderBookCounts, ReaderImportBook, ReaderImportOptions, ReaderImportReport, ReaderImportSource, ReaderLibrarySummary, import_books};
-use crate::reader_transfer::{ReaderBookResult, ReaderMetadata, ReaderPreparation, import_reader_book, metadata_values, reading_progress};
+#[cfg(test)]
+use crate::reader_import::ImportMode;
+use crate::reader_import::{ReaderBookCounts, ReaderImportBook, ReaderImportOptions, ReaderImportReport, ReaderImportSource, ReaderLibrarySummary, import_books};
+use crate::reader_transfer::{ReaderBookResult, ReaderImportOperation, ReaderMetadata, ReaderPreparation, import_reader_book, metadata_values, reading_progress};
 
 use reader_interop::{ReaderFormat, annotation_id, decode_annotation, encoded_identifier};
 
@@ -132,7 +133,7 @@ impl ReaderImportBook for FoliateBook {
         Ok(())
     }
 
-    async fn import(self, importer: &LibraryImport<'_>, parent: DirId, mode: ImportMode, batch: Option<&mut ReaderImportBatch>) -> Result<ReaderBookResult, BackendError> {
+    async fn import(self, importer: &LibraryImport<'_>, parent: DirId, operation: ReaderImportOperation<'_>) -> Result<ReaderBookResult, BackendError> {
         if let Some(error) = &self.reference_error {
             return Err(BackendError::message(error.clone()));
         }
@@ -141,7 +142,7 @@ impl ReaderImportBook for FoliateBook {
         fs::metadata(&self.path)?;
         let skipped_pdf_annotations = if self.format == BookFormat::Pdf { data.annotations.len() } else { 0 };
         let path = self.path.clone();
-        let mut imported = import_reader_book(importer, parent, &path, self.format, mode, batch, ReaderPreparation::Foliate(self)).await?;
+        let mut imported = import_reader_book(importer, parent, &path, self.format, operation, ReaderPreparation::Foliate(self)).await?;
         imported.skipped_pdf_annotations = skipped_pdf_annotations;
         Ok(imported)
     }
@@ -369,7 +370,7 @@ mod tests {
         assert!(destination.path().join("Target/Foliate/A book ö.epub").is_file());
         assert!(!destination.path().join("Foliate").exists());
         let hash = importer.storage.database().book_for_local_content(blake3::hash(&epub_with_identifier(FIRST, "urn:isbn:1")).into()).await.unwrap().unwrap();
-        assert_eq!(importer.storage.database().reading_position(&hash).unwrap().as_deref(), Some("epub-location-v2:epubcfi(/6/4!/4/2)"));
+        assert_eq!(importer.storage.database().reading_position(&hash).await.unwrap().as_deref(), Some("epub-location-v2:epubcfi(/6/4!/4/2)"));
         let notes = importer.storage.database().annotations(hash).await.unwrap();
         assert_eq!(notes.len(), 1);
         let note = &notes[0];
@@ -380,7 +381,7 @@ mod tests {
         assert!(note.anchor.is_epub_publication_cfi());
         let repeated = FoliateLibrary::open(root.path()).unwrap().import(&importer, options).await.unwrap();
         assert_eq!((repeated.imported, repeated.already_present), (0, 1));
-        assert_eq!(importer.storage.database().annotations(hash).unwrap(), notes);
+        assert_eq!(importer.storage.database().annotations(hash).await.unwrap(), notes);
         assert_eq!(fs::read(root.path().join("urn%3Aisbn%3A1.json")).unwrap(), original);
         assert_eq!(fs::read(root.path().join("A book ö.epub")).unwrap(), epub_with_identifier(FIRST, "urn:isbn:1"));
     }
@@ -425,7 +426,7 @@ mod tests {
             assert_eq!(notes[0].anchor.recurring_scope(), original.anchor.recurring_scope());
             assert_eq!(notes[0].anchor.epub_cfi_value(), data["annotations"][0]["value"].as_str());
             assert_eq!(notes[0].exact_text, "B");
-            assert!(importer.storage.database().sync_outbox_watermark().unwrap() > watermark);
+            assert!(importer.storage.database().sync_outbox_watermark().await.unwrap() > watermark);
             // Move consumes the source. Recreate it to test a subsequent import.
             fs::write(root.path().join("book.epub"), epub_with_identifier(FIRST, "moving")).unwrap();
             importer.storage.database().delete_annotation(&original.id, 1_800_000_000_000).await.unwrap();
@@ -434,8 +435,8 @@ mod tests {
             fs::write(&path, serde_json::to_vec(&data).unwrap()).unwrap();
             let report = FoliateLibrary::open(root.path()).unwrap().import(&importer, options(mode)).await.unwrap();
             assert!(report.failures.is_empty(), "{report:?}");
-            assert!(importer.storage.database().annotations(book).unwrap().is_empty());
-            assert_eq!(importer.storage.database().annotation_history(book).unwrap().len(), 1);
+            assert!(importer.storage.database().annotations(book).await.unwrap().is_empty());
+            assert_eq!(importer.storage.database().annotation_history(book).await.unwrap().len(), 1);
         }
     }
 
@@ -465,8 +466,8 @@ mod tests {
         assert_eq!(report.failures.len(), 1, "{report:?}");
         assert_eq!(fs::read(root.path().join("book.epub")).unwrap(), epub_with_identifier(FIRST, "ambiguous"));
         assert_eq!(fs::read(path).unwrap(), bytes);
-        assert_eq!(importer.storage.database().annotations(book).unwrap(), notes);
-        assert_eq!(importer.storage.database().sync_outbox_watermark().unwrap(), watermark);
+        assert_eq!(importer.storage.database().annotations(book).await.unwrap(), notes);
+        assert_eq!(importer.storage.database().sync_outbox_watermark().await.unwrap(), watermark);
     }
 
     #[tokio::test]
@@ -515,16 +516,16 @@ mod tests {
         }
         assert!(markdown.contains("## Part\n"), "unresolved grouping headings remain in the export");
 
-        // Import-before-export uses the same matcher for new Foliate JSON notes.
+        // Export preserves external Foliate notes without importing them into the library.
         let foliate_path = &report.results.iter().find(|result| result.destination.format == AnnotationExportFormat::Foliate).unwrap().destination.path;
         let mut external: Value = serde_json::from_slice(&fs::read(foliate_path).unwrap()).unwrap();
         external["annotations"].as_array_mut().unwrap().push(json!({"value":"epubcfi(/8/4!/4/6/2,/1:0,/1:6)","text":"New external quote","note":"New external note","color":"yellow"}));
         fs::write(foliate_path, serde_json::to_vec(&external).unwrap()).unwrap();
         let refreshed = export(&importer.storage.database(), &importer.storage.assets(), ROOT_DIR_ID, export_options).await.unwrap();
         assert!(refreshed.results.iter().all(|result| matches!(result.outcome, AnnotationExportOutcome::Written)), "{refreshed:?}");
-        let imported = importer.storage.database().annotations(book).await.unwrap().into_iter().find(|note| note.exact_text == "New external quote").unwrap();
-        assert_eq!(imported.toc_ordinal, Some(1));
-        assert!(fs::read_to_string(markdown_path).unwrap().contains("New external quote"));
+        assert!(importer.storage.database().annotations(book).await.unwrap().iter().all(|note| note.exact_text != "New external quote"));
+        assert!(fs::read_to_string(foliate_path).unwrap().contains("New external quote"));
+        assert!(!fs::read_to_string(markdown_path).unwrap().contains("New external quote"));
 
         // Re-import fills missing chapter metadata without replacing local edits.
         let mut older = notes.iter().find(|note| note.exact_text == "Before quote").unwrap().clone();
@@ -541,7 +542,7 @@ mod tests {
         importer.storage.database().delete_annotation(&older.id, 11).await.unwrap();
         let report = FoliateLibrary::open(root.path()).unwrap().import(&importer, options(ImportMode::Copy)).await.unwrap();
         assert!(report.failures.is_empty(), "{report:?}");
-        assert!(!importer.storage.database().annotations(book).unwrap().iter().any(|note| note.id == older.id));
+        assert!(!importer.storage.database().annotations(book).await.unwrap().iter().any(|note| note.id == older.id));
     }
 
     #[tokio::test]
@@ -593,7 +594,7 @@ mod tests {
             let report = FoliateLibrary::open(root.path()).unwrap().import(&importer, options(mode)).await.unwrap();
             assert_eq!((report.imported, report.failures.len()), (0, 1));
             assert_eq!(fs::read(root.path().join("book.epub")).unwrap(), SECOND);
-            assert_eq!(importer.storage.database().book_count().unwrap(), 0);
+            assert_eq!(importer.storage.database().book_count().await.unwrap(), 0);
             assert!(!destination.path().join("Foliate/book.epub").exists());
         }
     }
@@ -680,7 +681,7 @@ mod tests {
                 assert!(state.addition.pdf.is_none());
                 assert!(state.addition.navigation.is_none());
                 assert!(state.annotations.is_empty());
-                assert_eq!(importer.storage.database().reading_position(&hash).unwrap().as_deref(), Some("pdfpage(0)"));
+                assert_eq!(importer.storage.database().reading_position(&hash).await.unwrap().as_deref(), Some("pdfpage(0)"));
             }
         }
     }

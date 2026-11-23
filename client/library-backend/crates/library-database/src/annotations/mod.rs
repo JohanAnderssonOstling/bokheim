@@ -162,7 +162,7 @@ mod tests {
         db.connection.fixtures_insert_book_7(&other).unwrap();
         for (book, name) in [(origin, "Origin.epub"), (other, "Other.epub")] {
             db.connection
-                .execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,?2,'fixture',1 FROM book WHERE content_hash=?3", params![sync_common::ROOT_DIR_ID.to_string(), name, book])
+                .execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,?2,X'0100000000000000',1 FROM book WHERE content_hash=?3", params![sync_common::ROOT_DIR_ID.to_string(), name, book])
                 .unwrap();
         }
         let anchor = AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2,/1:0,/1:9)");

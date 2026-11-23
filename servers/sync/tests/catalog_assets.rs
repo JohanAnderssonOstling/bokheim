@@ -1,3 +1,4 @@
+use ::wire::typed as wire;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use server_account::{AccountTokenKey, PostgresAccountService};

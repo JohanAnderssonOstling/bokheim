@@ -190,6 +190,7 @@ mod tests {
         signature::{Ed25519KeyPair, KeyPair},
     };
     use std::io::{Cursor, Write};
+    use subject_projection::runtime_format::DOWNLOAD_FORMATS;
     use update_client::{ApplicationRelease, Artifact, Manifest, SIGNATURE_CONTEXT, SignedManifest};
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -233,7 +234,7 @@ mod tests {
                     version: "2.0.0".parse().unwrap(),
                     name: "Release".into(),
                     schema_version: library_database::LIBRARY_SCHEMA_VERSION as u32,
-                    taxonomy_format_versions: vec![1],
+                    taxonomy_format_versions: DOWNLOAD_FORMATS.to_vec(),
                     artifacts: [("windows-x86_64-zip".into(), artifact)].into(),
                 }),
             };

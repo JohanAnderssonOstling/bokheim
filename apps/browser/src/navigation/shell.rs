@@ -1,26 +1,25 @@
 //! Browser shell and route coordinator.
 //!
-//! This shell owns the current route. Library sessions own library lifecycle
-//! and per-library page state. Settings belongs to this shell.
+//! The pane shares one destination across its library sessions. Sessions own
+//! library lifecycle and per-library page state. Settings belongs to this shell.
 //! The sidebar draws whichever route it is handed.
 
+use std::rc::Rc;
 use ui_text::text;
 
 use ui_components::user_facing_error;
 
 use crate::services::notify_error;
-use crate::{NavigationSession, PaneRequest};
+use crate::{BrowsePageSession, NavigationSession, PaneRequest};
 use gpui::prelude::*;
 use gpui::{App, AppContext, Context, Entity, EntityId, IntoElement, Render, Subscription, Window};
 use gpui_component::IconName;
 use library_model::BrowseLocation;
-#[cfg(not(target_arch = "wasm32"))]
-use sync_common::ROOT_DIR_ID;
-use sync_common::{DirId, LibraryId};
+use sync_common::{DirId, LibraryId, ROOT_DIR_ID};
 use ui_components as components;
 
 use super::sidebar::{Sidebar, SplitPane};
-use super::{GlobalRoute, Libraries, LibrarySession, Navigate, Route};
+use super::{GlobalRoute, Libraries, LibraryRoute, LibrarySession, Navigate, PageNavigation, Route};
 use crate::library::OpenBook;
 use crate::services::AppServices;
 use crate::stores::Preferences;
@@ -46,9 +45,7 @@ pub struct BrowserShell {
     services: AppServices,
     #[cfg(not(target_arch = "wasm32"))]
     open_book: OpenBook,
-    route: Route,
-    /// The browse view the phone's Library tab returns to: the last one shown.
-    library_view: super::LibraryRoute,
+    page_navigation: Rc<PageNavigation>,
     content_footer: Option<gpui::AnyView>,
     reader_surface: Option<gpui::AnyView>,
     split_close_enabled: bool,
@@ -57,7 +54,7 @@ pub struct BrowserShell {
     sync_page: Entity<SyncPage>,
     settings: Entity<SettingsPage>,
     navigation: Entity<Sidebar>,
-    observed_session: Option<(EntityId, [Subscription; 2])>,
+    observed_session: Option<(EntityId, [Subscription; 3])>,
     _library_subscription: Subscription,
     _navigation_subscription: Subscription,
 }
@@ -65,6 +62,10 @@ pub struct BrowserShell {
 impl gpui::EventEmitter<PaneRequest> for BrowserShell {}
 
 impl BrowserShell {
+    fn route(&self) -> Route {
+        self.page_navigation.route()
+    }
+
     pub(crate) fn set_now_playing(&self, book: Option<crate::NowPlayingBook>, cx: &mut App) {
         self.libraries.update(cx, |libraries, cx| libraries.set_now_playing(book, cx));
     }
@@ -103,7 +104,7 @@ impl BrowserShell {
     }
 
     pub(crate) fn shown_book_detail(&self, cx: &App) -> Option<library_model::BookLocator> {
-        if !matches!(self.route, Route::Library(_)) {
+        if !matches!(self.route(), Route::Library(_)) {
             return None;
         }
         self.libraries.read(cx).selected_session()?.read(cx).shown_book_detail(cx)
@@ -114,43 +115,24 @@ impl BrowserShell {
         if self.libraries.read(cx).selected_library_blocks_navigation(cx) {
             return;
         }
-        self.navigate(Route::Library(super::LibraryRoute::Folders), window, cx);
+        self.navigate(Route::Library(LibraryRoute::Folders), window, cx);
         let Some(session) = self.libraries.read(cx).selected_session() else { return };
-        session.update(cx, |session, cx| session.open_book_detail(book_id, window, cx));
+        session.update(cx, |session, cx| session.open_book_detail(book_id, cx));
     }
 
     /// Builds the browser around the restored session and starts background subscriptions.
     pub fn new(services: AppServices, mut saved: NavigationSession, sync_state: Entity<crate::SyncState>, open_book: OpenBook, preferences: Entity<Preferences>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.observe_global::<crate::stores::preferences::TextSearchEnabled>(|shell: &mut Self, cx| {
-            if shell.route == Route::Library(super::LibraryRoute::Search) && !crate::stores::preferences::text_search_enabled(cx) {
-                shell.route = Route::Library(super::LibraryRoute::Home);
-                cx.notify();
-            }
-        })
-        .detach();
         let libraries = services.startup.libraries.clone();
         saved.reconcile(&libraries.iter().map(|entry| *entry.library_id()).collect::<Vec<_>>());
         let active_library_id = saved.library_id;
         let shell = cx.entity().downgrade();
-        let navigate_callback: Navigate = std::rc::Rc::new(move |route, window, cx| {
+        let navigate_callback: Navigate = Rc::new(move |route, window, cx| {
             let _ = shell.update(cx, |shell, cx| shell.select_destination(route, window, cx));
         });
         let libraries = cx.new(|cx| Libraries::new(services.backend.clone(), open_book.clone(), libraries, active_library_id, cx));
+        let page_navigation = libraries.read(cx).page_navigation.clone();
         let session = libraries.read(cx).selected_session();
-        if let Some(session) = &session
-            && let Route::Library(route) = saved.route
-        {
-            session.update(cx, |session, cx| session.restore(route, saved.pages, window, cx));
-        }
-        let observed_session = session.as_ref().map(|session| Self::observe_session(session, cx));
-        let route = if matches!(saved.route, Route::Global(_)) {
-            saved.route
-        } else if let Some(session) = session {
-            session.update(cx, |session, cx| session.focus_page(window, cx));
-            Route::Library(session.read(cx).route())
-        } else {
-            Route::Library(super::LibraryRoute::Home)
-        };
+        let observed_session = session.as_ref().map(|session| Self::observe_session(session, window, cx));
         let navigation = cx.new(|cx| Sidebar::new(libraries.clone(), sync_state.clone(), navigate_callback, cx));
         // Sidebar elements are rendered by this shell rather than as an entity
         // child. Forward its state changes so menus and dialogs are repainted.
@@ -166,7 +148,6 @@ impl BrowserShell {
             if libraries.selected_id() != Some(event.library_id) || libraries.selection_epoch() != event.selection_epoch {
                 return;
             }
-            shell.close_reader_surface(cx);
             shell.navigation.update(cx, |navigation, cx| navigation.finish_library_switcher(cx));
             shell.return_to_library_page(window, cx);
         })
@@ -178,17 +159,12 @@ impl BrowserShell {
             let selection_changed = shell.observed_session.as_ref().map(|(id, _)| *id) != session_id;
             if selection_changed {
                 shell.close_reader_surface(cx);
-                shell.observed_session = session.as_ref().map(|session| Self::observe_session(session, cx));
+                shell.observed_session = session.as_ref().map(|session| Self::observe_session(session, window, cx));
             }
-            if matches!(shell.route, Route::Library(_))
-                && let Some(session) = session
-            {
-                shell.route = Route::Library(session.read(cx).route());
-                // Background list refreshes must not take focus from an open
-                // dialog, menu, or search field in the same library.
-                if selection_changed {
-                    session.update(cx, |session, cx| session.focus_page(window, cx));
-                }
+            // Library selection changes the contents, never the pane's destination.
+            // Background list refreshes must not take focus from an open control.
+            if selection_changed && matches!(shell.route(), Route::Library(_)) && session.is_some() {
+                shell.show_destination(shell.route(), None, window, cx);
             }
             cx.notify();
         });
@@ -196,12 +172,11 @@ impl BrowserShell {
         // page stays alive across navigation and Settings only renders it.
         let sync_page = cx.new(|cx| SyncPage::new(services.clone(), sync_state, libraries.clone(), window, cx));
         let settings = cx.new(|cx| SettingsPage::new(services.updates.clone(), sync_page.clone(), preferences, cx));
-        Self {
+        let mut shell = Self {
             services,
             #[cfg(not(target_arch = "wasm32"))]
             open_book,
-            route,
-            library_view: super::LibraryRoute::Books,
+            page_navigation,
             content_footer: None,
             reader_surface: None,
             split_close_enabled: false,
@@ -213,20 +188,22 @@ impl BrowserShell {
             observed_session,
             _library_subscription: library_subscription,
             _navigation_subscription: navigation_subscription,
-        }
+        };
+        shell.show_destination(saved.route, saved.page, window, cx);
+        shell
     }
 
     /// Identity and subscriptions change together, so a cached session stops
     /// driving this shell as soon as another library is selected.
-    fn observe_session(session: &Entity<LibrarySession>, cx: &mut Context<Self>) -> (EntityId, [Subscription; 2]) {
+    fn observe_session(session: &Entity<LibrarySession>, window: &mut Window, cx: &mut Context<Self>) -> (EntityId, [Subscription; 3]) {
         let subscriptions = [
-            cx.observe(session, |shell, session, cx| {
-                if matches!(shell.route, Route::Library(_)) {
-                    shell.route = Route::Library(session.read(cx).route());
-                }
-                cx.notify();
-            }),
+            cx.observe(session, |_, _, cx| cx.notify()),
             cx.subscribe(session, |_, _, request: &PaneRequest, cx| cx.emit(request.clone())),
+            cx.subscribe_in(session, window, |shell, source, route: &LibraryRoute, window, cx| {
+                if matches!(shell.route(), Route::Library(_)) && shell.libraries.read(cx).selected_session().is_some_and(|selected| selected.entity_id() == source.entity_id()) {
+                    shell.navigate((*route).into(), window, cx);
+                }
+            }),
         ];
         (session.entity_id(), subscriptions)
     }
@@ -234,8 +211,8 @@ impl BrowserShell {
     /// A value snapshot assembled from the components that own navigation.
     pub(crate) fn navigation_session(&self, cx: &App) -> NavigationSession {
         let library_id = self.libraries.read(cx).selected_id();
-        let pages = if matches!(self.route, Route::Library(_)) { self.libraries.read(cx).selected_session().map(|session| session.read(cx).saved_pages(cx)).unwrap_or_default() } else { Vec::new() };
-        NavigationSession { library_id, route: self.route, pages, ..Default::default() }
+        let page = if matches!(self.route(), Route::Library(_)) { self.libraries.read(cx).selected_session().and_then(|session| session.read(cx).saved_page(cx)) } else { None };
+        NavigationSession { library_id, route: self.route(), page, ..Default::default() }
     }
 
     fn empty_libraries(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -291,43 +268,28 @@ impl BrowserShell {
             return;
         }
         match request {
-            PendingNavigation::Restore(saved) => {
-                self.route = saved.route;
-                if let (Some(session), Route::Library(route)) = (session, saved.route) {
-                    let route = session.update(cx, |session, cx| {
-                        session.restore(route, saved.pages, window, cx);
-                        session.route()
-                    });
-                    self.route = Route::Library(route);
-                }
-            }
+            PendingNavigation::Restore(saved) => self.show_destination(saved.route, saved.page, window, cx),
             PendingNavigation::Location { location, label, .. } => {
-                if let Some(session) = session {
-                    let route = session.update(cx, |session, cx| {
-                        match location {
-                            BrowseLocation::Folder(id) => session.open_folder(id, label, window, cx),
-                            _ => session.open_subject(location, label, window, cx),
-                        }
-                        session.route()
-                    });
-                    self.route = Route::Library(route);
-                }
+                let route = match location {
+                    BrowseLocation::Folder(_) => LibraryRoute::Folders,
+                    _ => LibraryRoute::Subjects,
+                };
+                let path = if location == BrowseLocation::Folder(ROOT_DIR_ID) { Vec::new() } else { vec![(location, label)] };
+                self.show_destination(route.into(), Some(BrowsePageSession { path, detail: None }), window, cx);
             }
         }
-        cx.notify();
     }
 
     pub(crate) fn open_folder(&mut self, library_id: LibraryId, directory_id: DirId, title: String, window: &mut Window, cx: &mut Context<Self>) {
         self.request_navigation(PendingNavigation::Location { library_id, location: BrowseLocation::Folder(directory_id), label: title }, window, cx);
     }
 
-    pub(crate) fn open_subject(&mut self, library_id: LibraryId, location: library_model::BrowseLocation, label: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_subject(&mut self, library_id: LibraryId, location: BrowseLocation, label: String, window: &mut Window, cx: &mut Context<Self>) {
         self.request_navigation(PendingNavigation::Location { library_id, location, label }, window, cx);
     }
 
-    /// Imports an in-memory file into the active library and opens it for reading.
-    #[cfg(not(target_arch = "wasm32"))]
     /// Imports a staged native file into the active library and opens it for reading.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn import_and_open_path(&mut self, name: String, path: std::path::PathBuf, _window: &mut Window, cx: &mut Context<Self>) {
         let library_id = self.libraries.read(cx).selected_id();
         let backend = self.services.backend.clone();
@@ -357,13 +319,12 @@ impl BrowserShell {
         notify_error("incoming-book-stage-error", format!(text!(browse::could_not_prepare_this_book_for_import), user_facing_error(&error, "")), window, cx);
     }
 
-    /// Replaces the current page with the view represented by `route`.
     /// Moves to the neighbouring rail destination. Clamped rather than
     /// wrapping: the rail is a visible list, and jumping from its end back to
     /// its start reads as a mis-press rather than navigation.
     pub(crate) fn step_destination(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let routes = super::sidebar::rail_routes(cx).collect::<Vec<_>>();
-        let Some(current) = routes.iter().position(|route| *route == self.route) else {
+        let routes = super::sidebar::RAIL_ROUTES;
+        let Some(current) = routes.iter().position(|route| *route == self.route()) else {
             return;
         };
         let Some(target) = current.checked_add_signed(delta).and_then(|index| routes.get(index)) else {
@@ -379,24 +340,28 @@ impl BrowserShell {
     /// focusing the shell or the root leaves the grid unreachable from the
     /// keyboard even though the browser is visible.
     pub(crate) fn focus_active_page(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.route, Route::Library(_))
+        if matches!(self.route(), Route::Library(_))
             && let Some(session) = self.libraries.read(cx).selected_session()
         {
             session.update(cx, |session, cx| session.focus_page(window, cx));
         }
     }
 
+    fn navigation_blocked(&self, route: Route, cx: &App) -> bool {
+        matches!(route, Route::Library(_)) && self.libraries.read(cx).selected_library_blocks_navigation(cx)
+    }
+
     /// Selecting the active destination returns it to its root. Switching
     /// destinations keeps the cached page, as ordinary navigation does.
     fn select_destination(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(route, Route::Library(_)) && self.libraries.read(cx).selected_library_blocks_navigation(cx) {
+        if self.navigation_blocked(route, cx) {
             return;
         }
-        self.close_reader_surface(cx);
-        if self.route != route {
+        if self.route() != route {
             self.navigate(route, window, cx);
             return;
         }
+        self.close_reader_surface(cx);
         match route {
             Route::Library(_) => {
                 if let Some(session) = self.libraries.read(cx).selected_session() {
@@ -410,46 +375,41 @@ impl BrowserShell {
         cx.notify();
     }
 
+    /// Replaces the current page with the view represented by `route`.
     pub(crate) fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(route, Route::Library(_)) && self.libraries.read(cx).selected_library_blocks_navigation(cx) {
+        if self.navigation_blocked(route, cx) {
             return;
         }
-        let route = if route == Route::Library(super::LibraryRoute::Search) && !crate::stores::preferences::text_search_enabled(cx) { Route::Library(super::LibraryRoute::Home) } else { route };
-        if route != Route::Global(GlobalRoute::Settings) {
-            self.settings.update(cx, |page, _| page.pause_index_usage());
-        }
-        self.close_reader_surface(cx);
-        if self.route == route {
-            if matches!(route, Route::Library(super::LibraryRoute::Notebook | super::LibraryRoute::Search)) {
+        if self.route() == route {
+            self.close_reader_surface(cx);
+            if matches!(route, Route::Library(LibraryRoute::Notebook | LibraryRoute::Search)) {
                 self.focus_active_page(window, cx);
             }
             return;
         }
-        self.route = route;
-        match route {
-            Route::Library(route) => {
-                if let Some(session) = self.libraries.read(cx).selected_session() {
-                    session.update(cx, |session, cx| session.navigate(route, window, cx));
+        self.show_destination(route, None, window, cx);
+    }
+
+    fn show_destination(&mut self, route: Route, page: Option<BrowsePageSession>, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_reader_surface(cx);
+        self.page_navigation.navigate(route);
+        self.sync_page.update(cx, |page, cx| page.set_open(route == Route::Global(GlobalRoute::Settings), cx));
+        if matches!(route, Route::Library(_))
+            && let Some(session) = self.libraries.read(cx).selected_session()
+        {
+            session.update(cx, |session, cx| {
+                if let Some(page) = page {
+                    session.restore_page(page, cx);
                 }
-            }
-            Route::Global(GlobalRoute::Settings) => {
-                // Refresh local storage usage when returning after imports.
-                self.sync_page.update(cx, |page, cx| page.schedule_refresh(cx));
-            }
+                session.activate_page(window, cx);
+            });
         }
         cx.notify();
     }
 
-    /// Leaves a global page by revealing the selected library's last page.
+    /// Leaves a global page by revealing this pane's last library destination.
     fn return_to_library_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let session = self.libraries.read(cx).selected_session();
-        self.route = if let Some(session) = session {
-            session.update(cx, |session, cx| session.focus_page(window, cx));
-            Route::Library(session.read(cx).route())
-        } else {
-            Route::Library(super::LibraryRoute::Home)
-        };
-        cx.notify();
+        self.show_destination(self.page_navigation.library_route().into(), None, window, cx);
     }
 
     /// Reveals the library switcher, for the pages that can be navigated out of
@@ -468,13 +428,13 @@ impl BrowserShell {
             self.navigation.update(cx, |navigation, cx| navigation.close_library_switcher(window, cx));
             return true;
         }
-        if matches!(self.route, Route::Library(_)) && self.libraries.read(cx).selected_library_blocks_navigation(cx) {
+        if self.navigation_blocked(self.route(), cx) {
             if let Some(session) = self.libraries.read(cx).selected_session() {
                 session.update(cx, |session, cx| session.dismiss_operation_dialog(window, cx));
             }
             return true;
         }
-        if matches!(self.route, Route::Global(_)) {
+        if matches!(self.route(), Route::Global(_)) {
             self.return_to_library_page(window, cx);
             return true;
         }
@@ -492,8 +452,8 @@ impl BrowserShell {
         {
             return true;
         }
-        if self.route != Route::Library(super::LibraryRoute::Home) {
-            self.navigate(super::LibraryRoute::Home.into(), window, cx);
+        if self.route() != Route::Library(LibraryRoute::Home) {
+            self.navigate(LibraryRoute::Home.into(), window, cx);
             return true;
         }
         false
@@ -502,7 +462,7 @@ impl BrowserShell {
 
 impl Render for BrowserShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let route = self.route;
+        let route = self.route();
         let blocked_session = self.libraries.read(cx).selected_session().filter(|session| matches!(route, Route::Library(_)) && session.read(cx).blocks_navigation(cx));
         let content = if let Some(session) = blocked_session {
             session.into_any_element()
@@ -537,15 +497,7 @@ impl Render for BrowserShell {
             .child(gpui::div().relative().flex_1().min_h_0().w_full().flex().flex_col().child(content).when(!self.split_close_enabled, |content| content.children(gpui_component::Root::render_notification_layer(window, cx))));
         let safe_area = window.insets().effective();
         let sidebar = self.navigation.clone();
-        // The route reaches the shell by several paths (the rail, the session's
-        // own navigation, restored state), so the view is noted where they all
-        // end up: here.
-        if let Route::Library(view) = route
-            && super::LIBRARY_VIEWS.contains(&view)
-        {
-            self.library_view = view;
-        }
-        let navigation = sidebar.read(cx).render_navigation(sidebar.clone(), route, self.library_view, compact_navigation, self.split_close_enabled, safe_area, window, cx);
+        let navigation = sidebar.read(cx).render_navigation(sidebar.clone(), route, self.page_navigation.library_view(), compact_navigation, self.split_close_enabled, safe_area, window, cx);
         // A plain flex sibling rather than an absolute overlay, so the dock
         // takes its own space instead of painting over other content. On
         // compact windows `page` is a column, so the dock goes between
@@ -628,24 +580,24 @@ mod tests {
         selected.update(cx, |_, cx| cx.emit(PaneRequest::Close));
         assert_eq!(requests.get(), 2, "a cached session must stop forwarding pane requests");
         window
-            .update(cx, |_, window, cx| {
-                selected.update(cx, |session, cx| session.navigate(LibraryRoute::Authors, window, cx));
-                original.update(cx, |session, cx| session.navigate(LibraryRoute::Catalog, window, cx));
+            .update(cx, |_, _, cx| {
+                selected.update(cx, |_, cx| cx.emit(LibraryRoute::Authors));
+                original.update(cx, |_, cx| cx.emit(LibraryRoute::Catalog));
             })
             .unwrap();
-        assert_eq!(shell.read_with(cx, |shell, _| shell.route), Route::Library(LibraryRoute::Authors));
+        assert_eq!(shell.read_with(cx, |shell, _| shell.route()), Route::Library(LibraryRoute::Authors));
         window
             .update(cx, |_, window, cx| {
                 shell.update(cx, |shell, cx| shell.navigate(GlobalRoute::Settings.into(), window, cx));
-                selected.update(cx, |session, cx| session.navigate(LibraryRoute::Folders, window, cx));
+                selected.update(cx, |_, cx| cx.emit(LibraryRoute::Folders));
             })
             .unwrap();
-        assert_eq!(shell.read_with(cx, |shell, _| shell.route), GlobalRoute::Settings.into());
+        assert_eq!(shell.read_with(cx, |shell, _| shell.route()), GlobalRoute::Settings.into());
 
         libraries.update(cx, |libraries, cx| libraries.select_library(first, cx));
         cx.run_until_parked();
         window.update(cx, |_, window, cx| shell.update(cx, |shell, cx| shell.return_to_library_page(window, cx))).unwrap();
-        assert_eq!(shell.read_with(cx, |shell, _| shell.route), Route::Library(LibraryRoute::Catalog));
+        assert_eq!(shell.read_with(cx, |shell, _| shell.route()), Route::Library(LibraryRoute::Authors));
         original.update(cx, |_, cx| cx.emit(PaneRequest::Close));
         selected.update(cx, |_, cx| cx.emit(PaneRequest::Close));
         assert_eq!(requests.get(), 3, "returning to a cached session reconnects it exactly once");

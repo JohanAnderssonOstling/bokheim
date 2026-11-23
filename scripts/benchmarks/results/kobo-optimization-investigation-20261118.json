@@ -1,0 +1,33 @@
+{
+  "scope": "Investigation only: source review and isolated on-device in-memory C benchmark; application code, installed executable and user settings were not changed in this investigation.",
+  "scaling": {
+    "confirmed": "Shim always sets scaled dimensions; FBInk rescales on any nonzero scaled size, including identical dimensions. Scaling additionally promotes required 32-bit framebuffer conversion from RGB to RGBA.",
+    "measured_identity_rescale_cpu_ms": 30.511334,
+    "next_change": "Set both scaled dimensions to zero only when source width AND height equal target width AND height. Preserve actual resize path otherwise.",
+    "allocation_reduction_bytes_for_captured_damage": 9109100,
+    "source": "../GPUI-Fork/crates/gpui_kobo/native/fbink_shim.c:100"
+  },
+  "gray_framebuffer_path": {
+    "confirmed": "Current FBInk converts grayscale into RGB(A), then loops over pixels again to write its 32-bit framebuffer.",
+    "prototype_memory_conversion_cpu_ms": 12.479334,
+    "limit": "Prototype destination is cached ordinary RAM, not the real framebuffer. A framebuffer optimization needs stride, pixel-format, damage, rotation and refresh handling before a latency claim.",
+    "source": "FBInk fbink.c:12030"
+  },
+  "chapter_reuse": {
+    "confirmed": "Spine activation discards the outgoing Document and defers a new preparation for every other spine item. Document::into_preparation keeps its pipeline session; PreparedDocument::finish checks current backend/input validity.",
+    "next_change": "Retain one previous engine/document with a byte budget, matching publication/content identity and reader configuration; keep backend generation checks.",
+    "limit": "First visits still require preparation. Benefit and retained bytes have not been measured; the low-level pipeline has memory reports, but exposing a reliable retained-document budget may require facade work.",
+    "source": "../HtmlViewCore/crates/skrift-column-paginator/src/renderer/nav/spine.rs:182"
+  },
+  "shape_cache_keys": {
+    "confirmed": "shape_run_cached allocates an owned text key and clones owned attributes before attempting a cache lookup. The backend clears shape-run caches at shaping-batch boundaries.",
+    "next_change": "Prototype borrowed key lookup or intern complete attribute identities while preserving glyph metadata semantics.",
+    "limit": "Attribute hashing accounts for roughly 21\u201327 ms self CPU per captured transition; allocation cost is shared with other work.",
+    "source": "vendor/cosmic-text/src/shape.rs:546"
+  },
+  "line_breaking": {
+    "confirmed": "Current implementation already reuses compact scratch buffers and hoists first/later line width calculations.",
+    "opportunity_bound": "Halving the measured break_compact_with_mode self cost would save about 24 ms forward or 47 ms backward of CPU in the captured profiling run; not a wall-time guarantee.",
+    "next_change": "Prioritize retaining unchanged layout before changing the algorithm."
+  }
+}

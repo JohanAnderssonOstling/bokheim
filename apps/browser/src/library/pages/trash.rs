@@ -30,8 +30,9 @@ use ui_components as components;
 use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::library::pages::with_retry_banner;
-use crate::library::services::{LibraryContentsChanged, LibraryContext, LibraryFileActionsChanged};
-use crate::library::widgets::{CoverVisibility, CoversEvicted, generated_cover_variant, loaded_cover_from_jpeg};
+use crate::library::services::{CoverSubscription, LibraryContentsChanged, LibraryContext, LibraryFileActionsChanged};
+use crate::library::widgets::{CoverVisibility, CoversEvicted, generated_cover_variant, load_cover_image};
+use crate::services::notify_error;
 
 mod list;
 #[cfg(all(test, not(target_arch = "wasm32"), not(feature = "kobo")))]
@@ -153,12 +154,14 @@ pub(crate) struct TrashPage {
     error: Option<SharedString>,
     /// The load in flight. Replacing it drops the one before, which cancels it.
     request: Option<Task<()>>,
+    refresh_pending: bool,
     selection: HashSet<TrashKey>,
     /// Lookups are weak; the shared image cache and visible frames own pixels.
     covers: HashMap<BookId, Option<Weak<RenderImage>>>,
     cover_visibility: CoverVisibility,
     cover_requests: HashMap<BookId, (u64, Task<()>)>,
     wanted_covers: HashSet<BookId>,
+    cover_updates: HashMap<BookId, CoverSubscription>,
     cover_request_serial: u64,
     list: TrashList,
     /// Created on first render, since an input needs a window.
@@ -171,7 +174,10 @@ impl TrashPage {
     pub(crate) fn new(ui: LibraryContext, cx: &mut Context<Self>) -> Self {
         let subscriptions = [
             cx.subscribe(&ui.updates(), |_, _, _: &LibraryFileActionsChanged, cx| cx.notify()),
-            cx.subscribe(&ui.updates(), |page, _, _: &LibraryContentsChanged, cx| page.refresh(cx)),
+            cx.subscribe(&ui.updates(), |page, _, _: &LibraryContentsChanged, cx| {
+                page.refresh_pending = true;
+                cx.notify();
+            }),
             cx.observe_global::<CoversEvicted>(|page: &mut Self, cx| {
                 if page.cover_visibility.is_visible() {
                     return;
@@ -184,32 +190,34 @@ impl TrashPage {
                 cx.notify();
             }),
         ];
-        let mut page = Self {
+        Self {
             ui,
             contents: None,
             error: None,
             request: None,
+            refresh_pending: true,
             selection: HashSet::new(),
             covers: HashMap::new(),
             cover_visibility: CoverVisibility::default(),
             cover_requests: HashMap::new(),
             wanted_covers: HashSet::new(),
+            cover_updates: HashMap::new(),
             cover_request_serial: 0,
             list: TrashList::default(),
             search: None,
             focus: cx.focus_handle().tab_index(0).tab_stop(true),
             _subscriptions: subscriptions,
-        };
-        page.refresh(cx);
-        page
+        }
     }
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_pending = false;
         let library = self.ui.backend().clone();
         let task = cx.spawn(async move |page, cx| {
             let result = library.trash().await;
             cx.wait_for_update_slot().await;
             let _ = page.update(cx, |page, cx| {
+                page.request = None;
                 match result {
                     Ok(contents) => {
                         let present: HashSet<TrashKey> = contents.folders.iter().map(|folder| TrashKey::Folder(folder.id)).chain(contents.books.iter().map(|book| TrashKey::Book(book.book_id))).collect();
@@ -217,9 +225,10 @@ impl TrashPage {
                         page.contents = Some(contents);
                         page.list.invalidate();
                         page.error = None;
-                        // Cancel obsolete work even while cached offscreen.
-                        // The next visible frame requests its own cover set.
-                        page.reset_covers();
+                        page.covers.retain(|id, _| present.contains(&TrashKey::Book(*id)));
+                        page.cover_requests.retain(|id, _| present.contains(&TrashKey::Book(*id)));
+                        page.wanted_covers.retain(|id| present.contains(&TrashKey::Book(*id)));
+                        page.cover_updates.retain(|id, _| present.contains(&TrashKey::Book(*id)));
                     }
                     Err(error) => page.error = Some(user_facing_error(&error, text!(browse::could_not_load_trash_please_try_again)).into()),
                 }
@@ -230,6 +239,7 @@ impl TrashPage {
     }
 
     fn reset_covers(&mut self) {
+        self.cover_updates.clear();
         self.cover_requests.clear();
         self.covers.clear();
         self.wanted_covers.clear();
@@ -238,6 +248,16 @@ impl TrashPage {
     /// Called once after the visible list has painted. Layout callbacks only
     /// collect IDs, so they never update an entity while it is being rendered.
     fn request_visible_covers(&mut self, wanted: HashSet<BookId>, cx: &mut Context<Self>) {
+        self.cover_updates.retain(|id, _| wanted.contains(id));
+        for &id in &wanted {
+            self.cover_updates.entry(id).or_insert_with(|| {
+                self.ui.subscribe_cover(id, cx, move |page: &mut Self, cx| {
+                    page.covers.remove(&id);
+                    page.cover_requests.remove(&id);
+                    cx.notify();
+                })
+            });
+        }
         self.wanted_covers = wanted;
         self.covers.retain(|id, _| self.wanted_covers.contains(id));
         self.cover_requests.retain(|id, _| self.wanted_covers.contains(id));
@@ -271,9 +291,8 @@ impl TrashPage {
             self.cover_request_serial = self.cover_request_serial.wrapping_add(1);
             let serial = self.cover_request_serial;
             let task = cx.spawn(async move |page, cx| {
-                let cover = match library.thumbnail(book_id, ThumbnailResolution::Browse).await {
-                    Ok(Some(bytes)) => decoder.spawn(async move { loaded_cover_from_jpeg(bytes) }).await,
-                    Ok(None) => None,
+                let cover = match load_cover_image(library.thumbnail(book_id, ThumbnailResolution::Browse), decoder).await {
+                    Ok(cover) => cover,
                     Err(error) => {
                         log::warn!("failed to load the thumbnail for trashed book {book_id}: {error}");
                         None
@@ -319,9 +338,8 @@ impl TrashPage {
         let operation = operation(self.ui.backend().clone());
         cx.spawn(async move |page, cx| {
             if let Err(error) = operation.await {
-                cx.defer_update(page, move |page, cx| {
-                    page.error = Some(format!(text!(browse::could_not), user_facing_error(&error, ""), action = action).into());
-                    cx.notify();
+                let _ = page.update_in(cx, |_, window, cx| {
+                    notify_error("trash-action-error", format!(text!(browse::could_not), user_facing_error(&error, ""), action = action), window, cx);
                 });
             }
         })
@@ -446,12 +464,14 @@ impl TrashPage {
         let key = item.key();
         let selected = self.selection.contains(&key);
         let page = target.downgrade();
-        let checkbox = components::selection_checkbox(format!("trash-select-{key}"), selected, theme).debug_selector(move || format!("trash-select-{key}")).on_click({
+        let checkbox = components::selection_checkbox(format!("trash-select-{key}"), item.name().to_owned(), selected).debug_selector(move || format!("trash-select-{key}")).on_click({
             let page = page.clone();
-            move |_, _, cx| {
+            move |checked, _, cx| {
                 let _ = page.update(cx, |page, cx| {
-                    if !page.selection.remove(&key) {
+                    if *checked {
                         page.selection.insert(key);
+                    } else {
+                        page.selection.remove(&key);
                     }
                     cx.notify();
                 });
@@ -470,7 +490,18 @@ impl TrashPage {
         let delete = components::delete_icon_button(format!("trash-delete-{key}"), text!(browse::delete_permanently_action), theme).disabled(self.ui.files_busy(cx)).on_click(move |_, window, cx| {
             let _ = page.update(cx, |page, cx| page.confirm_purge(vec![key], false, window, cx));
         });
-        components::trash_row(checkbox, leading, item.name().to_owned(), item.description(now), components::row(components::SPACE_SM).child(restore).child(delete), selected, theme)
+        components::row(components::SPACE_MD)
+            .w_full()
+            .min_h(gpui::rems(4.75))
+            .py(px(components::SPACE_SM))
+            .pr(px(components::SPACE_SM))
+            .border_t_1()
+            .border_color(theme.rule)
+            .when(selected, |row| row.bg(theme.accent_wash))
+            .child(checkbox)
+            .child(leading)
+            .child(components::column(components::SPACE_XS).flex_1().min_w_0().child(components::single_line(item.name().to_owned()).text_size(gpui::rems(components::TEXT_MD))).child(components::caption_line(item.description(now), theme)))
+            .child(components::row(components::SPACE_SM).flex_none().child(restore).child(delete))
             .id(format!("trash-row-{key}"))
             .debug_selector(move || format!("trash-row-{key}"))
     }
@@ -563,7 +594,7 @@ impl TrashPage {
             .relative()
             .size_full()
             .min_h_0()
-            .max_w(px(640.0))
+            .max_w(gpui::rems(40.0))
             .px(px(components::SPACE_MD))
             .child(rows)
             .child(
@@ -592,6 +623,9 @@ impl TrashPage {
 impl Render for TrashPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.cover_visibility.track(window);
+        if self.refresh_pending && self.request.is_none() {
+            self.refresh(cx);
+        }
         let theme = components::browser_theme(cx);
         let now = now_ms();
         if let Some(contents) = &self.contents {
@@ -604,7 +638,7 @@ impl Render for TrashPage {
         let heading = if components::uses_mobile_navigation(window) {
             components::mobile_navigation_heading(text!(browse::trash), crate::navigation::mobile_back(true), theme)
         } else {
-            components::browser_topbar_left().child(div().text_xl().child(text!(browse::trash)))
+            components::browser_topbar_left().child(div().text_size(gpui::rems(components::TEXT_LG)).child(text!(browse::trash)))
         };
         let search = has_items.then(|| components::browser_search_control(self.search_input(window, cx)));
         let empty_trash = has_items.then(|| {
@@ -623,7 +657,34 @@ impl Render for TrashPage {
         let body = with_retry_banner(body, self.error.clone(), "retry-section", theme, move |_, _, cx| {
             let _ = page.update(cx, |page, cx| page.refresh(cx));
         });
-        components::library_section_content().track_focus(&self.focus).child(header).child(body).children(self.render_selection_bar(theme, cx)).into_any_element()
+        components::library_section_content()
+            .track_focus(&self.focus)
+            .key_context("Trash")
+            .on_action(cx.listener(|page, _: &crate::SelectLoadedItems, _, cx| {
+                if let Some(contents) = &page.contents {
+                    page.selection = page.list.rows.iter().filter_map(|row| row.item(contents).map(|item| item.key())).collect();
+                    cx.notify();
+                }
+            }))
+            .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.modifiers != gpui::Modifiers::default() || page.search.as_ref().is_some_and(|(search, _)| search.read(cx).focus_handle(cx).contains_focused(window, cx)) {
+                    return;
+                }
+                match event.keystroke.key.as_str() {
+                    "pageup" | "pagedown" => {
+                        let distance = page.list.state.viewport_bounds().size.height;
+                        page.list.state.scroll_by(if event.keystroke.key == "pageup" { -distance } else { distance });
+                    }
+                    "escape" if !page.selection.is_empty() => page.selection.clear(),
+                    _ => return,
+                }
+                cx.notify();
+                cx.stop_propagation();
+            }))
+            .child(header)
+            .child(body)
+            .children(self.render_selection_bar(theme, cx))
+            .into_any_element()
     }
 }
 

@@ -17,9 +17,12 @@ SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'sync_metadata' AND type 
 SELECT EXISTS(SELECT 1 FROM sync_outbox LIMIT 1);
 
 -- name: owner_cloud_storage_policy!
--- param: enabled: &str
+-- param: enabled: bool
 INSERT INTO sync_metadata(singleton, cloud_storage_enabled) VALUES (1, :enabled)
 ON CONFLICT(singleton) DO UPDATE SET cloud_storage_enabled = excluded.cloud_storage_enabled WHERE cloud_storage_enabled IS NOT excluded.cloud_storage_enabled;
+
+-- name: owner_cloud_storage_enabled ->
+SELECT (SELECT cloud_storage_enabled FROM sync_metadata WHERE singleton = 1);
 
 -- name: owner_reset_remote_books!
 UPDATE book_transfer SET server_has_book = 0 WHERE server_has_book;
@@ -38,13 +41,13 @@ ORDER BY b.content_hash, bd.dir_id;
 -- param: content_hash: &BookId
 -- param: size_bytes: i64
 INSERT INTO book_transfer(content_hash, upload_id, upload_size)
-SELECT content_hash, (SELECT COALESCE(MAX(MAX(COALESCE(upload_id, 0), COALESCE(upload_prepared, 0))), 0) + 1 FROM book_transfer), :size_bytes FROM book WHERE content_hash = :content_hash
+SELECT content_hash, (SELECT sequence + 1 FROM upload_clock WHERE singleton=1), :size_bytes FROM book WHERE content_hash = :content_hash
 ON CONFLICT(content_hash) DO UPDATE SET upload_id = excluded.upload_id, upload_size = excluded.upload_size
 WHERE upload_id IS NULL;
 
 -- name: owner_refresh_book_uploads!
 -- Every queued upload gets a new id, past any stored one, so it is prepared again.
-UPDATE book_transfer SET upload_id = upload_id + (SELECT MAX(MAX(COALESCE(upload_id, 0), COALESCE(upload_prepared, 0))) FROM book_transfer)
+UPDATE book_transfer SET upload_id = upload_id + (SELECT sequence FROM upload_clock WHERE singleton=1)
 WHERE upload_id IS NOT NULL;
 
 -- name: owner_needs_scan ->

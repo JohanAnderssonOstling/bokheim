@@ -1,0 +1,70 @@
+{
+  "exited_local_time": "2026-11-18 16:37:58 CET",
+  "installed_sha256": "849c0513baa0790853107fd7e384b1c9d82ca8e8a3f74c7e93082db5835b76d3",
+  "installed_build_utc": "2026-11-18T12:12:27Z",
+  "exit_status": 1,
+  "refresh_mode": "PartialGray",
+  "damage": {
+    "x": 1656,
+    "y": 347,
+    "width": 16,
+    "height": 1
+  },
+  "cause": "A valid one-row pixel change was submitted as a 16x1 e-ink refresh. FBInk rejects refresh rectangles with either dimension <=1; its -1 result propagated into the platform fatal error and application exit.",
+  "fbink_guard_source": "target/kobo-toolchain-cache/fbink-source/fbink.c:3829",
+  "platform_error_source": "../GPUI-Fork/crates/gpui_kobo/src/platform.rs:1559",
+  "evidence": [
+    "GPUI refresh: mode=PartialGray reason=CoalescedInvalidation damage=x:1656,y:347,w:16,h:1 image_regions=0",
+    "GPUI damage regions: count=1 pixels=16 bounding_pixels=16",
+    "[FBInk] Discarding bogus empty region (16x1) to avoid a softlock!",
+    "[FBInk] [fbink_refresh] Failed to refresh the screen!",
+    "Error: \"Kobo GPUI platform failed: fbink_print_raw_data failed with -1\"",
+    "[Wed Nov 18 16:37:58 CET 2026] Bokheim Kobo exited: status=1"
+  ],
+  "fix_direction": "Ensure submitted refresh rectangles meet FBInk minimum dimensions (at least 2x2), expanding within screen bounds while retaining correct framebuffer pixels.",
+  "scope": "Diagnosis only. Logs and installed metadata read via mounted Kobo USB storage; no application source or device files changed.",
+  "follow_up": {
+    "saved_route": "Settings",
+    "framebuffer": {
+      "width": 1680,
+      "height": 1264,
+      "scale_factor": 2
+    },
+    "scrollbar_match": {
+      "confidence": "Strong geometric match; the log does not identify the painted primitive.",
+      "thumb_width_logical": 8,
+      "right_inset_logical": 4,
+      "expected_physical_x": 1656,
+      "expected_physical_width": 16,
+      "minimum_unclipped_thumb_height_physical": 80,
+      "preceding_damage": {
+        "x": 1656,
+        "y": 262,
+        "width": 16,
+        "height": 85
+      },
+      "observation": "The final changed row y=347 immediately follows the preceding region, whose final row is y=346. This is consistent with a thumb bottom-edge change; it does not prove the original layout event."
+    },
+    "fade_animation": "Kobo configures ScrollbarShow::Always and reduced motion. The normal theme path bypasses the fade branch.",
+    "pipeline": [
+      "Primitive dirty bounds receive a one-pixel pad.",
+      "changed_pixel_bounds_in subsequently tightens damage to the exact differing pixels, removing that pad.",
+      "Damage tiles are clipped to the tight damage bounds, so 32-pixel tiling can still emit 16x1.",
+      "ScreenGeometry::scale_damage permits dimensions of one pixel.",
+      "Both direct refresh and the normal FBInk image path lack minimum-two-pixel expansion; disabling the direct write is not a sufficient fix."
+    ],
+    "recommended_boundary": "Enforce FBInk minimum physical refresh dimensions at the presentation boundary after region splitting and scaling, with correct neighbouring framebuffer pixels and screen-edge clamping.",
+    "limits": "No scene snapshot records which primitive changed or why. The exact thumb resize/movement trigger cannot be established from these logs alone.",
+    "source_references": [
+      "apps/browser/src/universal/settings/keyboard.rs:14",
+      "apps/components/src/scroll.rs:164",
+      "apps/components/src/theme.rs:307",
+      "apps/components/src/theme.rs:332",
+      "vendor/gpui-component/crates/ui/src/scroll/scrollbar.rs:559",
+      "../GPUI-Fork/crates/gpui_kobo/src/gpui_kobo.rs:1411",
+      "../GPUI-Fork/crates/gpui_kobo/src/platform.rs:1055",
+      "../GPUI-Fork/crates/gpui_kobo/src/presenter.rs:379",
+      "../GPUI-Fork/crates/gpui_kobo/src/display.rs:33"
+    ]
+  }
+}

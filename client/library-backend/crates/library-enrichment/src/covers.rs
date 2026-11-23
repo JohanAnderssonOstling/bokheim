@@ -2,72 +2,50 @@
 //! are set once: art only fills a book that has none.
 
 use book_model::BookRecord;
-use metadata_contract::books::MAX_BOOKS_PER_REQUEST;
+use cpu_contract::{cover, ThumbnailBytes};
+use library_model::BlobKind;
 use std::time::Duration;
 use sync_common::BookId;
 
 use crate::{EnrichmentResult, LibraryEnrichment};
 
 impl LibraryEnrichment {
-    /// Looks up the cover of every answered book in `scope` that has none.
-    /// Returns how many covers were filled.
-    pub(crate) async fn fill_covers(&self, scope: &[BookId]) -> EnrichmentResult<usize> {
-        let assets = self.state.read().await.assets().clone();
-        let mut filled = 0;
-        let candidates = self.database.enrichment_cover_candidates(scope).await?;
-        for batch in candidates.chunks(MAX_BOOKS_PER_REQUEST) {
-            let mut checked = Vec::new();
-            let mut completed = Vec::new();
-            let result: EnrichmentResult<()> = async {
-                let mut requested = Vec::new();
-                for hash in batch {
-                    // Do not spend provider requests when another device or worker
-                    // has already supplied local artwork.
-                    if assets.read_bytes(library_model::BlobKind::Thumbnail, hash).await?.is_some() {
-                        checked.push(*hash);
-                        continue;
-                    }
-                    requested.push(*hash);
+    /// Look up pending covers in bounded pages. Artwork publication owns its notifications.
+    pub(crate) async fn fill_covers(&self) -> EnrichmentResult<()> {
+        let mut after = None;
+        loop {
+            let candidates = self.database.enrichment_cover_candidates(after.as_ref()).await?;
+            let Some(last) = candidates.last() else { break };
+            after = Some(*last);
+            for hash in candidates {
+                if let Err(error) = self.fill_cover(hash).await {
+                    log::warn!("cover for {hash} will retry: {error}");
+                    self.events.enrichment.wake_after(Duration::from_secs(60));
                 }
-                if requested.is_empty() {
+            }
+        }
+        Ok(())
+    }
+
+    async fn fill_cover(&self, hash: BookId) -> EnrichmentResult<()> {
+        let Some((record, expected, body)) = self.database.enrichment_cover_input(&hash).await? else { return Ok(()) };
+        let assets = self.state.read().await.assets().clone();
+        if assets.read_bytes(BlobKind::Thumbnail, &hash).await?.is_none() {
+            if let Some(record) = record {
+                if self.fetch_enriched_cover(hash, &record, &expected).await?.is_none() {
+                    self.events.enrichment.wake();
                     return Ok(());
                 }
-                let inputs = self.database.enrichment_cover_inputs(&requested).await?;
-                for (hash, record, expected, publication) in inputs {
-                    let Some(record) = record else {
-                        completed.push((hash, publication));
-                        continue;
-                    };
-                    match self.fetch_enriched_cover(hash, &record, &expected).await {
-                        Ok(Some(found)) => {
-                            filled += usize::from(found);
-                            completed.push((hash, publication));
-                        }
-                        // The book changed meanwhile; look again on the next pass.
-                        Ok(None) => {}
-                        Err(error) => {
-                            let title = if record.metadata.title.is_empty() { "Untitled" } else { &record.metadata.title };
-                            log::warn!("cover for {title:?} will retry: {error}");
-                            self.events.enrichment.wake_after(Duration::from_secs(60));
-                        }
-                    }
-                }
-                Ok(())
             }
-            .await;
-            // Keep completed progress even when a later file/provider operation
-            // in this bounded batch fails.
-            self.database.mark_enrichment_covers_checked(&checked).await?;
-            self.database.mark_enrichment_covers_checked_if_current(&completed).await?;
-            result?;
         }
-        Ok(filled)
+        self.database.mark_enrichment_cover_checked_if_current(&hash, body.as_deref()).await?;
+        Ok(())
     }
 
     async fn fetch_enriched_cover(&self, hash: BookId, record: &BookRecord, expected: &Option<String>) -> EnrichmentResult<Option<bool>> {
         let bytes = self.covers.book_cover(record).await?;
         let versions = match bytes {
-            Some(bytes) => Some(cpu_host::cover(&*self.cpu, bytes).await.map_err(|error| error.to_string())?),
+            Some(bytes) => Some(cover(&*self.cpu, bytes).await.map_err(|error| error.to_string())?),
             None => None,
         };
         self.apply_enriched_cover(hash, expected, versions.as_ref()).await
@@ -75,15 +53,17 @@ impl LibraryEnrichment {
 
     /// Stores fetched art only if the book still has no cover and its
     /// thumbnail work is unchanged since the fetch began. None means it changed.
-    pub(crate) async fn apply_enriched_cover(&self, hash: BookId, expected: &Option<String>, versions: Option<&cpu_host::ThumbnailBytes>) -> EnrichmentResult<Option<bool>> {
+    pub(crate) async fn apply_enriched_cover(&self, hash: BookId, expected: &Option<String>, versions: Option<&ThumbnailBytes>) -> EnrichmentResult<Option<bool>> {
         let storage = self.state.read().await.clone();
-        let _lease = storage.assets().lease_book(&hash).await?;
-        if storage.assets().read_bytes(library_model::BlobKind::Thumbnail, &hash).await?.is_some() || self.database.thumbnail_work_state(&hash).await? != *expected {
+        if self.database.thumbnail_work_state(&hash).await? != *expected {
             return Ok(None);
         }
-        let Some(versions) = versions else { return Ok(Some(false)) };
-        drop(_lease);
-        asset_transfer::thumbnail_jobs::store_thumbnail(storage.assets(), hash, &versions.browse, &versions.card_high_density, &versions.high_density).await?;
+        let Some(versions) = versions else {
+            return Ok(storage.assets().read_bytes(BlobKind::Thumbnail, &hash).await?.is_none().then_some(false));
+        };
+        if !storage.assets().write_missing_thumbnail_set(&hash, versions).await? {
+            return Ok(None);
+        }
         self.events.cover_changed(hash);
         Ok(self.database.complete_thumbnail_if_current(&hash, expected.as_deref()).await?.then_some(true))
     }

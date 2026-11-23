@@ -1,0 +1,11 @@
+[package]
+name = "ui-graph-layout"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui = { workspace = true, features = ["infinite-canvas"] }

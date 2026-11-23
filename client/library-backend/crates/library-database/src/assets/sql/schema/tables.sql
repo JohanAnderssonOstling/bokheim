@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS book_transfer(
     -- This device's cover. A cover is set once: made here from the book or
     -- its artwork, or downloaded, and never replaced.
     cover_state TEXT CHECK(cover_state IN ('pending', 'ready', 'no_cover')),
-    cover_checked INTEGER NOT NULL DEFAULT 0 CHECK(cover_checked IN (0,1))
+    cover_checked INTEGER NOT NULL DEFAULT 0 CHECK(cover_checked IN (0,1)),
+    enrichment_retry_at INTEGER
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS book_transfer_upload_page ON book_transfer(upload_id) WHERE upload_id IS NOT NULL;

@@ -10,16 +10,18 @@ impl PdfView {
     }
 
     pub(super) fn selection_endpoints(&self) -> [Option<Point<Pixels>>; 2] {
-        let Some(selection) = &self.selection else { return [None, None] };
-        let rects = selection.rects();
-        [rects.first().map(|r| (r.left(), r.bottom())), rects.last().map(|r| (r.right(), r.bottom()))].map(|endpoint| {
-            let (x, y) = endpoint?;
+        let endpoints = [
+            self.selection.first().and_then(|page| page.selection.rects().first().map(|rect| (page.page_index, rect.left(), rect.bottom()))),
+            self.selection.last().and_then(|page| page.selection.rects().last().map(|rect| (page.page_index, rect.right(), rect.bottom()))),
+        ];
+        endpoints.map(|endpoint| {
+            let (page_index, x, y) = endpoint?;
             for (slot, (left, width)) in self.screen_slots(self.available_width).into_iter().enumerate() {
                 for stream in 0..if self.zoom_mode == PdfZoomMode::FitHeight { 1 } else { 2 } {
                     for column in columns_for_display(self.fit_width_plan.columns(), self.flow_base_index() + slot + stream) {
                         let column = self.painting_column(*column);
                         let rect = column.page_rect();
-                        if Some(column.page_index()) != self.selection_page || x < rect.left() || x > rect.right() || y < rect.top() || y > rect.bottom() {
+                        if column.page_index() != page_index || x < rect.left() || x > rect.right() || y < rect.top() || y > rect.bottom() {
                             continue;
                         }
                         let inset = if self.zoom_mode == PdfZoomMode::FitHeight { ((width - column.display_width()) * 0.5).max(0.0) } else { 0.0 };
@@ -51,8 +53,9 @@ impl PdfView {
             })
             .min_by(|a, b| a.2.total_cmp(&b.2));
         let Some((index, endpoint, _)) = handle else { return };
-        let Some(selection) = &self.selection else { return };
-        self.selection_anchor_source_index = Some(if index == 0 { selection.last_source_index() } else { selection.first_source_index() });
+        let Some(page) = (if index == 0 { self.selection.last() } else { self.selection.first() }) else { return };
+        self.selection_page = Some(page.page_index);
+        self.selection_anchor_source_index = Some(if index == 0 { page.selection.last_source_index() } else { page.selection.first_source_index() });
         self.selection_anchor = Some((0.0, 0.0));
         self.touch_selection_id = Some(event.id);
         self.touch_selection_offset = event.position - endpoint + point(px(0.0), px(3.0));

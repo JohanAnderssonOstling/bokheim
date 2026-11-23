@@ -1,6 +1,6 @@
 //! Folder component projection v1. These rules are part of replica behavior.
 //! Character classes are explicit so compiler Unicode updates cannot change names.
-use crate::filenames::{MAX_FILE_NAME_BYTES, is_reserved, truncate_utf8};
+use crate::filenames::{is_reserved, truncate_utf8, MAX_FILE_NAME_BYTES};
 
 fn whitespace(c: char) -> bool {
     matches!(c, '\u{0009}'..='\u{000d}' | ' ' | '\u{0085}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}')

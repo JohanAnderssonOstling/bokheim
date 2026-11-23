@@ -5,7 +5,7 @@ SELECT replica_id FROM sync_metadata WHERE singleton = 1;
 
 
 -- name: shared_owner_last_successful_sync_at?
-SELECT CAST(last_successful_sync_at AS TEXT) FROM sync_metadata WHERE singleton = 1;
+SELECT last_successful_sync_at FROM sync_metadata WHERE singleton = 1;
 
 
 -- name: shared_owner_server_library_created?
@@ -23,7 +23,7 @@ ON CONFLICT(content_hash) DO UPDATE SET cover_state = 'pending';
 
 
 -- name: shared_scanner_sequence?
-SELECT CAST(scan_seq AS TEXT) FROM sync_metadata WHERE singleton = 1;
+SELECT scan_seq FROM sync_metadata WHERE singleton = 1;
 
 
 -- name: shared_scanner_enqueue_upload!
@@ -32,7 +32,7 @@ SELECT CAST(scan_seq AS TEXT) FROM sync_metadata WHERE singleton = 1;
 -- Queues the bytes under a new upload id: one past any id still stored, so
 -- an earlier upload's preparation never matches it.
 INSERT INTO book_transfer(content_hash, upload_id, upload_size)
-SELECT content_hash, (SELECT COALESCE(MAX(MAX(COALESCE(upload_id, 0), COALESCE(upload_prepared, 0))), 0) + 1 FROM book_transfer), :size_bytes
+SELECT content_hash, (SELECT sequence + 1 FROM upload_clock WHERE singleton=1), :size_bytes
 FROM book WHERE content_hash = :content_hash
 ON CONFLICT(content_hash) DO UPDATE SET upload_id = excluded.upload_id, upload_size = excluded.upload_size;
 
@@ -42,7 +42,7 @@ ON CONFLICT(content_hash) DO UPDATE SET upload_id = excluded.upload_id, upload_s
 -- param: content_hash: &BookId
 -- param: dir_id: &str
 -- param: relative_path: &str
-INSERT INTO local_file_projection(content_hash,dir_id,relative_path) VALUES(:content_hash,:dir_id,:relative_path) ON CONFLICT(content_hash,dir_id) DO UPDATE SET relative_path=excluded.relative_path;
+INSERT INTO local_file_projection(content_hash,dir_id,relative_path) VALUES(:content_hash,:dir_id,'/'||ltrim(:relative_path,'/')) ON CONFLICT(content_hash,dir_id) DO UPDATE SET relative_path=excluded.relative_path;
 
 
 -- name: shared_occupied_file_names?
@@ -67,7 +67,7 @@ INSERT OR REPLACE INTO local_directory_work(dir_id) VALUES(:dir_id);
 -- name: shared_placements_queue_file_work!
 -- param: content_hash: &BookId
 -- param: relative_path: &str
-INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES('remove',:content_hash,:relative_path);
+INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES('remove',:content_hash,'/'||ltrim(:relative_path,'/'));
 
 -- name: shared_queue_materialization!
 -- param: content_hash: &BookId
@@ -84,14 +84,6 @@ DELETE FROM local_file_work WHERE content_hash=:content_hash AND operation='mate
 -- param: content_hash: &BookId
 INSERT INTO local_purge_work(content_hash) VALUES(:content_hash)
 ON CONFLICT(content_hash) DO UPDATE SET id=excluded.id;
-
-
--- name: shared_cursor_lifecycle_select?
-SELECT CAST(last_pull_lifecycle_seq AS TEXT) FROM sync_metadata WHERE singleton = 1;
-
-
--- name: shared_cursor_field_select?
-SELECT CAST(last_pull_field_seq AS TEXT) FROM sync_metadata WHERE singleton = 1;
 
 
 -- name: shared_apply_remote_book_purged_select?
@@ -150,4 +142,5 @@ SELECT EXISTS(SELECT 1 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id W
 SELECT bd.dir_id, bd.file_name
 FROM book_dir bd
 JOIN book b ON b.row_id = bd.book_row_id
-WHERE b.content_hash = :content_hash AND b.deleted_at IS NULL AND bd.deleted_at IS NULL;
+WHERE b.content_hash = :content_hash AND b.deleted_at IS NULL AND bd.deleted_at IS NULL
+ORDER BY bd.dir_id, bd.file_name;

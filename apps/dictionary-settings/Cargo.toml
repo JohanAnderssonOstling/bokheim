@@ -7,7 +7,7 @@ edition = "2024"
 ui-text = { path = "../ui-text" }
 dictionary = { path = "../../client/dictionaries/core", features = ["client"] }
 dictionary-catalog = { path = "../../client/dictionaries/catalog" }
-ui-components = { path = "../components" }
+ui-components = { path = "../components", default-features = false }
 gpui.workspace = true
 gpui-component.workspace = true
 log = "0.4"

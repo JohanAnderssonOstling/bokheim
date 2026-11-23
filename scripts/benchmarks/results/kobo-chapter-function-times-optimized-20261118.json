@@ -1,0 +1,2179 @@
+{
+  "method": "Exclusive userspace instruction-pointer sampling at 500 Hz; average CPU milliseconds per transition, reader UI plus dedicated chapter worker only. Zero means no samples attributed to that symbol.",
+  "source": "kobo-chapter-functions-optimized-20261118.json",
+  "sample_count": 4419,
+  "lost_samples": 0,
+  "reader_thread_ids": [
+    14504,
+    14532
+  ],
+  "reader_cpu_total_ms_per_transition": {
+    "NextPage": 580.333,
+    "PreviousPage": 892.0
+  },
+  "wall_time_by_button": {
+    "NextPage": {
+      "count": 6,
+      "median_ms": 849.6804999999999,
+      "p95_ms": 863.235,
+      "min_ms": 810.799,
+      "max_ms": 863.235
+    },
+    "PreviousPage": {
+      "count": 6,
+      "median_ms": 1264.914,
+      "p95_ms": 1333.059,
+      "min_ms": 1085.035,
+      "max_ms": 1333.059
+    }
+  },
+  "presentation_median_ms_by_button": {
+    "NextPage": 40.5,
+    "PreviousPage": 38.0
+  },
+  "comparability": "Same chapter boundary and book. Earlier function capture was a different build, landscape, and different reader settings, so numerical differences do not isolate the optimization effects.",
+  "comparison": [
+    {
+      "function": "Knuth\u2013Plass line breaking",
+      "current_forward_cpu_ms": 40.333,
+      "current_backward_cpu_ms": 74.333,
+      "earlier_forward_cpu_ms": 47.33,
+      "earlier_backward_cpu_ms": 94.67
+    },
+    {
+      "function": "malloc internals",
+      "current_forward_cpu_ms": 22.667,
+      "current_backward_cpu_ms": 28.667,
+      "earlier_forward_cpu_ms": 28.0,
+      "earlier_backward_cpu_ms": 33.33
+    },
+    {
+      "function": "Attribute hashing",
+      "current_forward_cpu_ms": 20.333,
+      "current_backward_cpu_ms": 29.667,
+      "earlier_forward_cpu_ms": 20.67,
+      "earlier_backward_cpu_ms": 26.67
+    },
+    {
+      "function": "HarfRust substitutions",
+      "current_forward_cpu_ms": 10.333,
+      "current_backward_cpu_ms": 27.0,
+      "earlier_forward_cpu_ms": 14.0,
+      "earlier_backward_cpu_ms": 26.67
+    },
+    {
+      "function": "free internals",
+      "current_forward_cpu_ms": 11.333,
+      "current_backward_cpu_ms": 25.667,
+      "earlier_forward_cpu_ms": 17.33,
+      "earlier_backward_cpu_ms": 18.0
+    },
+    {
+      "function": "Cosmic shaping",
+      "current_forward_cpu_ms": 14.667,
+      "current_backward_cpu_ms": 22.0,
+      "earlier_forward_cpu_ms": 12.0,
+      "earlier_backward_cpu_ms": 26.67
+    },
+    {
+      "function": "Direct framebuffer presentation",
+      "current_forward_cpu_ms": 17.0,
+      "current_backward_cpu_ms": 16.667,
+      "earlier_forward_cpu_ms": 0,
+      "earlier_backward_cpu_ms": 0
+    },
+    {
+      "function": "Glyph masks",
+      "current_forward_cpu_ms": 13.667,
+      "current_backward_cpu_ms": 14.333,
+      "earlier_forward_cpu_ms": 16.67,
+      "earlier_backward_cpu_ms": 21.33
+    },
+    {
+      "function": "Damage bounds",
+      "current_forward_cpu_ms": 5.667,
+      "current_backward_cpu_ms": 6.0,
+      "earlier_forward_cpu_ms": 19.33,
+      "earlier_backward_cpu_ms": 20.0
+    },
+    {
+      "function": "Old framebuffer drawing",
+      "current_forward_cpu_ms": 0,
+      "current_backward_cpu_ms": 0,
+      "earlier_forward_cpu_ms": 58.67,
+      "earlier_backward_cpu_ms": 58.67
+    },
+    {
+      "function": "Identity scaling",
+      "current_forward_cpu_ms": 0,
+      "current_backward_cpu_ms": 0,
+      "earlier_forward_cpu_ms": 26.0,
+      "earlier_backward_cpu_ms": 26.0
+    }
+  ],
+  "functions": [
+    {
+      "function": "html_layout::inline::s03_compose::wrapping::knuth_plass::break_compact_with_mode::<core::iter::adapters::copied::Copied<core::slice::iter::Iter<html_layout::inline::s03_compose::wrapping::knuth_plass::CompactBreakpoint>>, &&html_layout::inline::s03_compose::wrapping::optimal::break_lines_knuth::{closure#2}, html_layout::inline::s03_compose::wrapping::optimal::break_lines_knuth::{closure#3}>",
+      "forward_cpu_ms": 40.333,
+      "backward_cpu_ms": 74.333
+    },
+    {
+      "function": "libarmmem::memcpy",
+      "forward_cpu_ms": 25.333,
+      "backward_cpu_ms": 41.333
+    },
+    {
+      "function": "_int_malloc",
+      "forward_cpu_ms": 22.667,
+      "backward_cpu_ms": 28.667
+    },
+    {
+      "function": "<cosmic_text::attrs::AttrsOwned as core::hash::Hash>::hash::<rustc_hash::FxHasher>",
+      "forward_cpu_ms": 20.333,
+      "backward_cpu_ms": 29.667
+    },
+    {
+      "function": "<harfrust::hb::ot_shape::OtShapeContext>::substitute_pre",
+      "forward_cpu_ms": 10.333,
+      "backward_cpu_ms": 27.0
+    },
+    {
+      "function": "_int_free",
+      "forward_cpu_ms": 11.333,
+      "backward_cpu_ms": 25.667
+    },
+    {
+      "function": "<cosmic_text::shape::Shaping>::run",
+      "forward_cpu_ms": 14.667,
+      "backward_cpu_ms": 22.0
+    },
+    {
+      "function": "gpui_fbink_present_gray",
+      "forward_cpu_ms": 17.0,
+      "backward_cpu_ms": 16.667
+    },
+    {
+      "function": "libarmmem::memset",
+      "forward_cpu_ms": 17.0,
+      "backward_cpu_ms": 14.667
+    },
+    {
+      "function": "html_layout::inline::s01_prepare::prepare_inline_tokens",
+      "forward_cpu_ms": 11.333,
+      "backward_cpu_ms": 19.333
+    },
+    {
+      "function": "__GI_memcmp",
+      "forward_cpu_ms": 12.667,
+      "backward_cpu_ms": 15.333
+    },
+    {
+      "function": "gpui_kobo::draw_mask",
+      "forward_cpu_ms": 13.667,
+      "backward_cpu_ms": 14.333
+    },
+    {
+      "function": "<gpui_wgpu::cosmic_text_system::CosmicTextSystemState>::layout_line_no_separators",
+      "forward_cpu_ms": 8.333,
+      "backward_cpu_ms": 18.0
+    },
+    {
+      "function": "<cosmic_text::attrs::AttrsOwned as core::cmp::PartialEq>::eq",
+      "forward_cpu_ms": 8.0,
+      "backward_cpu_ms": 16.0
+    },
+    {
+      "function": "hypher::hyphenate_bounded",
+      "forward_cpu_ms": 9.333,
+      "backward_cpu_ms": 12.0
+    },
+    {
+      "function": "<harfrust::hb::face::hb_font_t>::shape_with_plan",
+      "forward_cpu_ms": 6.667,
+      "backward_cpu_ms": 14.0
+    },
+    {
+      "function": "<cosmic_text::shape::ShapeSpan>::build",
+      "forward_cpu_ms": 7.667,
+      "backward_cpu_ms": 12.667
+    },
+    {
+      "function": "<cosmic_text::shape::ShapeLine>::layout_to_buffer::{closure#8}",
+      "forward_cpu_ms": 8.333,
+      "backward_cpu_ms": 11.667
+    },
+    {
+      "function": "__GI___libc_malloc",
+      "forward_cpu_ms": 8.333,
+      "backward_cpu_ms": 11.333
+    },
+    {
+      "function": "<html_engine_model::text_placement::LineTextPlacement>::at",
+      "forward_cpu_ms": 5.333,
+      "backward_cpu_ms": 11.667
+    },
+    {
+      "function": "gpui_kobo::add_dirty_region",
+      "forward_cpu_ms": 9.0,
+      "backward_cpu_ms": 8.0
+    },
+    {
+      "function": "cosmic_text::shape::shape_fallback",
+      "forward_cpu_ms": 7.0,
+      "backward_cpu_ms": 9.667
+    },
+    {
+      "function": "malloc_consolidate",
+      "forward_cpu_ms": 6.333,
+      "backward_cpu_ms": 9.333
+    },
+    {
+      "function": "<cosmic_text::shape::ShapeLine>::build_inner",
+      "forward_cpu_ms": 6.0,
+      "backward_cpu_ms": 9.0
+    },
+    {
+      "function": "html_layout::inline::s04_lines::prepare_line",
+      "forward_cpu_ms": 5.667,
+      "backward_cpu_ms": 9.333
+    },
+    {
+      "function": "<html_gpui::text::GpuiTextCache>::shape_line_geometry",
+      "forward_cpu_ms": 5.333,
+      "backward_cpu_ms": 9.0
+    },
+    {
+      "function": "html_text::line_breaks::resolve::<html_engine_model::layout_tree::LayoutTree>",
+      "forward_cpu_ms": 5.333,
+      "backward_cpu_ms": 8.0
+    },
+    {
+      "function": "<hypher::State>::at",
+      "forward_cpu_ms": 3.667,
+      "backward_cpu_ms": 9.333
+    },
+    {
+      "function": "<core::hash::BuildHasherDefault<rustc_hash::FxHasher> as core::hash::BuildHasher>::hash_one::<&cosmic_text::shape_run_cache::ShapeRunKey>",
+      "forward_cpu_ms": 5.333,
+      "backward_cpu_ms": 7.0
+    },
+    {
+      "function": "<unicode_segmentation::grapheme::Graphemes as core::iter::traits::iterator::Iterator>::next",
+      "forward_cpu_ms": 5.667,
+      "backward_cpu_ms": 6.333
+    },
+    {
+      "function": "gpui_kobo::changed_pixel_bounds_in",
+      "forward_cpu_ms": 5.667,
+      "backward_cpu_ms": 6.0
+    },
+    {
+      "function": "<gpui_kobo::KoboRenderer>::render_to_grayscale",
+      "forward_cpu_ms": 5.0,
+      "backward_cpu_ms": 6.0
+    },
+    {
+      "function": "<html_layout::inline::tokens::InlineTokens>::rebuild_summary_blocks",
+      "forward_cpu_ms": 4.0,
+      "backward_cpu_ms": 7.0
+    },
+    {
+      "function": "<html_gpui::text::GpuiTextRun>::native_paint_bounds",
+      "forward_cpu_ms": 4.333,
+      "backward_cpu_ms": 6.0
+    },
+    {
+      "function": "html_layout::inline::s00_layout::layout_prepared_tokens",
+      "forward_cpu_ms": 3.0,
+      "backward_cpu_ms": 7.0
+    },
+    {
+      "function": "<read_fonts::tables::gpos::PairPosFormat1 as harfrust::hb::ot_layout_gsubgpos::Apply>::apply_with_external_cache",
+      "forward_cpu_ms": 5.0,
+      "backward_cpu_ms": 5.0
+    },
+    {
+      "function": "harfrust::hb::ot_layout::apply_forward_with_data",
+      "forward_cpu_ms": 3.667,
+      "backward_cpu_ms": 6.0
+    },
+    {
+      "function": "<cosmic_text::shape_run_cache::ShapeRunCache>::get",
+      "forward_cpu_ms": 3.333,
+      "backward_cpu_ms": 6.0
+    },
+    {
+      "function": "__GI___libc_free",
+      "forward_cpu_ms": 4.0,
+      "backward_cpu_ms": 5.0
+    },
+    {
+      "function": "<read_fonts::tables::gpos::PairPosFormat2 as harfrust::hb::ot_layout_gsubgpos::Apply>::apply_with_external_cache",
+      "forward_cpu_ms": 3.667,
+      "backward_cpu_ms": 5.333
+    },
+    {
+      "function": "<harfrust::hb::ot_shape::OtShapeContext>::position_by_plan",
+      "forward_cpu_ms": 3.333,
+      "backward_cpu_ms": 5.333
+    },
+    {
+      "function": "<html_engine_model::shaping_views::TextGeometryView>::boundary_with_hint",
+      "forward_cpu_ms": 1.667,
+      "backward_cpu_ms": 7.0
+    },
+    {
+      "function": "<html_layout::inline::s03_compose::wrapping::KpPlan>::build",
+      "forward_cpu_ms": 3.667,
+      "backward_cpu_ms": 5.0
+    },
+    {
+      "function": "libarmmem::memcmp",
+      "forward_cpu_ms": 4.667,
+      "backward_cpu_ms": 3.667
+    },
+    {
+      "function": "html_layout::paint::text::prepare_text_paint",
+      "forward_cpu_ms": 3.333,
+      "backward_cpu_ms": 5.0
+    },
+    {
+      "function": "<harfrust::hb::ot_shape_plan::ShapePlanKey>::matches",
+      "forward_cpu_ms": 3.333,
+      "backward_cpu_ms": 4.667
+    },
+    {
+      "function": "<html_text::line_breaks::Paragraph>::push",
+      "forward_cpu_ms": 1.667,
+      "backward_cpu_ms": 5.667
+    },
+    {
+      "function": "<cosmic_text::shape::ShapeWord>::new",
+      "forward_cpu_ms": 3.333,
+      "backward_cpu_ms": 4.0
+    },
+    {
+      "function": "html_gpui::paint::paint_commands_inner",
+      "forward_cpu_ms": 4.0,
+      "backward_cpu_ms": 3.333
+    },
+    {
+      "function": "unicode_bidi::char_data::bsearch_range_value_table",
+      "forward_cpu_ms": 4.333,
+      "backward_cpu_ms": 2.667
+    },
+    {
+      "function": "<cosmic_text::attrs::AttrsList>::get_span",
+      "forward_cpu_ms": 3.333,
+      "backward_cpu_ms": 3.667
+    },
+    {
+      "function": "<cosmic_text::attrs::AttrsOwned>::new",
+      "forward_cpu_ms": 2.667,
+      "backward_cpu_ms": 4.333
+    },
+    {
+      "function": "html_shape::execution::shape_document::<html_gpui::text::GpuiTextCache>",
+      "forward_cpu_ms": 3.333,
+      "backward_cpu_ms": 3.667
+    },
+    {
+      "function": "html_text::normalization::collapse_whitespace::<html_engine_model::layout_tree::LayoutTree>",
+      "forward_cpu_ms": 2.333,
+      "backward_cpu_ms": 4.333
+    },
+    {
+      "function": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write",
+      "forward_cpu_ms": 2.0,
+      "backward_cpu_ms": 4.333
+    },
+    {
+      "function": "html_layout::inline::s04_lines::measurement::base_line_metrics",
+      "forward_cpu_ms": 2.333,
+      "backward_cpu_ms": 4.0
+    },
+    {
+      "function": "<alloc::raw_vec::RawVecInner>::finish_grow",
+      "forward_cpu_ms": 2.333,
+      "backward_cpu_ms": 3.667
+    },
+    {
+      "function": "<harfrust::hb::ot::lookup::LookupInfo>::apply",
+      "forward_cpu_ms": 2.0,
+      "backward_cpu_ms": 4.0
+    },
+    {
+      "function": "<smol_str::SmolStr as core::hash::Hash>::hash::<rustc_hash::FxHasher>",
+      "forward_cpu_ms": 2.667,
+      "backward_cpu_ms": 3.333
+    },
+    {
+      "function": "__memcpy_neon",
+      "forward_cpu_ms": 2.667,
+      "backward_cpu_ms": 3.0
+    },
+    {
+      "function": "html_gpui::text::native_cluster_geometry::{closure#0}::{closure#0}::{closure#0}",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 4.333
+    },
+    {
+      "function": "<html_engine_model::shaping_views::TextGeometryView>::advance_with_hint",
+      "forward_cpu_ms": 2.667,
+      "backward_cpu_ms": 2.667
+    },
+    {
+      "function": "<cosmic_text::shape::ShapeLine>::layout_spans",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 4.0
+    },
+    {
+      "function": "html_text::line_breaks::needs_unicode_breaks",
+      "forward_cpu_ms": 2.0,
+      "backward_cpu_ms": 3.0
+    },
+    {
+      "function": "<html_pipeline::stages::lifecycle::PreparedIndexes>::new",
+      "forward_cpu_ms": 2.0,
+      "backward_cpu_ms": 3.0
+    },
+    {
+      "function": "_int_realloc",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 3.667
+    },
+    {
+      "function": "<html_layout::inline::metrics::MetricsChunks as core::iter::traits::iterator::Iterator>::next",
+      "forward_cpu_ms": 2.333,
+      "backward_cpu_ms": 2.333
+    },
+    {
+      "function": "<html_gpui::text::GpuiTextRun>::new",
+      "forward_cpu_ms": 2.0,
+      "backward_cpu_ms": 2.333
+    },
+    {
+      "function": "harfrust::hb::ot::gpos::apply_value",
+      "forward_cpu_ms": 1.667,
+      "backward_cpu_ms": 2.667
+    },
+    {
+      "function": "<html_layout::engine::LayoutEngine>::finalize",
+      "forward_cpu_ms": 1.667,
+      "backward_cpu_ms": 2.667
+    },
+    {
+      "function": "html_text::line_breaks::needs_contextual_breaks",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 3.0
+    },
+    {
+      "function": "roundf",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 2.667
+    },
+    {
+      "function": "<cosmic_text::shape::ShapeLine>::layout_to_buffer",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 3.0
+    },
+    {
+      "function": "html_layout::inline::hyphenation::word_breaks",
+      "forward_cpu_ms": 1.667,
+      "backward_cpu_ms": 2.333
+    },
+    {
+      "function": "<html_engine_model::glyph_metrics::GlyphMetrics>::register_run",
+      "forward_cpu_ms": 1.667,
+      "backward_cpu_ms": 2.0
+    },
+    {
+      "function": "<smol_str::Repr>::new",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 2.667
+    },
+    {
+      "function": "<html_text::normalization::NormalizedText>::push",
+      "forward_cpu_ms": 1.667,
+      "backward_cpu_ms": 2.0
+    },
+    {
+      "function": "<harfrust::hb::buffer::hb_buffer_t>::guess_segment_properties",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 2.667
+    },
+    {
+      "function": "<html_gpui::text::CharacterBytes>::find_from",
+      "forward_cpu_ms": 1.667,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "<html_gpui::text::CharacterBytes<&[usize], &[u32], &[u16]>>::find_from",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 2.0
+    },
+    {
+      "function": "<html_engine_model::caret_positions::CaretCursor>::get",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 2.667
+    },
+    {
+      "function": "<html_engine_model::glyph_metrics::MetricRecord>::metric",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 2.0
+    },
+    {
+      "function": "<cosmic_text::attrs::TextDecoration as core::cmp::PartialEq>::eq",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 2.333
+    },
+    {
+      "function": "<cosmic_text::shape_run_cache::ShapeRunCache>::insert",
+      "forward_cpu_ms": 1.667,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "<harfrust::hb::buffer::GlyphInfo>::init_unicode_props",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 2.667
+    },
+    {
+      "function": "<html_text::content::InlineContent>::push_source_character",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 2.0
+    },
+    {
+      "function": "__GI___libc_realloc",
+      "forward_cpu_ms": 1.667,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "html_text::spacing::tracking_boundary_allowed",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 2.0
+    },
+    {
+      "function": "html_layout::inline::s05_emit::fragments::prepare_line_fragment_plan",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "<html_layout::inline::reader::InlineReader>::glyph_metric",
+      "forward_cpu_ms": 1.667,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "<gpui::bounds_tree::BoundsTree<gpui::geometry::ScaledPixels>>::insert",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "<core::ops::range::Range<u32> as core::iter::traits::double_ended::DoubleEndedIterator>::try_rfold::<(), core::iter::traits::iterator::Iterator::find_map::check<u32, (u32, html_engine_model::glyph_metrics::GlyphMetric), html_layout::inline::s04_lines::measurement::optical_margin_protrusion::{closure#0}>::{closure#0}, core::ops::control_flow::ControlFlow<(u32, html_engine_model::glyph_metrics::GlyphMetric)>>",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 2.333
+    },
+    {
+      "function": "html_layout::inline::s00_layout::layout_paragraphs",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "<html_layout::inline::s01_prepare::hyphenation::TextGroup>::flush",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 2.333
+    },
+    {
+      "function": "html_engine_model::bidi::grapheme_boundaries::{closure#0}",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 3.0
+    },
+    {
+      "function": "html_parse::xml::parse_xml_dom",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "<cosmic_text::font::system::FontSystem>::cache_weight",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "<html_layout::inline::boundaries::BoundaryReader>::before",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "<cosmic_text::font::system::FontSystem>::get_font_cached",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "html_layout::boxes::s01_sizing::resolve_box_sizing",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 2.0
+    },
+    {
+      "function": "<harfrust::hb::buffer::hb_buffer_t>::push_str",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "<html_format::box_builder::writer::BoxTreeWriter>::push_source_text_fragment",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "fmaf",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "harfrust::hb::ot::lookup::pair_pos1_cached",
+      "forward_cpu_ms": 1.667,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "html_layout::inline::s03_compose::wrapping::optimal::break_lines_knuth::{closure#3}",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "core::ptr::drop_glue::<cosmic_text::shape_run_cache::ShapeRunKey>",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "[unknown+0xdbac0]",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "gpui_wgpu::cosmic_text_system::contains_paragraph_separator",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "<alloc::string::String as core::iter::traits::collect::Extend<char>>::extend::<core::iter::adapters::copied::Copied<core::slice::iter::Iter<char>>>",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "<cosmic_text::attrs::FontVariations as core::cmp::PartialEq>::eq",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "<core::cell::once::OnceCell<harfrust::hb::glyph_metrics::GlyphMetrics>>::try_init::<<core::cell::once::OnceCell<harfrust::hb::glyph_metrics::GlyphMetrics>>::get_or_init<<harfrust::hb::font_funcs::BuiltinFontFuncs>::glyph_metrics::{closure#0}>::{closure#0}, !>",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "<html_engine_model::shaping_contracts::GlyphResourceStore>::shape_run::<html_gpui::text::GpuiTextCache>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 2.0
+    },
+    {
+      "function": "html_layout::boxes::s03_finish::finish_resolved_box",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "<html_gpui::text::GpuiTextRun>::glyph_ranges",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&gpui::platform::AtlasKey>",
+      "forward_cpu_ms": 1.667,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "core::slice::sort::stable::quicksort::quicksort::<gpui::scene::MonochromeSprite, <[gpui::scene::MonochromeSprite]>::sort_by_key<(u32, gpui::platform::TileId), <gpui::scene::Scene>::finish::{closure#4}>::{closure#0}>",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "core::ptr::drop_glue::<alloc::vec::Vec<(core::ops::range::Range<usize>, cosmic_text::attrs::AttrsOwned)>>",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "html_text::spacing::suppresses_glyph",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "[unknown+0x15f24]",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "<harfrust::hb::ot_layout_gsubgpos::skipping_iterator_t<for<'a> fn(&'a mut harfrust::hb::buffer::GlyphInfo, u32) -> bool>>::match_at",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "html_layout::block::s00_flow::layout_flow_children",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html_engine_model::shaping_contracts::ShapedTextGeometry>::character_geometry_with_hint",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "<html_shape::spans::ShapingSpan>::split_bidi",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "<harfrust::hb::buffer::hb_buffer_t>::enlarge",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "<harfrust::hb::face::hb_font_t>::shape",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "<read_fonts::tables::gsub::LigatureSubstFormat1 as harfrust::hb::ot_layout_gsubgpos::Apply>::apply_with_external_cache",
+      "forward_cpu_ms": 1.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<smol_str::SmolStr as core::cmp::PartialEq>::eq",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "<gpui::text_system::TextSystem>::raster_bounds",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "<read_fonts::tables::gsub::Ligature as harfrust::hb::ot_layout_gsubgpos::Apply>::apply",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "[unknown+0xdbfd0]",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "<gpui::text_system::WindowTextSystem>::layout_line_uncached",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "core::slice::sort::unstable::quicksort::quicksort::<html_engine_model::word_index::WordSpan, <[html_engine_model::word_index::WordSpan]>::sort_unstable_by_key<u32, <html_engine_model::word_index::WordIndex>::sort::{closure#0}>::{closure#0}>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "<alloc::boxed::Box<[html_gpui::text::CaretNativeGlyphPair]> as core::iter::traits::collect::FromIterator<html_gpui::text::CaretNativeGlyphPair>>::from_iter::<core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<alloc::vec::into_iter::IntoIter<gpui::text_system::line_layout::ShapedGlyph>>, <html_gpui::text::NativeGlyphs>::new::{closure#4}>>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 1.667
+    },
+    {
+      "function": "core::iter::adapters::flatten::and_then_or_clear::<core::iter::adapters::filter_map::FilterMap<core::ops::range::Range<usize>, <html_gpui::text::GpuiTextRun>::glyphs_in_range::{closure#0}::{closure#0}>, html_gpui::text::GpuiRunGlyph, <core::iter::adapters::filter_map::FilterMap<core::ops::range::Range<usize>, <html_gpui::text::GpuiTextRun>::glyphs_in_range::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::next>",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "html_style_model::computed_style::srgb_to_oklab",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html_gpui::text::GpuiTextCache as html_engine_model::shaping_contracts::GlyphShaper>::shape_run",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "html_layout::inline::s05_emit::fragments::positioned_resolved_fragments",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui::style::Style as refineable::Refineable>::refine",
+      "forward_cpu_ms": 1.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_layout::paint::ordering::PaintOrderCache>::key",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "<gpui::window::Frame>::hit_test",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<harfrust::hb::buffer::hb_buffer_t>::set_glyph_flags",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<harfrust::hb::buffer::hb_buffer_t>::sync",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "html_layout::paint::replay",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "<html_style::style::cascade::resolver::session::StyleResolverContext>::compute_style_for_dom_element",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "html_pipeline::stages::output::words::emit_word_ranges::<html_pipeline::stages::output::words::build_word_index::{closure#5}>::{closure#0}",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "core::ptr::drop_glue::<gpui::text_system::Font>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "__roundf_veneer",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "html_engine_model::shaping_contracts::shaping::preserve_graphemes",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "<html_pipeline::stages::output::pagination::Pagination>::group",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "core::iter::adapters::flatten::and_then_or_clear::<core::iter::adapters::map::Map<core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<core::ops::range::Range<usize>>, core::iter::adapters::flatten::FlatMap<core::iter::adapters::take_while::TakeWhile<core::iter::adapters::chain::Chain<core::option::IntoIter<html_gpui::text::GpuiFontSpan>, core::iter::adapters::cloned::Cloned<core::slice::iter::Iter<html_gpui::text::GpuiFontSpan>>>, <html_gpui::text::RunMetadata>::font_spans_in_range::{closure#1}>, core::iter::adapters::filter_map::FilterMap<core::ops::range::Range<usize>, <html_gpui::text::GpuiTextRun>::glyphs_in_range::{closure#0}::{closure#0}>, <html_gpui::text::GpuiTextRun>::glyphs_in_range::{closure#0}>, html_gpui::paint::paint_commands_inner::{closure#4}::{closure#0}>, html_gpui::paint::paint_commands_inner::{closure#4}::{closure#1}>, gpui::window::PaintGlyph, <core::iter::adapters::map::Map<core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<core::ops::range::Range<usize>>, core::iter::adapters::flatten::FlatMap<core::iter::adapters::take_while::TakeWhile<core::iter::adapters::chain::Chain<core::option::IntoIter<html_gpui::text::GpuiFontSpan>, core::iter::adapters::cloned::Cloned<core::slice::iter::Iter<html_gpui::text::GpuiFontSpan>>>, <html_gpui::text::RunMetadata>::font_spans_in_range::{closure#1}>, core::iter::adapters::filter_map::FilterMap<core::ops::range::Range<usize>, <html_gpui::text::GpuiTextRun>::glyphs_in_range::{closure#0}::{closure#0}>, <html_gpui::text::GpuiTextRun>::glyphs_in_range::{closure#0}>, html_gpui::paint::paint_commands_inner::{closure#4}::{closure#0}>, html_gpui::paint::paint_commands_inner::{closure#4}::{closure#1}> as core::iter::traits::iterator::Iterator>::next>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "<html_style_model::computed_style::UsedStyleView>::resolved_line_height",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 1.333
+    },
+    {
+      "function": "<gpui_kobo::KoboAtlas as gpui::platform::PlatformAtlas>::get_or_insert_with",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_text::line_breaks::CjkWritingSystem>::for_language",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "unicode_segmentation::word::ascii_word_ok",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_pipeline::stages::output::geometry::RenderGeometryView>::line_vertical_bounds",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<gpui::scene::Primitive>::visual_bounds",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "core::slice::sort::shared::smallsort::sort8_stable::<html_engine_model::word_index::WordSpan, <[html_engine_model::word_index::WordSpan]>::sort_unstable_by_key<u32, <html_engine_model::word_index::WordIndex>::sort::{closure#0}>::{closure#0}>",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "___RNvXs3_Cs6BoYFIwAQux_8smol_strNtB5_7SmolStrNtNtCs5yrd3dq0xpX_4core3cmp9PartialEq2eq_veneer",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "[unknown+0xdbbb8]",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "__memcpy@@GLIBC_2.4_veneer",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "ui_html_components::bundled_font_loader::{closure#0}",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_layout::inline::s00_layout::plans::InlinePlanCache>::insert",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_engine_model::shaping_views::TextGeometryView>::paint_glyph",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html_style::style::compiled::SelectorIndex>::from_prepared",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "hashbrown::map::equivalent_key::<gpui::platform::AtlasKey, gpui::platform::AtlasKey, gpui::platform::AtlasTile>::{closure#0}",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<core::iter::adapters::flatten::FlattenCompat<core::iter::adapters::map::Map<core::iter::adapters::take_while::TakeWhile<core::iter::adapters::chain::Chain<core::option::IntoIter<html_gpui::text::GpuiFontSpan>, core::iter::adapters::cloned::Cloned<core::slice::iter::Iter<html_gpui::text::GpuiFontSpan>>>, <html_gpui::text::RunMetadata>::font_spans_in_range::{closure#1}>, <html_gpui::text::GpuiTextRun>::glyphs_in_range::{closure#0}>, core::iter::adapters::filter_map::FilterMap<core::ops::range::Range<usize>, <html_gpui::text::GpuiTextRun>::glyphs_in_range::{closure#0}::{closure#0}>> as core::iter::traits::iterator::Iterator>::next",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<unicode_segmentation::grapheme::GraphemeCursor>::grapheme_category",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "hashbrown::map::equivalent_key::<gpui::text_system::Font, gpui::text_system::Font, core::result::Result<gpui::text_system::FontId, anyhow::Error>>::{closure#0}",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html_engine_model::shaping_contracts::ShapedTextGeometry>::advance",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::iter::adapters::flatten::FlatMap<html_layout::inline::metrics::MetricsChunks, core::iter::adapters::map::Map<html_layout::inline::token_span::MetadataIter, <html_layout::inline::metrics::MetricsView>::iter::{closure#0}::{closure#0}>, <html_layout::inline::metrics::MetricsView>::iter::{closure#0}>>, html_layout::inline::s05_emit::positions::sequential_text_positions::{closure#0}> as core::iter::traits::iterator::Iterator>::next",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui_wgpu::cosmic_text_system::CosmicTextSystem as gpui::platform::PlatformTextSystem>::layout_line_reusing_clusters",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<alloc::string::String as core::iter::traits::collect::Extend<char>>::extend::<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<char>>, html_shape::execution::visible_control>>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "core::str::count::do_count_chars",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "html_style::style::cascade::resolver::runner::resolve_declaration",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "harfrust::hb::ot::lookup::pair_pos2_cached",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "html_layout::boxes::s02_contents::layout_box_contents",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "html_text::line_breaks::class",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "[unknown+0xdbf4c]",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "<hypher::Syllables as core::iter::traits::iterator::Iterator>::next",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "<gpui::text_system::TextSystem>::font_id",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "<html_style_model::computed_style::StyleStore>::view",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "<html_engine_model::glyph_metrics::GlyphDimensionsCursor>::select_record",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 1.0
+    },
+    {
+      "function": "<cssparser::tokenizer::Token as core::clone::Clone>::clone",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_style::style::cascade::resolver::resolve_styles_for_dom_timed",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_shape::features::FeatureCache>::range",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "harfrust::hb::ot_shape::zero_mark_widths_by_gdef",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_shape::spans::ShapingSpan>::spacing_flags",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_shape::execution::shaping_features",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::iter::adapters::flatten::FlatMap<html_layout::inline::metrics::MetricsChunks, core::iter::adapters::map::Map<html_layout::inline::token_span::MetadataIter, <html_layout::inline::metrics::MetricsView>::iter::{closure#0}::{closure#0}>, <html_layout::inline::metrics::MetricsView>::iter::{closure#0}>>, html_layout::inline::s05_emit::positions::resolved_positions::{closure#0}> as core::iter::traits::iterator::Iterator>::next",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_layout::inline::hyphenation::WordPolicy>::for_run",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<icu_properties::script::ScriptWithExtensionsBorrowed>::get_script_extensions_val",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_engine_model::caret_positions::CaretPositions>::get",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "core::ptr::drop_glue::<cosmic_text::shape_run_cache::ShapeRunCache>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui_kobo::presenter::FbInkPresenter>::present_update",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<alloc::raw_vec::RawVec<u32>>::grow_one",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<gpui::elements::div::Div as gpui::element::Element>::request_layout::{closure#0}::{closure#1}::{closure#0}::{closure#0}",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "[unknown+0xdbd54]",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<lightningcss::values::string::CowArcStr as static_self::IntoOwned>::into_owned",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "core::ptr::drop_glue::<gpui::window::ElementId>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_engine_model::bidi::ResolvedBidi>::new",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<read_fonts::tables::gsub::LigatureSet as harfrust::hb::ot::gsub::ligature::ApplyLigatureSet>::apply",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<core::ops::range::Range<u32> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::find_map::check<u32, (u32, html_engine_model::glyph_metrics::GlyphMetric), html_layout::inline::s04_lines::measurement::optical_margin_protrusion::{closure#0}>::{closure#0}, core::ops::control_flow::ControlFlow<(u32, html_engine_model::glyph_metrics::GlyphMetric)>>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html::pagination::projection::compose_box_fragments",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui::scene::Scene>::push_layer",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "compiler_builtins::math::libm_math::fmod::fmodf",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "floorf",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_text::normalization::NormalizedText>::finish_pending",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "__bcmp@@GLIBC_2.4_veneer",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<u32 as harfrust::unicode::CharExt>::is_default_ignorable",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<hashbrown::raw::RawTable<(cosmic_text::shape_run_cache::ShapeRunKey, (u64, alloc::vec::Vec<cosmic_text::shape::ShapeGlyph>))>>::reserve_rehash::<hashbrown::map::make_hasher<cosmic_text::shape_run_cache::ShapeRunKey, (u64, alloc::vec::Vec<cosmic_text::shape::ShapeGlyph>), core::hash::BuildHasherDefault<rustc_hash::FxHasher>>::{closure#0}>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "[unknown+0xdbbc0]",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_gpui::paint::GpuiCommandPainter>::push_text_fragment",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "unicode_segmentation::tables::word::word_category",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "__GI_memset",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_engine_model::glyph_adapter::NativePaintResources>::push",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_layout::inline::hyphenation::for_each_word_break::<<html_layout::inline::s01_prepare::hyphenation::TextGroup>::flush_indexed::{closure#3}>::{closure#0}",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "core::ptr::drop_glue::<html_layout::inline::s00_layout::retained::ParagraphLayouts>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_engine_model::page_placements::VisibleLinePositions>::get",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<gpui::window::ElementId as core::hash::Hash>::hash::<rustc_hash::FxHasher>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui::scene::Scene>::clear",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<lightningcss::parser::NestedRuleParser<lightningcss::parser::DefaultAtRuleParser>>::parse_nested",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<alloc::raw_vec::RawVec<slotmap::basic::Slot<gpui::window::FocusRef>>>::grow_one",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "html_shape::execution::resolve_run_geometry::<core::iter::adapters::copied::Copied<core::slice::iter::Iter<html_engine_model::inline::GlyphId>>>",
+      "forward_cpu_ms": 0.667,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "gpui_kobo::fill_clipped_gray",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_style::style::cascade::resolver::runner::CascadeResolver>::apply_cascade",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_style_model::computed_style::StyleView>::requires_font_metrics",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_engine_model::bidi::grapheme_boundaries",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_layout::layout::compute_layout",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_style::style::rules::selectors::push_candidate",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html_gpui::text::CharacterBytes>::new",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "gpui_wgpu::cosmic_text_system::discard_spare_pages_at_least::<cosmic_text::shape::ShapeGlyph>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html_layout::inline::s00_layout::plans::TokenArenas>::store",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html_engine_model::word_index::WordIndex>::contiguous_words",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html_layout::inline::s03_compose::wrapping::knuth_plass::CompactScratch>::collect_best_breaks",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "core::ptr::drop_glue::<html_style::style::syntax::prepared_length::Scalar>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<gpui::scene::Primitive>::transform",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<gpui::window::ElementId as core::clone::Clone>::clone",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html_style::style::property_catalogue::PropertyKey>::from_name",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "html_style::style::cascade::resolver::style_sharing::element_is_shareable",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<gpui::text_system::TextSystem>::bounding_box",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html_gpui::text::GpuiTextCache>::native_font_metrics",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<icu_collections::codepointtrie::cptrie::CodePointTrie<icu_properties::script::ScriptWithExt>>::small_index",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "html_text::spacing::tracking_boundary_after",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<gpui::taffy::TaffyLayoutEngine>::request_layout",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html::pagination::composition::Paginator>::build_backward_positions",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<gpui::style::TextStyleRefinement as refineable::Refineable>::refine",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "core::slice::sort::shared::pivot::median3_rec::<gpui::scene::SubpixelSprite, <[gpui::scene::SubpixelSprite]>::sort_by_key<(u32, gpui::platform::TileId), <gpui::scene::Scene>::finish::{closure#5}>::{closure#0}>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "[unknown+0xdbfd8]",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html_gpui::text::GpuiTextCache>::append_range_filtered_runs",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html_gpui::text::CharacterBytes>::slice",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html_view_gpui::view::HtmlView>::compose_viewport_display_list",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "ui_components::fonts::loader_for_fonts::{closure#0}",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "html_layout::block::margins::margin_profile",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<html_format::box_builder::LayoutTreeBuilder>::new",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.667
+    },
+    {
+      "function": "<gpui::key_dispatch::DispatchTree>::set_active_node",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<cssparser::parser::Parser>::next_including_whitespace_and_comments",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "html_style::style::cascade::resolver::properties::compute_declaration",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<gpui::scene::BatchIterator as core::iter::traits::iterator::Iterator>::next",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "core::ptr::drop_glue::<html_style_model::computed_style::LayoutStyle>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_pipeline::stages::lifecycle::LayoutProducts>::relayout",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_engine_model::grouped_arena::GroupedArena<usize>>::freeze",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "core::ptr::drop_glue::<lightningcss::properties::Property>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<taffy::tree::taffy_tree::TaffyTreeChildIter>, taffy::compute::flexbox::generate_anonymous_flex_items<taffy::tree::taffy_tree::TaffyView<gpui::taffy::NodeContext, <gpui::taffy::TaffyLayoutEngine>::compute_layout::{closure#0}::{closure#1}>>::{closure#0}>, taffy::compute::flexbox::generate_anonymous_flex_items<taffy::tree::taffy_tree::TaffyView<gpui::taffy::NodeContext, <gpui::taffy::TaffyLayoutEngine>::compute_layout::{closure#0}::{closure#1}>>::{closure#1}>, taffy::compute::flexbox::generate_anonymous_flex_items<taffy::tree::taffy_tree::TaffyView<gpui::taffy::NodeContext, <gpui::taffy::TaffyLayoutEngine>::compute_layout::{closure#0}::{closure#1}>>::{closure#2}>, taffy::compute::flexbox::generate_anonymous_flex_items<taffy::tree::taffy_tree::TaffyView<gpui::taffy::NodeContext, <gpui::taffy::TaffyLayoutEngine>::compute_layout::{closure#0}::{closure#1}>>::{closure#3}> as core::iter::traits::iterator::Iterator>::next",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "core::ptr::drop_glue::<gpui::style::TextStyleRefinement>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "core::ptr::drop_glue::<<gpui::window::Window>::on_pointer_event<gpui::interactive::MouseMoveEvent, <gpui::elements::div::Interactivity>::paint_mouse_listeners::{closure#17}>::{closure#0}>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "gpui_kobo::grayscale",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "core::ptr::drop_glue::<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<parcel_selectors::parser::Component<lightningcss::selector::private::Selectors>>, <alloc::vec::Vec<parcel_selectors::parser::Component<lightningcss::selector::private::Selectors>> as static_self::IntoOwned>::into_owned::{closure#0}>>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "html_style::style::cascade::resolver::prepared_native::typography::evaluate",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<alloc::sync::Arc<>>::make_mut",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "core::ptr::drop_glue::<smallvec::SmallVec<[(gpui::text_system::FontId, alloc::sync::Arc<cosmic_text::font::Font>); 4: usize]>>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<gpui::text_system::WindowTextSystem>::resolve_font_runs",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "__fmaf_veneer",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<unicode_segmentation::word::UnicodeWordIndices as core::iter::traits::iterator::Iterator>::next",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "core::slice::sort::unstable::ipnsort::<html_engine_model::layout_state::LineId, <[html_engine_model::layout_state::LineId]>::sort_unstable_by<html_layout::finalization::ordering::build_line_traversals::{closure#0}>::{closure#0}>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "core::slice::sort::stable::drift::sort::<(u32, f64, f64), <[(u32, f64, f64)]>::sort_by<<html_engine_model::layout_state::SourceIntervals>::new::{closure#0}>::{closure#0}>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<alloc::sync::Arc<dyn core::any::Any + core::marker::Sync + core::marker::Send>>::drop_slow",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<gpui::view::ViewElement<gpui_component::window_border::WindowBorder> as gpui::element::Element>::prepaint",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<gpui::platform_scheduler::PlatformScheduler>::foreground_executor::{closure#0}",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "html_parse::xml::close_foreign_tag",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "core::ptr::drop_glue::<alloc::vec::Vec<taffy::style::grid::GridTemplateComponent<alloc::string::String>>>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<quick_xml::encoding::Decoder>::content::<quick_xml::escape::normalize_xml10_eols>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "cssparser::tokenizer::next_token",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "core::ptr::drop_glue::<core::result::Result<&cssparser::tokenizer::Token, cssparser::parser::BasicParseError>>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_style::style::cascade::resolver::specified::DeclarationEvent>::view",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "core::ptr::drop_glue::<alloc::vec::drain::Drain<cosmic_text::shape::ShapeSpan>>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "gpui_wgpu::cosmic_text_system::discard_spare_pages_at_least::<cosmic_text::shape::ShapeSpan>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<core::iter::adapters::enumerate::Enumerate<core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::iter::adapters::flatten::FlatMap<html_layout::inline::metrics::MetricsChunks, core::iter::adapters::map::Map<html_layout::inline::token_span::MetadataIter, <html_layout::inline::metrics::MetricsView>::iter::{closure#0}::{closure#0}>, <html_layout::inline::metrics::MetricsView>::iter::{closure#0}>>, html_layout::inline::s05_emit::fragments::positioned_plain_inline_box_fragments::{closure#1}>> as core::iter::traits::iterator::Iterator>::next",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "[unknown+0x15f28]",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "html::pagination::projection::resolve_box_bands",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<gpui::app::App>::flush_effects",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<gpui::window::Window>::insert_primitive::<gpui::scene::Quad>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "core::str::converts::from_utf8",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<lightningcss::values::length::LengthPercentageOrAuto as lightningcss::traits::Parse>::parse",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<gpui::window::Window>::is_bounds_visible",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_style::style::compiled::SelectorBuckets>::add_selector",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_style_model::computed_style::ComputedStylesBuilder>::push_with_inherited_groups",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "[unknown+0xdbbb0]",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "__GI___sysconf",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<read_fonts::tables::gsub::Ligature>::component_glyph_ids",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<harfrust::hb::buffer::hb_buffer_t>::replace_glyph",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<harfrust::hb::ot_layout_gsubgpos::OT::hb_ot_apply_context_t>::set_glyph_class",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_gpui::text::PreparedFont as core::clone::Clone>::clone",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "html_layout::inline::s05_emit::fragments::positioned_sequential_text",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_pipeline::stages::lifecycle::LaidOutDocument>::rebuild_anchor_positions",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_pipeline::parser::html::DocumentFactory>::build_pipeline_from_dom_instrumented::<alloc::string::String>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_style::style::rules::prepared::PreparedDeclarationBlock>::append",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<std::io::stdio::StdoutLock as core::io::write::Write>::write_all",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_style_model::computed_style::PreferredSize>::resolve_font_relative",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "html_layout::inline::s05_emit::fragments::boxes::resolve_inline_fragment_ancestors",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_layout::inline::s00_layout::plans::InlinePlanCache>::recycle",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<taffy::tree::taffy_tree::TaffyView<gpui::taffy::NodeContext, <gpui::taffy::TaffyLayoutEngine>::compute_layout::{closure#0}::{closure#1}>>::compute_child_layout::{closure#0}",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<gpui::elements::div::Interactivity>::prepaint::<core::option::Option<gpui::window::Hitbox>, <gpui::elements::div::Div as gpui::element::Element>::prepaint::{closure#0}::{closure#1}>::{closure#0}::{closure#1}::{closure#0}::{closure#0}",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "core::ptr::drop_glue::<alloc::vec::Vec<html_parse::xml::XmlAttribute>>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_style::style::program::StyleProgramCache>::source",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "truncf",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<alloc::raw_vec::RawVec<html_style::style::program::CachedStyleProgram>>::grow_one",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<html_style_model::computed_style::CounterDirectives as core::clone::Clone>::clone",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "[unknown+0xdbd5c]",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>",
+      "forward_cpu_ms": 0.333,
+      "backward_cpu_ms": 0.0
+    },
+    {
+      "function": "<quick_xml::name::NamespaceResolver>::push",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<alloc::raw_vec::RawVec<(html_style::style::property_catalogue::PropertyKey, html_style::style::cascade::resolver::prepared_native::PreparedValue)>>::grow_one",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_style::style::matching::dom::pseudo_matches_dom",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_style::style::cascade::resolver::RuleMatcher>::match_rule",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_format::box_builder::lists::collect_rendered_list_items",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_shape::spans::append_shaping_range",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "[unknown+0xdbbbc]",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&(gpui::text_system::FontId, char)>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui::text_system::TextSystem>::resolve_font",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_engine_model::text_fragments::CompactTextFragments>::extend_last_to",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_layout::inline::s05_emit::output::publish_placement",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_layout::boxes::model::block_border_box_rect",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui::app::entity_map::AnyWeakEntity>::upgrade",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html::pagination::composition::can_fragment",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "__GI_getenv",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui::scene::Scene>::insert_transformed_primitive::<gpui::scene::Primitive>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "core::ptr::drop_glue::<core::pin::Pin<alloc::boxed::Box<dyn core::future::future::Future<Output = ()>>>>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u32>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "stacksafe::internal::with_protected::<(gpui::taffy::LayoutId, gpui::elements::div::DivFrameState), <gpui::elements::div::Div as gpui::element::Element>::request_layout::{closure#0}>::{closure#0}",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&(core::option::Option<alloc::string::String>, alloc::string::String)>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<quick_xml::events::attributes::IterState>::next",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui::taffy::TaffyLayoutEngine>::clear",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_style::style::syntax::prepared_length::Scalar>::evaluate::<html_style::style::cascade::resolver::prepared_native::typography::evaluate::{closure#0}>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "__GI___clock_gettime",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_text::content::InlineContent>::replace_characters",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<unicode_segmentation::word::UWordBounds>::get_next_cat",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<memmap2::Mmap as core::convert::AsRef<[u8]>>::as_ref",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "core::ptr::drop_glue::<smallvec::SmallVec<[gpui::text_system::TextRun; 1: usize]>>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<alloc::raw_vec::RawVec<usize>>::grow_one",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_layout::inline::s00_layout::retained::ParagraphLayouts>::remove",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_layout::inline::s05_emit::fragments::boxes::has_inline_fragment_owners::{closure#0}",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_layout::decorations::inline_border_rect",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui::app::App as gpui::AppContext>::update_entity::<gpui_component::root::Root, gpui::element::AnyElement, gpui::view::any_view::render<gpui_component::root::Root>::{closure#0}>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<alloc::raw_vec::RawVec<gpui::scene::Primitive>>::grow_one",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_dom::document::Document>::try_intern_classes",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "cssparser::tokenizer::consume_name",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "core::ptr::drop_glue::<cssparser::tokenizer::Token>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_style_model::computed_style::intern_style::<html_style_model::computed_style::Border>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<hashbrown::map::HashMap<alloc::string::String, html_style::style::compiled::CandidateRange, core::hash::BuildHasherDefault<rustc_hash::FxHasher>>>::get::<str>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui_wgpu::cosmic_text_system::CosmicTextSystemState>::layout_line_with_cluster_buffer",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui_wgpu::cosmic_text_system::CosmicTextSystemState>::retain_shaping_scratch",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_engine_model::bidi::paragraph_unicode_bidi",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "core::unicode::unicode_data::conversions::lookup",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "taffy::compute::flexbox::compute_preliminary::<taffy::tree::taffy_tree::TaffyView<gpui::taffy::NodeContext, <gpui::taffy::TaffyLayoutEngine>::compute_layout::{closure#0}::{closure#1}>>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<alloc::sync::Arc<[gpui::window::ElementId]>>::from_iter_exact::<core::iter::adapters::cloned::Cloned<core::slice::iter::Iter<gpui::window::ElementId>>>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_parse::parser::MarkupSyntax>::from_resource",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_dom::document::dom::DocumentBuilder>::append_dom_element",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<lightningcss::properties::custom::TokenList>::parse_into",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<lightningcss::properties::PropertyId>::name",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_dom::document::dom::ElementRef>::attr",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<alloc::rc::Rc<dyn for<'a, 'b> core::ops::function::Fn<(gpui::geometry::Bounds<gpui::geometry::Pixels>, &'a mut gpui::window::Window, &'b mut gpui::app::App), Output = bool>>>::drop_slow",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<smallvec::SmallVec<[stacksafe::StackSafe<gpui::element::AnyElement>; 2: usize]> as core::ops::drop::Drop>::drop",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "[unknown+0xdbd58]",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "core::ptr::drop_glue::<cosmic_text::attrs::AttrsList>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<cosmic_text::shape::ShapeLine>::layout_line",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<unicode_normalization::decompose::Decompositions<core::iter::adapters::inspect::Inspect<core::str::iter::Chars, html_layout::inline::hyphenation::unicode_word_breaks::{closure#0}>>>::push_back",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_engine_model::glyph_metrics::MetricRecord>::dimensions",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<alloc::raw_vec::RawVec<html_engine_model::layout_state::TableFragmentSource>>::grow_one",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_layout::finalization::ordering::build_line_traversals::{closure#2}",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui::element::AnyElement>::new::<gpui::elements::div::Div>::{closure#0}",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<lightningcss::values::length::LengthValue as lightningcss::traits::Parse>::parse",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "alloc::vec::in_place_collect::from_iter_in_place::<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<parcel_selectors::parser::Component<lightningcss::selector::private::Selectors>>, <alloc::vec::Vec<parcel_selectors::parser::Component<lightningcss::selector::private::Selectors>> as static_self::IntoOwned>::into_owned::{closure#0}>, parcel_selectors::parser::Component<lightningcss::selector::private::Selectors>>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<core::slice::iter::Iter<html_gpui::text::PreparedFont> as core::iter::traits::iterator::Iterator>::try_fold::<(), &mut core::iter::traits::iterator::Iterator::find::check<&html_gpui::text::PreparedFont, <html_gpui::text::GpuiTextCache>::prepared_font::{closure#0}>::{closure#0}, core::ops::control_flow::ControlFlow<&html_gpui::text::PreparedFont>>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "core::ptr::drop_glue::<rangemap::map::RangeMap<usize, cosmic_text::attrs::AttrsOwned>>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<char as unicode_script::UnicodeScript>::script_extension",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "gpui_wgpu::cosmic_text_system::discard_spare_pages_at_least::<cosmic_text::layout::DecorationSpan>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_layout::inline::s04_lines::measurement::optical_margin_protrusion::{closure#5}",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui::elements::div::Stateful<gpui::elements::div::Div> as gpui::elements::div::InteractiveElement>::capture_any_mouse_up::<<gpui::app::context::Context<reader_ui::epub::ReaderView>>::listener<gpui::interactive::MouseUpEvent, <reader_ui::epub::ReaderView>::finish_word_click>::{closure#0}>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_gpui::paint::GpuiCommandPainter as html_render_core::Painter>::draw_prepared_text_run_batch",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "ceilf",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<alloc::raw_vec::RawVecInner>::grow_amortized",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<lightningcss::properties::text::TextIndent as lightningcss::traits::Parse>::parse",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<cssparser::tokenizer::Tokenizer>::skip_whitespace",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_style::style::program::StyleProgramCache>::get_or_compile_resources",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_style::style::program::resolve_document_with_program",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui::key_dispatch::DispatchTree>::set_key_context",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<hashbrown::raw::RawTable<(usize, html_shape::spans::plan_shaping_spans::ContextState)>>::reserve_rehash::<hashbrown::map::make_hasher<usize, html_shape::spans::plan_shaping_spans::ContextState, core::hash::BuildHasherDefault<rustc_hash::FxHasher>>::{closure#0}>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_gpui::text::GpuiTextCache>::layout_directional_line",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_engine_model::shaping_contracts::ShapedFontMetrics>::resolved_font_size",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "html_layout::decorations::recording::record_block_background",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_layout::engine::reader::LayoutReader>::vertical_margins",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<html_layout::inline::tokens::InlineTokens>::bind_metrics_in",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<alloc::raw_vec::RawVec<html_pipeline::parser::html::ExpandedStylesheet>>::grow_one",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "taffy::compute::block::compute_inner::<taffy::tree::taffy_tree::TaffyView<gpui::taffy::NodeContext, <gpui::taffy::TaffyLayoutEngine>::compute_layout::{closure#0}::{closure#1}>>",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    },
+    {
+      "function": "<gpui::elements::div::Interactivity>::compute_style_internal",
+      "forward_cpu_ms": 0.0,
+      "backward_cpu_ms": 0.333
+    }
+  ],
+  "assembly_symbol_resolution": {
+    "module": "/lib/libarmmem-v7l.so",
+    "sha256": "a3202e44ffb3c5a46094e9b4b6cd37772bc1584bafe2617942dcef8d8742a472",
+    "method": "Exported assembly entrypoints have STT_NOTYPE and zero sizes; infer ranges up to the next known memory-routine entrypoint or executable section end. Original unresolved symbols remain in functions and sampled_symbols for audit.",
+    "ranges": [
+      {
+        "start": 1540,
+        "end": 3212,
+        "function": "memcmp"
+      },
+      {
+        "start": 3212,
+        "end": 8864,
+        "function": "memcpy"
+      },
+      {
+        "start": 8864,
+        "end": 12824,
+        "function": "memmove"
+      },
+      {
+        "start": 12824,
+        "end": 12844,
+        "function": "mempcpy"
+      },
+      {
+        "start": 12844,
+        "end": 13044,
+        "function": "memset"
+      },
+      {
+        "start": 13044,
+        "end": 13364,
+        "function": "strlen"
+      }
+    ]
+  },
+  "unresolved_reader_cpu_percent": 0.792
+}

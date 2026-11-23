@@ -8,6 +8,9 @@ const WIFI_OFF_ICON: &[u8] = include_bytes!("../../ui/design-tokens/assets/icon/
 const WIFI_ICON_PATH: &str = "icons/wifi.svg";
 const WIFI_ICON: &[u8] = include_bytes!("../../ui/design-tokens/assets/icon/wifi.svg");
 
+const DEVICE_CONTROL_ICONS: [(&str, &[u8]); 2] =
+    [("icons/wifi-toggle-on.svg", include_bytes!("../../ui/design-tokens/assets/icon/wifi-toggle-on.svg")), ("icons/wifi-toggle-off.svg", include_bytes!("../../ui/design-tokens/assets/icon/wifi-toggle-off.svg"))];
+
 const APP_ICON_PATH: &str = "icons/bokheim.svg";
 const APP_ICON: &[u8] = include_bytes!("../../ui/design-tokens/assets/icon/bokheim.svg");
 const CLOUD_ICON_PATH: &str = "icons/cloud.svg";
@@ -52,7 +55,7 @@ const READER_SETTINGS_ICONS: [(&str, &[u8]); 24] = [
     ("icons/reader-settings/pdf-margins-show.svg", include_bytes!("../../ui/design-tokens/assets/reader-settings/pdf-margins-show.svg")),
     ("icons/reader-settings/pdf-margins-crop.svg", include_bytes!("../../ui/design-tokens/assets/reader-settings/pdf-margins-crop.svg")),
 ];
-const PHOSPHOR_LIGHT_ICONS: [(&str, &[u8]); 79] = [
+const PHOSPHOR_LIGHT_ICONS: [(&str, &[u8]); 81] = [
     ("icons/alarm.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/alarm.svg")),
     ("icons/arrow-down.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/arrow-down.svg")),
     ("icons/arrow-left.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/arrow-left.svg")),
@@ -66,6 +69,7 @@ const PHOSPHOR_LIGHT_ICONS: [(&str, &[u8]); 79] = [
     ("icons/battery-low.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/battery-low.svg")),
     ("icons/battery-medium.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/battery-medium.svg")),
     ("icons/battery-warning.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/battery-warning.svg")),
+    ("icons/lightning.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/lightning.svg")),
     ("icons/bluetooth.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/bluetooth.svg")),
     ("icons/bluetooth-off.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/bluetooth-off.svg")),
     ("icons/check.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/check.svg")),
@@ -95,6 +99,7 @@ const PHOSPHOR_LIGHT_ICONS: [(&str, &[u8]); 79] = [
     ("icons/headphones.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/headphones.svg")),
     ("icons/hourglass.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/hourglass-medium.svg")),
     ("icons/info.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/info.svg")),
+    ("icons/table.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/table.svg")),
     ("icons/layout-dashboard.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/squares-four.svg")),
     ("icons/loader-circle.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/circle-notch.svg")),
     ("icons/lock.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/lock.svg")),
@@ -200,7 +205,7 @@ impl AssetSource for Assets {
         if path == CLOUD_ICON_PATH {
             return Ok(Some(Cow::Borrowed(CLOUD_ICON)));
         }
-        if let Some((_, bytes)) = PHOSPHOR_LIGHT_ICONS.iter().chain(&TRANSPORT_ICONS).chain(&READER_SETTINGS_ICONS).find(|(icon_path, _)| *icon_path == path) {
+        if let Some((_, bytes)) = PHOSPHOR_LIGHT_ICONS.iter().chain(&TRANSPORT_ICONS).chain(&READER_SETTINGS_ICONS).chain(&DEVICE_CONTROL_ICONS).find(|(icon_path, _)| *icon_path == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
         if path == WIFI_OFF_ICON_PATH {
@@ -220,7 +225,7 @@ impl AssetSource for Assets {
         if CLOUD_ICON_PATH.starts_with(path) {
             assets.push(CLOUD_ICON_PATH.into());
         }
-        assets.extend(PHOSPHOR_LIGHT_ICONS.iter().chain(&TRANSPORT_ICONS).filter(|(icon_path, _)| icon_path.starts_with(path)).map(|(icon_path, _)| SharedString::from(*icon_path)));
+        assets.extend(PHOSPHOR_LIGHT_ICONS.iter().chain(&TRANSPORT_ICONS).chain(&READER_SETTINGS_ICONS).chain(&DEVICE_CONTROL_ICONS).filter(|(icon_path, _)| icon_path.starts_with(path)).map(|(icon_path, _)| SharedString::from(*icon_path)));
         if WIFI_OFF_ICON_PATH.starts_with(path) {
             assets.push(WIFI_OFF_ICON_PATH.into());
         }

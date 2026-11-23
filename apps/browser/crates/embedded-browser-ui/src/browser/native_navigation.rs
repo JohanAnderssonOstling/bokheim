@@ -78,9 +78,7 @@ impl NativeNavigation {
                 _ => Propagation::Proceed,
             }
         });
-        page.connect_button_release_event(|_, event| {
-            if matches!(event.button(), 8 | 9) { Propagation::Stop } else { Propagation::Proceed }
-        });
+        page.connect_button_release_event(|_, event| if matches!(event.button(), 8 | 9) { Propagation::Stop } else { Propagation::Proceed });
         navigation
     }
 

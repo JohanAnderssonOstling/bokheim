@@ -1,0 +1,88 @@
+{
+  "session": {
+    "version": 2,
+    "kobo_auto_rotate": true,
+    "reader_preferences": {
+      "font_size_px": 20.0,
+      "max_line_width_px": 600.0,
+      "zoom": 1.0,
+      "line_height": 1.4,
+      "override_line_height": true,
+      "paragraph_spacing_em": 1.0,
+      "override_paragraph_spacing": true,
+      "first_line_indent_em": 1.5,
+      "first_line_indent": "off",
+      "font_weight": "normal",
+      "word_spacing_percent": 100.0,
+      "flow": "paginated",
+      "font_family": "serif",
+      "text_alignment": "justify",
+      "hyphenation": "on",
+      "max_column_count": 2,
+      "horizontal_margin_px": 0.0,
+      "vertical_margin_px": 16.0,
+      "min_column_gap_px": 16.0,
+      "pdf_horizontal_margin_px": 0.0,
+      "pdf_vertical_margin_px": 0.0,
+      "pdf_page_gap_px": 0.0,
+      "comic_horizontal_margin_px": 0.0,
+      "comic_vertical_margin_px": 0.0,
+      "comic_page_gap_px": 0.0,
+      "pdf_zoom_mode": "fit_height",
+      "pdf_page_count": 1,
+      "pdf_zoom": 1.0,
+      "pdf_trim_margins": true,
+      "audiobook_speed": 1.0,
+      "reading_ruler": "Off",
+      "reading_ruler_last_style": "Focus",
+      "reading_ruler_lines": 3,
+      "pdf_reading_ruler": "Off",
+      "pdf_reading_ruler_last_style": "Band",
+      "pdf_reading_ruler_lines": 1,
+      "toc_width": 300.0,
+      "active_sidebar_tab": "Settings",
+      "chrome_hidden": true,
+      "sidebar_open": false,
+      "system_font_family": null,
+      "system_sans_serif_font_family": null,
+      "system_monospace_font_family": null,
+      "custom_fonts_enabled": false,
+      "cjk_font_choice": "publisher",
+      "system_cjk_font_family": null,
+      "narration_pauses": "Natural",
+      "narration_voice": "Alba",
+      "narration_device_voice": null,
+      "narration_voices": {},
+      "translation_languages": [
+        "en"
+      ]
+    },
+    "navigation": {
+      "library_id": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "route": {
+        "Library": "Home"
+      },
+      "pages": [
+        {
+          "path": [],
+          "detail": "03067bf26b89862f89e0fd6adbdffb303d1fd523c79fb3644137f89dae187444d6"
+        }
+      ],
+      "reader": {
+        "locator": {
+          "library_id": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+          "content_hash": "03067bf26b89862f89e0fd6adbdffb303d1fd523c79fb3644137f89dae187444d6"
+        },
+        "title": "Sex with the Queen"
+      },
+      "pane_id": "885046ad-c4b7-4dc0-8b81-f489326cbbb5",
+      "panes": [],
+      "active_pane": 0
+    },
+    "window": null
+  },
+  "maps": "54b6b000-59422000 r-xp 00000000 b3:03 52346      /mnt/onboard/.adds/bokheim/desktop-gpui-kobo\n59431000-5952b000 r--p 048b6000 b3:03 52346      /mnt/onboard/.adds/bokheim/desktop-gpui-kobo\n5952b000-595c2000 rw-p 049b0000 b3:03 52346      /mnt/onboard/.adds/bokheim/desktop-gpui-kobo\n595c2000-595c3000 rw-p 00000000 00:00 0 \n5b15b000-5c13c000 rw-p 00000000 00:00 0          [heap]\n6b1bd000-6b3c4000 rw-p 00000000 00:00 0 \n6b3c4000-6b741000 rw-p 00000000 00:00 0 \n6b900000-6b981000 rw-p 00000000 00:00 0 \n6b981000-6ba00000 ---p 00000000 00:00 0 \n6ba2f000-6bb71000 rw-p 00000000 00:00 0 \n6bb71000-6bc32000 r--s 00000000 b3:03 52323      /mnt/onboard/.adds/bokheim/fonts/NV_Garamond-Italic.ttf\n6bc32000-6be39000 rw-p 00000000 00:00 0 \n6be39000-6c6f9000 rw-s 9d000000 00:0f 2997       /dev/fb0\n6c6f9000-6c6fa000 ---p 00000000 00:00 0 \n6c6fa000-6c8f9000 rw-p 00000000 00:00 0          [stack:14530]\n6c8f9000-6c8fa000 ---p 00000000 00:00 0 \n6c8fa000-6caf9000 rw-p 00000000 00:00 0          [stack:14529]\n6caf9000-6cafa000 ---p 00000000 00:00 0 \n6cafa000-6ccf9000 rw-p 00000000 00:00 0 \n6ccf9000-6ccfa000 ---p 00000000 00:00 0 \n6ccfa000-6d100000 rw-p 00000000 00:00 0          [stack:14532]\n6d100000-6d1f3000 rw-p 00000000 00:00 0 \n6d1f3000-6d200000 ---p 00000000 00:00 0 \n6d20a000-6d2dc000 r--s 00000000 b3:03 52320      /mnt/onboard/.adds/bokheim/fonts/NV_Garamond-Bold.ttf\n6d2dc000-6d3a0000 r--s 00000000 b3:03 52327      /mnt/onboard/.adds/bokheim/fonts/NV_Garamond-Regular.ttf\n6d3a0000-6db00000 r--s 00000000 b3:03 52279      /mnt/onboard/.adds/bokheim/taxonomy.sqlite3\n6db00000-6dbd8000 rw-p 00000000 00:00 0 \n6dbd8000-6dc00000 ---p 00000000 00:00 0 \n6dc40000-6e3a0000 r--s 00000000 b3:03 52279      /mnt/onboard/.adds/bokheim/taxonomy.sqlite3\n6e3a0000-6eb00000 r--s 00000000 b3:03 52279      /mnt/onboard/.adds/bokheim/taxonomy.sqlite3\n6eb00000-6ec00000 rw-p 00000000 00:00 0 \n6eca0000-6f400000 r--s 00000000 b3:03 52279      /mnt/onboard/.adds/bokheim/taxonomy.sqlite3\n6f400000-6f401000 ---p 00000000 00:00 0 \n6f401000-6f600000 rw-p 00000000 00:00 0 \n6f600000-6f601000 ---p 00000000 00:00 0 \n6f601000-6f800000 rw-p 00000000 00:00 0 \n6f800000-6f801000 ---p 00000000 00:00 0 \n6f801000-6fa00000 rw-p 00000000 00:00 0 \n6fa00000-6faf9000 rw-p 00000000 00:00 0 \n6faf9000-6fb00000 ---p 00000000 00:00 0 \n6fb01000-6fb80000 rw-p 00000000 00:00 0 \n6fb80000-702e0000 r--s 00000000 b3:03 52279      /mnt/onboard/.adds/bokheim/taxonomy.sqlite3\n702e0000-70a40000 r--s 00000000 b3:03 52279      /mnt/onboard/.adds/bokheim/taxonomy.sqlite3\n70a40000-711a0000 r--s 00000000 b3:03 52279      /mnt/onboard/.adds/bokheim/taxonomy.sqlite3\n711a0000-71900000 r--s 00000000 b3:03 52279      /mnt/onboard/.adds/bokheim/taxonomy.sqlite3\n71900000-71a00000 rw-p 00000000 00:00 0 \n71a5c000-71a7d000 rw-p 00000000 00:00 0 \n71a7d000-71a92000 r--s 00000000 b3:03 52311      /mnt/onboard/.adds/bokheim/fonts/BodoniModa-Regular.ttf\n71a92000-71a93000 ---p 00000000 00:00 0 \n71a93000-71a95000 rw-p 00000000 00:00 0 \n71a95000-71a96000 ---p 00000000 00:00 0 \n71a96000-71a98000 rw-p 00000000 00:00 0 \n71aa0000-72200000 r--s 00000000 b3:03 52279      /mnt/onboard/.adds/bokheim/taxonomy.sqlite3\n72200000-72300000 rw-p 00000000 00:00 0 \n7231b000-72345000 r--s 00000000 b3:03 52300      /mnt/onboard/.adds/bokheim/fonts/Raleway-Regular.ttf\n72345000-72346000 ---p 00000000 00:00 0 \n72346000-72348000 rw-p 00000000 00:00 0 \n72348000-72350000 rw-s 00000000 b3:03 43748      /mnt/onboard/.adds/bokheim/libraries/94bffaa0-ccb8-4d78-9898-193c3da865b6/library.db-shm\n72350000-72358000 rw-s 00000000 b3:03 43511      /mnt/onboard/.adds/bokheim/libraries/2fc8146c-0fc2-479d-a249-436abc2c3e32/library.db-shm\n72358000-72360000 rw-s 00000000 b3:03 43680      /mnt/onboard/.adds/bokheim/libraries/b55880fc-0fb4-49b4-ad32-da6db2e2507f/library.db-shm\n72366000-7236e000 rw-s 00000000 b3:03 43522      /mnt/onboard/.adds/bokheim/libraries/2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026/library.db-shm\n7236e000-72376000 rw-s 00000000 b3:03 28672      /mnt/onboard/.adds/bokheim/libraries/c15ad76b-459e-44a8-9935-e0853c557595/library.db-shm\n72376000-7237e000 rw-s 00000000 b3:03 28661      /mnt/onboard/.adds/bokheim/libraries/d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16/library.db-shm\n7237e000-72ade000 r--s 00000000 b3:03 52279      /mnt/onboard/.adds/bokheim/taxonomy.sqlite3\n72ade000-72adf000 ---p 00000000 00:00 0 \n72adf000-72cde000 rw-p 00000000 00:00 0          [stack:14956]\n72cde000-7343e000 r--s 00000000 b3:03 52279      /mnt/onboard/.adds/bokheim/taxonomy.sqlite3\n7343e000-7343f000 ---p 00000000 00:00 0 \n7343f000-7363e000 rw-p 00000000 00:00 0          [stack:14522]\n7363e000-73d9e000 r--s 00000000 b3:03 52279      /mnt/onboard/.adds/bokheim/taxonomy.sqlite3\n73d9e000-73d9f000 ---p 00000000 00:00 0 \n73d9f000-73f9e000 rw-p 00000000 00:00 0 \n73f9e000-73f9f000 ---p 00000000 00:00 0 \n73f9f000-7419e000 rw-p 00000000 00:00 0 \n7419e000-7419f000 ---p 00000000 00:00 0 \n7419f000-7439e000 rw-p 00000000 00:00 0 \n7439e000-7439f000 ---p 00000000 00:00 0 \n7439f000-7459e000 rw-p 00000000 00:00 0 \n7459e000-7459f000 ---p 00000000 00:00 0 \n7459f000-7479e000 rw-p 00000000 00:00 0 \n7479e000-7479f000 ---p 00000000 00:00 0 \n7479f000-7499e000 rw-p 00000000 00:00 0 \n7499e000-7499f000 ---p 00000000 00:00 0 \n7499f000-74b9e000 rw-p 00000000 00:00 0          [stack:14955]\n74b9e000-74b9f000 ---p 00000000 00:00 0 \n74b9f000-74d9e000 rw-p 00000000 00:00 0 \n74d9e000-754fe000 r--s 00000000 b3:03 52279      /mnt/onboard/.adds/bokheim/taxonomy.sqlite3\n754fe000-754ff000 ---p 00000000 00:00 0 \n754ff000-756fe000 rw-p 00000000 00:00 0          [stack:14957]\n756fe000-756ff000 ---p 00000000 00:00 0 \n756ff000-758fe000 rw-p 00000000 00:00 0 \n758fe000-758ff000 ---p 00000000 00:00 0 \n758ff000-75afe000 rw-p 00000000 00:00 0          [stack:14511]\n75afe000-75aff000 ---p 00000000 00:00 0 \n75aff000-75cfe000 rw-p 00000000 00:00 0          [stack:14510]\n75cfe000-75cff000 ---p 00000000 00:00 0 \n75cff000-75efe000 rw-p 00000000 00:00 0          [stack:14509]\n75efe000-75eff000 ---p 00000000 00:00 0 \n75eff000-76300000 rw-p 00000000 00:00 0          [stack:14508]\n76300000-76500000 rw-p 00000000 00:00 0 \n76500000-765ff000 rw-p 00000000 00:00 0 \n765ff000-76600000 ---p 00000000 00:00 0 \n76604000-7660c000 rw-s 00000000 b3:03 43500      /mnt/onboard/.adds/bokheim/libraries/2150d671-a4dc-4d06-bfec-3c30e67e6b17/library.db-shm\n7660c000-76614000 rw-s 00000000 b3:03 28650      /mnt/onboard/.adds/bokheim/libraries/1909856c-14c9-4304-a537-526a190f048f/library.db-shm\n76614000-7661c000 rw-s 00000000 b3:03 43660      /mnt/onboard/.adds/bokheim/libraries/0180834d-4cb0-4b83-b57e-426b4ef7345f/library.db-shm\n7661f000-76627000 rw-s 00000000 b3:03 43652      /mnt/onboard/.adds/bokheim/libraries/f95807bc-9e31-4c89-85c3-1b686d06dc86/library.db-shm\n76627000-76628000 ---p 00000000 00:00 0 \n76628000-7662a000 rw-p 00000000 00:00 0 \n7663c000-76644000 rw-s 00000000 b3:03 43648      /mnt/onboard/.adds/bokheim/libraries/cf73f142-7199-487d-a3c0-ff2706163b2d/library.db-shm\n76647000-76648000 ---p 00000000 00:00 0 \n76648000-7664a000 rw-p 00000000 00:00 0 \n7664a000-76652000 rw-s 00000000 b3:03 42847      /mnt/onboard/.adds/bokheim/libraries/05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e/library.db-shm\n76652000-76663000 r-xp 00000000 b3:03 52386      /mnt/onboard/.adds/bokheim/runtime/libresolv.so.2\n76663000-76673000 ---p 00011000 b3:03 52386      /mnt/onboard/.adds/bokheim/runtime/libresolv.so.2\n76673000-76674000 r--p 00011000 b3:03 52386      /mnt/onboard/.adds/bokheim/runtime/libresolv.so.2\n76674000-76675000 rw-p 00012000 b3:03 52386      /mnt/onboard/.adds/bokheim/runtime/libresolv.so.2\n76675000-76677000 rw-p 00000000 00:00 0 \n76677000-7667b000 r-xp 00000000 b3:03 52376      /mnt/onboard/.adds/bokheim/runtime/libnss_dns.so.2\n7667b000-7668a000 ---p 00004000 b3:03 52376      /mnt/onboard/.adds/bokheim/runtime/libnss_dns.so.2\n7668a000-7668b000 r--p 00003000 b3:03 52376      /mnt/onboard/.adds/bokheim/runtime/libnss_dns.so.2\n7668b000-7668c000 rw-p 00004000 b3:03 52376      /mnt/onboard/.adds/bokheim/runtime/libnss_dns.so.2\n7668c000-76695000 r-xp 00000000 b3:03 52382      /mnt/onboard/.adds/bokheim/runtime/libnss_files.so.2\n76695000-766a4000 ---p 00009000 b3:03 52382      /mnt/onboard/.adds/bokheim/runtime/libnss_files.so.2\n766a4000-766a5000 r--p 00008000 b3:03 52382      /mnt/onboard/.adds/bokheim/runtime/libnss_files.so.2\n766a5000-766a6000 rw-p 00009000 b3:03 52382      /mnt/onboard/.adds/bokheim/runtime/libnss_files.so.2\n766a6000-766ac000 rw-p 00000000 00:00 0 \n766ac000-766ad000 ---p 00000000 00:00 0 \n766ad000-766af000 rw-p 00000000 00:00 0 \n766af000-766b0000 ---p 00000000 00:00 0 \n766b0000-766b2000 rw-p 00000000 00:00 0 \n766b2000-766b3000 ---p 00000000 00:00 0 \n766b3000-766b5000 rw-p 00000000 00:00 0 \n766b5000-766b6000 ---p 00000000 00:00 0 \n766b6000-766b8000 rw-p 00000000 00:00 0 \n766b8000-766b9000 ---p 00000000 00:00 0 \n766b9000-766bb000 rw-p 00000000 00:00 0 \n766bb000-766bc000 ---p 00000000 00:00 0 \n766bc000-766be000 rw-p 00000000 00:00 0 \n766be000-766bf000 ---p 00000000 00:00 0 \n766bf000-766c1000 rw-p 00000000 00:00 0 \n766c1000-766c2000 ---p 00000000 00:00 0 \n766c2000-768c1000 rw-p 00000000 00:00 0          [stack:14507]\n768c1000-768c2000 ---p 00000000 00:00 0 \n768c2000-76ac1000 rw-p 00000000 00:00 0          [stack:14506]\n76ac1000-76ac2000 ---p 00000000 00:00 0 \n76ac2000-76cc1000 rw-p 00000000 00:00 0          [stack:14505]\n76cc1000-76de6000 r-xp 00000000 b3:03 52393      /mnt/onboard/.adds/bokheim/runtime/libc.so.6\n76de6000-76df6000 ---p 00125000 b3:03 52393      /mnt/onboard/.adds/bokheim/runtime/libc.so.6\n76df6000-76df8000 r--p 00125000 b3:03 52393      /mnt/onboard/.adds/bokheim/runtime/libc.so.6\n76df8000-76df9000 rw-p 00127000 b3:03 52393      /mnt/onboard/.adds/bokheim/runtime/libc.so.6\n76df9000-76dfc000 rw-p 00000000 00:00 0 \n76dfc000-76e11000 r-xp 00000000 b3:03 52394      /mnt/onboard/.adds/bokheim/runtime/libpthread.so.0\n76e11000-76e21000 ---p 00015000 b3:03 52394      /mnt/onboard/.adds/bokheim/runtime/libpthread.so.0\n76e21000-76e22000 r--p 00015000 b3:03 52394      /mnt/onboard/.adds/bokheim/runtime/libpthread.so.0\n76e22000-76e23000 rw-p 00016000 b3:03 52394      /mnt/onboard/.adds/bokheim/runtime/libpthread.so.0\n76e23000-76e25000 rw-p 00000000 00:00 0 \n76e25000-76e2b000 r-xp 00000000 b3:03 52389      /mnt/onboard/.adds/bokheim/runtime/librt.so.1\n76e2b000-76e3a000 ---p 00006000 b3:03 52389      /mnt/onboard/.adds/bokheim/runtime/librt.so.1\n76e3a000-76e3b000 r--p 00005000 b3:03 52389      /mnt/onboard/.adds/bokheim/runtime/librt.so.1\n76e3b000-76e3c000 rw-p 00006000 b3:03 52389      /mnt/onboard/.adds/bokheim/runtime/librt.so.1\n76e3c000-76e58000 r-xp 00000000 b3:03 52385      /mnt/onboard/.adds/bokheim/runtime/libgcc_s.so.1\n76e58000-76e67000 ---p 0001c000 b3:03 52385      /mnt/onboard/.adds/bokheim/runtime/libgcc_s.so.1\n76e67000-76e68000 rw-p 0001b000 b3:03 52385      /mnt/onboard/.adds/bokheim/runtime/libgcc_s.so.1\n76e68000-76e6a000 r-xp 00000000 b3:03 52375      /mnt/onboard/.adds/bokheim/runtime/libdl.so.2\n76e6a000-76e79000 ---p 00002000 b3:03 52375      /mnt/onboard/.adds/bokheim/runtime/libdl.so.2\n76e79000-76e7a000 r--p 00001000 b3:03 52375      /mnt/onboard/.adds/bokheim/runtime/libdl.so.2\n76e7a000-76e7b000 rw-p 00002000 b3:03 52375      /mnt/onboard/.adds/bokheim/runtime/libdl.so.2\n76e7b000-76ee8000 r-xp 00000000 b3:03 52392      /mnt/onboard/.adds/bokheim/runtime/libm.so.6\n76ee8000-76ef7000 ---p 0006d000 b3:03 52392      /mnt/onboard/.adds/bokheim/runtime/libm.so.6\n76ef7000-76ef8000 r--p 0006c000 b3:03 52392      /mnt/onboard/.adds/bokheim/runtime/libm.so.6\n76ef8000-76ef9000 rw-p 0006d000 b3:03 52392      /mnt/onboard/.adds/bokheim/runtime/libm.so.6\n76ef9000-76efd000 r-xp 00000000 b3:01 683        /lib/libarmmem-v7l.so\n76efd000-76f0c000 ---p 00004000 b3:01 683        /lib/libarmmem-v7l.so\n76f0c000-76f0d000 rw-p 00003000 b3:01 683        /lib/libarmmem-v7l.so\n76f0d000-76f2d000 r-xp 00000000 b3:03 52377      /mnt/onboard/.adds/bokheim/runtime/ld-linux-armhf.so.3\n76f2e000-76f2f000 ---p 00000000 00:00 0 \n76f2f000-76f31000 rw-p 00000000 00:00 0 \n76f31000-76f32000 ---p 00000000 00:00 0 \n76f32000-76f34000 rw-p 00000000 00:00 0 \n76f34000-76f35000 ---p 00000000 00:00 0 \n76f35000-76f3c000 rw-p 00000000 00:00 0 \n76f3c000-76f3d000 r--p 0001f000 b3:03 52377      /mnt/onboard/.adds/bokheim/runtime/ld-linux-armhf.so.3\n76f3d000-76f3e000 rw-p 00020000 b3:03 52377      /mnt/onboard/.adds/bokheim/runtime/ld-linux-armhf.so.3\n7ea70000-7ea9e000 rw-p 00000000 00:00 0          [stack]\n7ee98000-7ee99000 r-xp 00000000 00:00 0          [sigpage]\n7ee99000-7ee9a000 r--p 00000000 00:00 0          [vvar]\n7ee9a000-7ee9b000 r-xp 00000000 00:00 0          [vdso]\nffff0000-ffff1000 r-xp 00000000 00:00 0          [vectors]\n",
+  "method": "500 Hz userspace CPU samples plus kernel callchain, all 16 ARM registers and up to 512 bytes of user stack; no application rebuild or restart.",
+  "kernel_limitations": "Kernel has CONFIG_HAVE_PERF_REGS and CONFIG_HAVE_PERF_USER_STACK_DUMP; CONFIG_UPROBES is disabled. Allocation entry counts and sizes are not collected.",
+  "conditions": "Landscape, 1680x1264; user-selected column width 600px. Diagnostic caller attribution rather than direct timing comparison with previous portrait capture."
+}

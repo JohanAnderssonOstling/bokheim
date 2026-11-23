@@ -6,7 +6,7 @@ use book_model::normalize_search_text;
 use language_tags::LanguageTag;
 use reader_lookups::parse_language_tag;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, IntoElement, Task, Window, div, px, rems};
+use gpui::{AnyElement, App, Bounds, Context, Entity, IntoElement, Pixels, Task, Window, div, px, rems};
 use gpui_component::{
     Icon, IconName, IndexPath,
     list::{ListDelegate, ListEvent, ListItem, ListState},
@@ -58,15 +58,19 @@ pub(super) fn system_languages(cx: &App) -> Vec<LanguageTag> {
     languages
 }
 
-pub(super) fn picker(source: bool, current: &[LanguageTag], bounds: Option<gpui::Bounds<gpui::Pixels>>, window: &mut Window, cx: &mut Context<TranslationPopup>) -> AnyElement {
-    let current = current.to_vec();
-    let label = match current.as_slice() {
-        [] => text!(reader::choose_language).into(),
-        [language] => language_label(language),
-        languages => format!(text!(reader::translation_target_count), languages.len()),
-    };
+pub(super) fn picker(source: bool, current: Option<&LanguageTag>, bounds: Option<Bounds<Pixels>>, window: &mut Window, cx: &mut Context<TranslationPopup>) -> AnyElement {
+    let label = current.map_or_else(|| text!(reader::choose_language).to_owned(), language_label);
     let owner = cx.entity().downgrade();
     let id = if source { "translation-source" } else { "translation-target" };
+    let open_bounds = window.use_keyed_state((id, 1usize), cx, |_, _| None::<Bounds<Pixels>>);
+    let bounds = (*open_bounds.read(cx)).or(bounds).map(|mut bounds| {
+        let safe = window.insets().effective();
+        let top = safe.top + px(12.0);
+        let bottom = window.viewport_size().height - safe.bottom - px(12.0);
+        bounds.size.height = px(400.0).min((bottom - top).max(px(1.0)));
+        bounds.origin.y = bounds.origin.y.clamp(top, (bottom - bounds.size.height).max(top));
+        bounds
+    });
     let list_state = window.use_keyed_state((id, 0usize), cx, |_, _| None::<Entity<ListState<LanguageList>>>);
     let closing_state = list_state.clone();
     let menu_owner = owner.clone();
@@ -79,6 +83,7 @@ pub(super) fn picker(source: bool, current: &[LanguageTag], bounds: Option<gpui:
         .min_w_0()
         .trigger(components::outlined_text_button((id, 1usize), label).no_fill().w_full().min_w_0().child(Icon::new(IconName::ChevronDown)))
         .on_open_change(move |open, _, cx| {
+            open_bounds.update(cx, |saved, _| *saved = if *open { bounds } else { None });
             let _ = menu_owner.update(cx, |owner, cx| {
                 owner.language_picker_open = *open;
                 cx.notify();
@@ -91,13 +96,7 @@ pub(super) fn picker(source: bool, current: &[LanguageTag], bounds: Option<gpui:
             let list = match list_state.read(cx).clone() {
                 Some(list) => list,
                 None => {
-                    let list = cx.new(|cx| {
-                        let choices = LanguageList::new(current.clone(), source, cx);
-                        let selected = if source { choices.choices.iter().position(|(code, _)| current.contains(code)).unwrap_or(0) } else { 0 };
-                        let mut list = ListState::new(choices, window, cx).searchable(true);
-                        list.set_selected_index(Some(IndexPath::new(selected)), window, cx);
-                        list
-                    });
+                    let list = cx.new(|cx| ListState::new(LanguageList::new(cx), window, cx).searchable(true));
                     list.update(cx, |list, cx| list.focus(window, cx));
                     let popover = cx.entity();
                     let owner = owner.clone();
@@ -106,18 +105,7 @@ pub(super) fn picker(source: bool, current: &[LanguageTag], bounds: Option<gpui:
                             match event {
                                 ListEvent::Confirm(index) => {
                                     if let Some(code) = list.read(cx).delegate().code(*index).cloned() {
-                                        if let Ok(current) = owner.update(cx, |owner, cx| {
-                                            owner.select_language(source, code, cx);
-                                            if source { owner.source.iter().cloned().collect() } else { owner.targets.clone() }
-                                        }) {
-                                            list.update(cx, |list, cx| {
-                                                list.delegate_mut().current = current;
-                                                cx.notify();
-                                            });
-                                        }
-                                    }
-                                    if !source {
-                                        return;
+                                        let _ = owner.update(cx, |owner, cx| owner.select_language(source, code, cx));
                                     }
                                 }
                                 ListEvent::Cancel => {}
@@ -141,21 +129,19 @@ pub(super) fn picker(source: bool, current: &[LanguageTag], bounds: Option<gpui:
 struct LanguageList {
     choices: Vec<(LanguageTag, String)>,
     filtered: Vec<usize>,
-    current: Vec<LanguageTag>,
-    source: bool,
 }
 
 impl LanguageList {
-    fn new(current: Vec<LanguageTag>, source: bool, cx: &App) -> Self {
+    fn new(cx: &App) -> Self {
         let system = system_languages(cx);
         let mut choices = LANGUAGES.iter().filter_map(|(code, label)| Some((parse_language_tag(code)?, (*label).to_owned()))).collect::<Vec<_>>();
-        for code in current.iter().chain(&system).cloned() {
-            if !choices.iter().any(|(key, _)| key == &code) {
-                choices.push((code.clone(), language_label(&code)));
+        for code in &system {
+            if !choices.iter().any(|(key, _)| key == code) {
+                choices.push((code.clone(), language_label(code)));
             }
         }
         choices.sort_by_key(|(code, _)| system.iter().position(|language| language == code).unwrap_or(system.len()));
-        Self { filtered: (0..choices.len()).collect(), choices, current, source }
+        Self { filtered: (0..choices.len()).collect(), choices }
     }
 
     fn code(&self, index: IndexPath) -> Option<&LanguageTag> {
@@ -181,13 +167,11 @@ impl ListDelegate for LanguageList {
         let (code, label) = &self.choices[*self.filtered.get(index.row)?];
         Some(
             ListItem::new(code.to_string())
+                .selection_highlight(false)
                 .h(rems(components::settings_control_size_rem()))
                 .when(components::touch_ui(), |row| row.h(px(48.0)).px(px(components::SPACE_MD)))
                 .border_b_1()
                 .border_color(components::browser_theme(cx).rule)
-                .check_icon(IconName::Check)
-                .confirmed(self.current.contains(code))
-                .disabled(!self.source && self.current.len() == 1 && self.current.contains(code))
                 .child(label.clone()),
         )
     }

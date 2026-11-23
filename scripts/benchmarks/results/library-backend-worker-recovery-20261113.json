@@ -1,0 +1,91 @@
+{
+  "date": "2026-11-13",
+  "browser_scenarios": [
+    {
+      "name": "standard",
+      "requests": 2,
+      "documents": [
+        "chapter.xhtml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "unusual",
+      "requests": 3,
+      "documents": [
+        "chapter.xml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "comment",
+      "requests": 4,
+      "documents": [
+        "chapter.xhtml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "legacy",
+      "requests": 4,
+      "documents": [
+        "chapter.xhtml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "cbz",
+      "requests": 2,
+      "cached_reread": true,
+      "pages": 3,
+      "resumed_page": 1
+    },
+    {
+      "name": "cbz-deleted",
+      "requests": 3,
+      "cached_reread": true,
+      "pages": 2,
+      "resumed_page": 1
+    },
+    {
+      "name": "cbz-legacy",
+      "requests": 6,
+      "cached_reread": true,
+      "pages": 3,
+      "resumed_page": 1
+    },
+    {
+      "failure_cleanup": true,
+      "final_reader_cleanup": true,
+      "name": "opfs-repack",
+      "payload_bytes": 4194304,
+      "repack_ms": 159.3,
+      "source_pin": true,
+      "tracks": 2,
+      "unpublished": true
+    },
+    {
+      "name": "opfs-cancellation",
+      "partial_source_cleanup": true,
+      "persisted_bytes": 65536,
+      "unpublished": true,
+      "http_aborted": true
+    },
+    {
+      "name": "opfs-worker-recovery",
+      "orphan_reclaimed": true,
+      "published_bytes_preserved": true,
+      "recovery_ms": 52.1,
+      "persisted_bytes": 65536,
+      "files_before_recovery": 2
+    }
+  ],
+  "passed": 10,
+  "failed": 0,
+  "scope": "Dedicated worker forcibly terminated during a stalled HTTP download after flushing a partial OPFS source. Confirmed two physical files before restart; production startup reclaimed the orphan while preserving the published file bytes.",
+  "limits": [
+    "Worker termination is not a browser process crash or machine power loss.",
+    "Recovery observation is one small-fixture run, not a comparative benchmark.",
+    "The case exercises HTTP/storage APIs rather than the complete catalog import entry point."
+  ]
+}

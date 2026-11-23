@@ -4,13 +4,13 @@
 -- param: dir_id: &SqlParam<'_>
 -- param: content_hash: &SqlParam<'_>
 -- param: local_hash: &SqlParam<'_>
-UPDATE book_dir SET is_downloaded=1,local_hash=COALESCE(:local_hash,'')
+UPDATE book_dir SET is_downloaded=1,local_hash=:local_hash
          WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash) AND deleted_at IS NULL;
 
 -- name: observations_mark_missing !
 -- param: dir_id: &SqlParam<'_>
 -- param: content_hash: &SqlParam<'_>
-UPDATE book_dir SET is_downloaded=0,local_hash='',size_bytes=NULL
+UPDATE book_dir SET is_downloaded=0,local_hash=NULL,size_bytes=NULL
          WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash);
 
 -- name: observations_remove_file !

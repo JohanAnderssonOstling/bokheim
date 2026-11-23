@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{audiobook_toc_position, pdf_toc_page, BookTocEntry, ReadingPosition};
+use crate::{BookTocEntry, ReadingPosition, audiobook_toc_position, pdf_toc_page};
 
 /// Leaves finish only after being entered and passed. A parent finishes when
 /// all its children have finished; jumping over unopened leaves leaves them unread.
@@ -14,6 +14,11 @@ pub struct ChapterReadStatus {
 }
 
 impl ChapterReadStatus {
+    /// Reconstruct the synchronized chapter register, including its active leaf.
+    pub fn from_parts(completed: BTreeSet<String>, active: Option<String>) -> Self {
+        Self { completed, active }
+    }
+
     pub fn active_target(&self) -> Option<&str> {
         self.active.as_deref()
     }

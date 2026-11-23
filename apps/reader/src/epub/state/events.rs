@@ -145,6 +145,7 @@ impl ReaderView {
                     LoadState::Ready(renderer) => renderer.update(cx, |view, _| view.page_snapshot()),
                     _ => None,
                 };
+                #[cfg(all(feature = "image-zoom", not(feature = "kobo")))]
                 self.image_canvas.update(cx, |canvas, _| canvas.camera = Default::default());
                 self.image_preview = Some((uri.clone(), Arc::new(image)));
                 notify(cx, Component::ReaderShell, "image_preview_opened");

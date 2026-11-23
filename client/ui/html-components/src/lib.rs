@@ -2,7 +2,7 @@
 mod book_overlay;
 mod detail;
 pub use book_overlay::book_overlay_description;
-pub use detail::{book_detail_description, html_fragment};
+pub use detail::{BookDescription, html_fragment};
 
 use gpui::{App, Global};
 use html_gpui::backend::{FontLoadRequest, FontLoader};

@@ -74,7 +74,7 @@ WHERE relative_path >= :prefix AND relative_path < :upper;
 -- name: native_set_directory_projection!
 -- param: dir_id: &str
 -- param: relative_path: &str
-INSERT INTO local_directory_projection(dir_id, relative_path) VALUES (:dir_id, :relative_path)
+INSERT INTO local_directory_projection(dir_id, relative_path) VALUES (:dir_id, '/'||ltrim(:relative_path,'/'))
 ON CONFLICT(dir_id) DO UPDATE SET relative_path = excluded.relative_path;
 
 -- name: requested_purge_books?

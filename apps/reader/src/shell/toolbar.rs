@@ -237,19 +237,20 @@ pub(crate) fn reader_sidebar<C: SidebarTarget>(owner: &C, target: &Entity<C>, co
     render_sidebar(&ChromePresentation::new(owner), &ChromeTarget::new(target), content, theme, window)
 }
 
-fn render_sidebar(owner: &ChromePresentation, target: &ChromeTarget, content: SidebarContent, theme: components::BrowserTheme, _window: &mut Window) -> AnyElement {
+fn render_sidebar(owner: &ChromePresentation, target: &ChromeTarget, content: SidebarContent, theme: components::BrowserTheme, window: &mut Window) -> AnyElement {
     let close_target = target.clone();
     let focus_target = target.clone();
     let sidebar_focus = owner.sidebar_focus.clone();
     let active = owner.active;
+    let fit_content = active == SidebarTab::Settings && components::uses_mobile_reader_controls(window);
 
     let header = match content.header_content {
         Some(tabs) => components::reader_panel_header_content(tabs, theme).when(!cfg!(feature = "kobo"), |header| header.pl_0()),
         None => components::reader_panel_header(panel_destination(active).label(), theme),
     }
-        .key_context("ReaderSidebarHeader")
-        .when(active == SidebarTab::Search, |header| header.child(search::header_controls(owner.search_position, target, theme)))
-        .children(content.header_action);
+    .key_context("ReaderSidebarHeader")
+    .when(active == SidebarTab::Search, |header| header.child(search::header_controls(owner.search_position, target, theme)))
+    .children(content.header_action);
     #[cfg(feature = "kobo")]
     let header = header.when(active == SidebarTab::Settings, |header| {
         header.h(gpui::rems(components::topbar_height_rem())).when_some(owner.device_controls.clone(), |header, controls| header.child(div().key_context("ReaderDeviceControls").flex_none().child(controls)))
@@ -261,13 +262,14 @@ fn render_sidebar(owner: &ChromePresentation, target: &ChromeTarget, content: Si
         },
     ));
 
-    let panel = div().flex_1().min_w_0().h_full().min_h_0().flex().flex_col().child(header).child(
+    let panel = div().flex_1().min_w_0().h_full().min_h_0().flex().flex_col().when(fit_content, |panel| panel.h_auto().flex_auto()).child(header).child(
         div()
             .track_focus(&sidebar_focus)
             .tab_group()
             .flex_1()
             .min_h_0()
             .min_w_0()
+            .when(fit_content, |body| body.flex_auto().flex().flex_col())
             .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                 focus_target.execute(ChromeCommand::FocusSettings, window, cx);
             })
@@ -287,6 +289,7 @@ fn render_sidebar(owner: &ChromePresentation, target: &ChromeTarget, content: Si
         .min_h_0()
         .min_w_0()
         .flex()
+        .when(fit_content, |sidebar| sidebar.h_auto().flex_auto().flex_col())
         .bg(theme.page_bg)
         .child(panel)
         .into_any_element()
@@ -334,10 +337,10 @@ fn install_sidebar_keyboard<C: SidebarTarget>(owner: &C, target: &Entity<C>, win
                 if first {
                     cx.notify();
                 }
-                // Header controls own Tab and activation keys, including the
+                // Header and rail controls own Tab and activation keys, including the
                 // first key that reveals keyboard focus. Panel shortcuts and
                 // Escape have already been handled above.
-                if event.context_stack.iter().any(|context| context.contains("ReaderSidebarHeader")) {
+                if event.context_stack.iter().any(|context| context.contains("ReaderSidebarHeader") || context.contains("ReaderRailAction")) {
                     return;
                 }
                 let focus = this.sidebar_focus();
@@ -495,7 +498,6 @@ fn render_top_bar(owner: &ChromePresentation, target: &ChromeTarget, title: Stri
                 search_target.execute(ChromeCommand::ToggleTab(SidebarTab::Search), window, cx);
             }))
         })
-
         .into_any_element()
 }
 
@@ -681,17 +683,12 @@ mod tests {
             }
             let rows = [SettingsRow::Theme, SettingsRow::FontSize];
             let body = if self.tab == SidebarTab::Settings {
-                components::reader_settings_tab_body(theme)
-                    .child(components::reader_settings_group(theme).child(self.navigation.row(
-                        SettingsRow::Theme,
-                        &rows,
-                        components::reader_setting_row_smallcaps("Theme", theme).debug_selector(|| "test-theme-row".into()).h(px(60.0)),
-                        theme,
-                    )))
+                components::reader_settings_tab_body(theme, window)
+                    .child(components::reader_settings_group(theme).child(self.navigation.row(SettingsRow::Theme, &rows, components::reader_setting_row("Theme", theme).debug_selector(|| "test-theme-row".into()).h(px(60.0)), theme)))
                     .child(components::reader_settings_group(theme).child(self.navigation.row(
                         SettingsRow::FontSize,
                         &rows,
-                        components::reader_setting_row_smallcaps("Font size", theme).debug_selector(|| "test-font-row".into()).child(components::reader_choice_button_group(
+                        components::reader_setting_row("Font size", theme).debug_selector(|| "test-font-row".into()).child(components::reader_choice_button_group(
                             "test-font-group",
                             [
                                 components::settings_choice_button("test-font-button", "Increase font", false, theme).debug_selector(|| "test-font-button".into()).on_click(cx.listener(|this, _, _, cx| {

@@ -1,7 +1,7 @@
 //! Android UI transport. Session IDs prevent a dismissed screen receiving a
 //! later account response. Credentials exist only in the bounded request queue.
-use ui_text::text;
 use operation_failure::OperationError;
+use ui_text::text;
 
 use async_channel::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
@@ -73,11 +73,11 @@ pub(crate) struct Theme {
 
 pub(crate) struct Session(pub u64);
 impl Session {
-    pub fn open(theme: Theme) -> Result<(Self, Receiver<Request>), OperationError> {
+    pub fn open(theme: Theme, reset_email: Option<&str>) -> Result<(Self, Receiver<Request>), OperationError> {
         let session = Self(NEXT_ID.fetch_add(1, Ordering::Relaxed));
         let (sender, receiver) = async_channel::bounded(2);
         *active_session() = Some((session.0, sender));
-        send(serde_json::json!({"command":"open", "id":session.0, "theme":theme, "minimum":account_contract::PASSWORD_MIN_CHARACTERS, "resendCooldownSeconds":account_contract::EMAIL_RESEND_COOLDOWN_SECONDS}))?;
+        send(serde_json::json!({"command":"open", "id":session.0, "theme":theme, "resetEmail":reset_email, "minimum":account_contract::PASSWORD_MIN_CHARACTERS, "resendCooldownSeconds":account_contract::EMAIL_RESEND_COOLDOWN_SECONDS}))?;
         Ok((session, receiver))
     }
     pub fn complete(id: u64, error: Option<&str>) {

@@ -1,15 +1,17 @@
 //! Recursive library-folder merges with verified, resumable cleanup.
 //! Originals remain until the registry commits the prepared destination.
 
-use audiobook_folder::{discover, discover_cover, discover_cue, discover_nfo, folder_hash, PATH_MAPPING_FILE};
+use audiobook_folder::{PATH_MAPPING_FILE, discover, discover_cover, discover_cue, discover_nfo, folder_hash};
 use client_platform_native::filesystem::sync_directory;
-use content_address::{hash_file, ContentHash, HashingReader};
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem::temporary;
+use client_platform_runtime::filesystem::{self as fs};
+use content_address::{ContentHash, HashingReader, hash_file};
 use library_model::RelativeBookPath;
 use library_replica::{file_name_candidates, folder_name_candidates, portable_name_key, project_folder_name};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
 use std::io::{self, Error, ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
@@ -82,11 +84,7 @@ impl Drop for MoveTransfer {
         let Some((mut plan, library, identity)) = self.rollback.take() else { return };
         let root = plan.source.clone();
         let check = || {
-            if cleanup_root_matches(&root, &identity, library)? {
-                Ok(())
-            } else {
-                Err(failure("destination storage changed; preparation files were retained"))
-            }
+            if cleanup_root_matches(&root, &identity, library)? { Ok(()) } else { Err(failure("destination storage changed; preparation files were retained")) }
         };
         let rollback = (|| {
             for marker in self.markers.iter().rev() {
@@ -150,14 +148,14 @@ pub fn cleanup_root_matches(root: &Path, identity: &str, library: LibraryId) -> 
 
 fn original_members_present(root: &Path, book: &FileMove) -> io::Result<bool> {
     let source = checked_path(root, &book.source)?;
-    if !source.try_exists()? {
+    if !fs::try_exists(&source)? {
         return Ok(false);
     }
     if !book.folder {
         return Ok(true);
     }
     for member in &book.members {
-        if checked_path(&source, &member.path)?.try_exists()? {
+        if fs::try_exists(checked_path(&source, &member.path)?)? {
             return Ok(true);
         }
     }
@@ -170,7 +168,7 @@ fn failure(message: impl Into<String>) -> Error {
 
 /// Resolve only ordinary paths below a canonical root, refusing symlink traversal.
 pub fn checked_path(root: &Path, relative: &Path) -> io::Result<PathBuf> {
-    if root.canonicalize()? != root {
+    if fs::canonicalize(&root)? != root {
         return Err(failure("library root changed during move"));
     }
     let mut path = root.to_owned();
@@ -193,7 +191,7 @@ pub fn checked_path(root: &Path, relative: &Path) -> io::Result<PathBuf> {
 pub fn book_checksum(path: &Path) -> io::Result<ContentHash> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_file() {
-        hash_file(&mut File::open(path)?)
+        hash_file(&mut fs::open(path)?)
     } else if metadata.is_dir() {
         // Hashing the reproducible archive matches scanner/download identity.
         let mut walk = crate::filesystem::walk(path);
@@ -216,10 +214,10 @@ fn members(path: &Path, folder: bool) -> io::Result<Vec<Member>> {
     paths.extend(discover_cover(path)?.map(|member| member.path));
     paths.extend(discover_cue(path)?.map(|member| member.path));
     paths.extend(discover_nfo(path)?.map(|member| member.path));
-    if path.join(PATH_MAPPING_FILE).try_exists()? {
+    if fs::try_exists(&path.join(PATH_MAPPING_FILE))? {
         paths.push(path.join(PATH_MAPPING_FILE));
     }
-    paths.into_iter().map(|file| Ok(Member { path: file.strip_prefix(path).map_err(|_| failure("audiobook member is outside its folder"))?.to_owned(), checksum: hash_file(&mut File::open(file)?)? })).collect()
+    paths.into_iter().map(|file| Ok(Member { path: file.strip_prefix(path).map_err(|_| failure("audiobook member is outside its folder"))?.to_owned(), checksum: hash_file(&mut fs::open(file)?)? })).collect()
 }
 
 impl MovePlan {
@@ -285,7 +283,7 @@ impl MovePlan {
             let target = checked_path(&self.destination, &directory.destination)?;
             match fs::create_dir(&target) {
                 Ok(()) => transfer.rollback.as_mut().expect("uncommitted transfer").0.directories.push(DirectoryMove { source: directory.destination.clone(), destination: directory.destination.clone(), id: None }),
-                Err(error) if error.kind() == ErrorKind::AlreadyExists && target.is_dir() => {}
+                Err(error) if error.kind() == ErrorKind::AlreadyExists && fs::is_dir(&target) => {}
                 Err(error) => return Err(error),
             }
             sync_directory(target.parent().ok_or_else(|| failure("folder has no parent"))?)?;
@@ -300,7 +298,7 @@ impl MovePlan {
                     Some(found) if found == id => {}
                     Some(_) => return Err(failure("destination belongs to another synced folder; its identity was retained")),
                     None => {
-                        let mut staged = tempfile::NamedTempFile::new_in(&target)?;
+                        let mut staged = temporary::NamedTempFile::new_in(&target)?;
                         staged.write_all(id.to_string().as_bytes())?;
                         staged.as_file().sync_all()?;
                         // Never replace an identity created by another instance.
@@ -315,15 +313,15 @@ impl MovePlan {
             let source = checked_path(&self.source, &file.source)?;
             let target = checked_path(&self.destination, &file.destination)?;
             validate_snapshot(&source, file)?;
-            if target.try_exists()? {
+            if fs::try_exists(&target)? {
                 if file.checksum.is_none() || !matches_snapshot(&target, file)? {
                     return Err(failure(format!("destination file changed: {}", target.display())));
                 }
                 continue;
             }
             let parent = target.parent().ok_or_else(|| failure("file has no parent"))?;
-            let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-            let mut reader = HashingReader::new(File::open(&source)?);
+            let mut staged = temporary::NamedTempFile::new_in(parent)?;
+            let mut reader = HashingReader::new(fs::open(&source)?);
             io::copy(&mut reader, &mut staged)?;
             if file.size != Some(reader.size_bytes()) || file.checksum.is_some_and(|checksum| checksum != reader.checksum()) {
                 return Err(failure("source file changed during copying; original was retained"));
@@ -369,7 +367,7 @@ impl MovePlan {
                 return Err(failure("source folder identity changed; originals were retained"));
             }
             let target = checked_path(&self.destination, &directory.destination)?;
-            if !target.is_dir() {
+            if !fs::is_dir(&target) {
                 return Err(failure("destination folder changed; originals were retained"));
             }
             if let Some(id) = directory.id {
@@ -403,7 +401,7 @@ impl MovePlan {
             }
             if self.files[index].folder && !self.files[index].cleanup_started {
                 let source = checked_path(&self.source, &self.files[index].source)?;
-                if source.try_exists()? && book_checksum(&source)? != self.files[index].checksum()? {
+                if fs::try_exists(&source)? && book_checksum(&source)? != self.files[index].checksum()? {
                     return Err(failure("source audiobook changed; original files were retained"));
                 }
                 self.files[index].cleanup_started = true;
@@ -444,7 +442,7 @@ impl MovePlan {
             while let Some(directory) = self.directories.last() {
                 check_source()?;
                 let path = checked_path(&self.source, &directory.source)?;
-                if path.try_exists()? {
+                if fs::try_exists(&path)? {
                     if let Some(id) = directory.id {
                         let marker = checked_path(&self.source, &directory.source.join(".biblos_uuid"))?;
                         match read_directory_id(&marker)? {
@@ -504,7 +502,7 @@ fn validate_snapshot(path: &Path, file: &FileMove) -> io::Result<()> {
 
 fn matches_snapshot(path: &Path, file: &FileMove) -> io::Result<bool> {
     let metadata = fs::symlink_metadata(path)?;
-    Ok(metadata.is_file() && file.size.is_none_or(|size| size == metadata.len()) && hash_file(&mut File::open(path)?)? == file.checksum()?)
+    Ok(metadata.is_file() && file.size.is_none_or(|size| size == metadata.len()) && hash_file(&mut fs::open(path)?)? == file.checksum()?)
 }
 
 /// Inventory the destination by complete portable paths, not host filesystem
@@ -624,12 +622,12 @@ fn choose_destination(source: &Path, destination: &Path, requested: &Path, entry
             let digest = match *checksum {
                 Some(digest) => digest,
                 None => {
-                    let digest = hash_file(&mut File::open(checked_path(source, &entry.relative)?)?)?;
+                    let digest = hash_file(&mut fs::open(checked_path(source, &entry.relative)?)?)?;
                     *checksum = Some(digest);
                     digest
                 }
             };
-            hash_file(&mut File::open(&target)?)? == digest
+            hash_file(&mut fs::open(&target)?)? == digest
         } else {
             false
         };
@@ -647,7 +645,7 @@ fn remove_verified(path: &Path, checksum: ContentHash, check_source: impl FnOnce
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     }
-    if hash_file(&mut File::open(path)?)? != checksum {
+    if hash_file(&mut fs::open(path)?)? != checksum {
         return Err(failure(format!("old book file changed; retained for review: {}", path.display())));
     }
     check_source()?;

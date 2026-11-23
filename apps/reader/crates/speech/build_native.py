@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build reduced, static Linux speech libraries without editing dependency sources."""
+"""Build reduced Linux or Android speech libraries from pinned sources."""
 import argparse
 import hashlib
 import json
@@ -69,7 +69,7 @@ def strip_debug(archive):
     run([strip, "--strip-debug", archive])
 
 
-def prepare_native(work=None, jobs=None, offline=False):
+def prepare_native(work=None, jobs=None, offline=False, ndk=None, android_sdk=None):
     if jobs is None:
         jobs = os.cpu_count() or 1
     if sys.platform != "linux" or platform.machine() not in ("x86_64", "AMD64"):
@@ -77,17 +77,29 @@ def prepare_native(work=None, jobs=None, offline=False):
     if jobs < 1:
         raise ValueError("Speech compiler jobs must be positive")
     pins = json.loads((HERE / "native-source.json").read_text())
-    work = local_directory(work or ROOT / ".tmp/speech-reduced-native")
-    local_directory(os.environ.get("BOKHEIM_LINUX_SDK", ROOT / ".linux-toolchain"))
-    environment = runpy.run_path(str(ROOT / "scripts/linux/toolchain.py"))["build_environment"](offline=offline)
-    sdk = Path(environment["BOKHEIM_LINUX_SDK"])
-    local_directory(sdk)
+    android = ndk is not None
+    if android and android_sdk is None:
+        raise RuntimeError("Android speech builds require an Android SDK path")
+    work = local_directory(work or ROOT / (".tmp/speech-reduced-android" if android else ".tmp/speech-reduced-native"))
+    if android:
+        ndk, sdk = Path(ndk).resolve(), Path(android_sdk).resolve()
+        if not (ndk / "build/cmake/android.toolchain.cmake").is_file():
+            raise RuntimeError(f"Invalid Android NDK: {ndk}")
+        environment = os.environ.copy()
+    else:
+        local_directory(os.environ.get("BOKHEIM_LINUX_SDK", ROOT / ".linux-toolchain"))
+        environment = runpy.run_path(str(ROOT / "scripts/linux/toolchain.py"))["build_environment"](offline=offline)
+        sdk = Path(environment["BOKHEIM_LINUX_SDK"])
+        local_directory(sdk)
     environment.update(TMPDIR=str(local_directory(work / "tmp")), CMAKE_BUILD_PARALLEL_LEVEL=str(jobs))
     inputs = [HERE / name for name in ("native-source.json", "native-operators.py", "native-archives.cmake", "native-cxx-compat.h",
                                       "build_native.py", "build_android_source.py", "source.json", "source-dependencies.json")]
     inputs += [ROOT / "scripts/linux/toolchain.json", ROOT / "scripts/linux/compiler.py"]
-    fingerprint = hashlib.sha256("".join(digest(path) for path in inputs).encode()).hexdigest()
-    destination = ROOT / "target/native-speech" / fingerprint
+    identity = "".join(digest(path) for path in inputs)
+    if android:
+        identity += "android-alba-api26:" + (ndk / "source.properties").read_text()
+    fingerprint = hashlib.sha256(identity.encode()).hexdigest()
+    destination = ROOT / ("target/native-speech-android" if android else "target/native-speech") / fingerprint
     local_directory(destination.parent)
     marker = destination / "receipt.json"
     if marker.is_file():
@@ -97,6 +109,8 @@ def prepare_native(work=None, jobs=None, offline=False):
                 for name, checksum in cached["files"].items()):
             return destination / "lib"
     required_gib = 2 if (work / "onnxruntime-build/Release/CMakeCache.txt").is_file() else 8
+    if android:
+        required_gib = 1 if (work / "onnxruntime-source").is_dir() else 4
     if shutil.disk_usage(work).free < required_gib * 1024**3:
         raise RuntimeError(f"The native speech source build needs at least {required_gib} GiB of free local space: {work}")
 
@@ -125,14 +139,23 @@ def prepare_native(work=None, jobs=None, offline=False):
             raise RuntimeError("Pinned ONNX analysis packages must be installed before an offline build")
         run([python, "-m", "pip", "install", "--disable-pip-version-check", *[f"{name}=={version}" for name, version in packages.items()]], env=environment)
     models = ROOT / "target/release/tts"
+    model_pins = {name: checksum for name, checksum in pins["models"].items()
+                  if not android or Path(name).parts[0] == "alba"}
     if not all((models / name).is_file() and digest(models / name) == checksum
-               for name, checksum in pins["models"].items()):
+               for name, checksum in model_pins.items()):
         # Do not replace an existing release's ORT assets while preparing a
         # future runtime. A failed native build must leave that release usable.
         models = work / "source-models"
-        runpy.run_path(str(HERE / "prepare.py"))["prepare_all"](models, offline=offline)
+        prepare = runpy.run_path(str(HERE / "prepare.py"))
+        if android:
+            prepare["prepare"](models / "alba", offline=offline)
+        else:
+            prepare["prepare_all"](models, offline=offline)
     operators = work / "operators"
-    run([python, HERE / "native-operators.py", "--models", models, "--output", operators], env=environment)
+    analysis = [python, HERE / "native-operators.py", "--models", models, "--output", operators]
+    if android:
+        analysis += ["--voice", "alba"]
+    run(analysis, env=environment)
     cmake = [f"CMAKE_C_COMPILER={sdk}/bin/cc", f"CMAKE_CXX_COMPILER={sdk}/bin/c++",
              f"CMAKE_ASM_COMPILER={sdk}/bin/cc", f"CMAKE_AR={shutil.which('llvm-ar')}",
              f"CMAKE_RANLIB={shutil.which('llvm-ranlib')}",
@@ -141,6 +164,12 @@ def prepare_native(work=None, jobs=None, offline=False):
              "CMAKE_EXE_LINKER_FLAGS=-Wl,--gc-sections",
              "CMAKE_LINK_DEPENDS_USE_LINKER=OFF",
              "FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER"]
+    if android:
+        cmake = [f"CMAKE_TOOLCHAIN_FILE={ndk}/build/cmake/android.toolchain.cmake",
+                 "ANDROID_ABI=arm64-v8a", "ANDROID_PLATFORM=android-26", "ANDROID_STL=c++_static",
+                 "CMAKE_C_FLAGS=-g0 -ffunction-sections -fdata-sections",
+                 "CMAKE_CXX_FLAGS=-g0 -ffunction-sections -fdata-sections",
+                 "CMAKE_SHARED_LINKER_FLAGS=-Wl,--gc-sections -Wl,--strip-debug -Wl,-z,max-page-size=16384"]
     runtime_build = work / "onnxruntime-build"
     command = [python, source / "tools/ci_build/build.py", "--build_dir", runtime_build,
                "--config", "Release", "--update", "--parallel", str(jobs),
@@ -149,10 +178,16 @@ def prepare_native(work=None, jobs=None, offline=False):
                "--minimal_build", "--disable_rtti", "--disable_types", "float8", "float4", "sparsetensor", "optional", "string",
                "--enable_reduced_operator_type_support",
                "--include_ops_by_config", operators / "required_operators.config",
-               "--cmake_generator", "Ninja", "--targets", "bokheim-onnxruntime-static",
+               "--cmake_generator", "Ninja", "--targets", "onnxruntime" if android else "bokheim-onnxruntime-static",
                "--cmake_extra_defines", *cmake, "onnxruntime_BUILD_UNIT_TESTS=OFF", "protobuf_WITH_ZLIB=OFF",
-               "onnxruntime_DISABLE_EXTERNAL_INITIALIZERS=ON",
-               f"CMAKE_PROJECT_INCLUDE={HERE}/native-archives.cmake"]
+               "onnxruntime_DISABLE_EXTERNAL_INITIALIZERS=ON"]
+    if android:
+        # Keep these before --cmake_extra_defines, whose values are variadic.
+        extra = command.index("--cmake_extra_defines")
+        command[extra:extra] = ["--android", "--android_abi", "arm64-v8a", "--android_api", "26",
+                               "--android_ndk_path", str(ndk), "--android_sdk_path", str(sdk), "--build_shared_lib"]
+    else:
+        command += [f"CMAKE_PROJECT_INCLUDE={HERE}/native-archives.cmake"]
     if offline:
         command += ["FETCHCONTENT_FULLY_DISCONNECTED=ON"]
     # Upstream rewrites its generated reduction headers even when identical.
@@ -166,17 +201,20 @@ def prepare_native(work=None, jobs=None, offline=False):
             os.utime(path, ns=(status.st_atime_ns, status.st_mtime_ns))
     command[command.index("--update")] = "--build"
     run(command, env=environment, cwd=ROOT)
-    manifest = runtime_build / "Release/bokheim-archives.txt"
-    archives = list(dict.fromkeys(Path(line) for line in manifest.read_text().splitlines() if line))
-    if not archives or not any(path.name == "libonnxruntime_session.a" for path in archives):
-        raise RuntimeError("The ONNX archive manifest is missing the runtime session library")
     runtime_lib = work / "onnxruntime-lib"
     runtime_lib.mkdir(exist_ok=True)
-    # The SDK can emit debug information even for CMake Release builds.
-    # Strip each input first to avoid duplicating it in the merged archive.
-    for archive in archives:
-        strip_debug(archive)
-    bundle_archives(archives, runtime_lib / "libonnxruntime.a")
+    if android:
+        shutil.copy2(runtime_build / "Release/libonnxruntime.so", runtime_lib / "libonnxruntime.so")
+    else:
+        manifest = runtime_build / "Release/bokheim-archives.txt"
+        archives = list(dict.fromkeys(Path(line) for line in manifest.read_text().splitlines() if line))
+        if not archives or not any(path.name == "libonnxruntime_session.a" for path in archives):
+            raise RuntimeError("The ONNX archive manifest is missing the runtime session library")
+        # The SDK can emit debug information even for CMake Release builds.
+        # Strip each input first to avoid duplicating it in the merged archive.
+        for archive in archives:
+            strip_debug(archive)
+        bundle_archives(archives, runtime_lib / "libonnxruntime.a")
 
     sherpa_work = work / "sherpa"
     helpers = runpy.run_path(str(HERE / "build_android_source.py"))
@@ -185,7 +223,7 @@ def prepare_native(work=None, jobs=None, offline=False):
     environment.update(SHERPA_ONNXRUNTIME_LIB_DIR=str(runtime_lib),
                        SHERPA_ONNXRUNTIME_INCLUDE_DIR=str(source / "include/onnxruntime/core/session"))
     flags = [f"-D{definition}" for definition in cmake]
-    flags += ["-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF", "-DSHERPA_ONNX_ENABLE_TTS=ON",
+    flags += ["-DCMAKE_BUILD_TYPE=Release", f"-DBUILD_SHARED_LIBS={'ON' if android else 'OFF'}", "-DSHERPA_ONNX_ENABLE_TTS=ON",
               "-DSHERPA_ONNX_ENABLE_C_API=ON", "-DSHERPA_ONNX_LINK_LIBSTDCPP_STATICALLY=OFF",
               "-DSHERPA_ONNX_BUILD_C_API_EXAMPLES=OFF"]
     flags += [f"-DSHERPA_ONNX_ENABLE_{name}=OFF" for name in
@@ -198,13 +236,16 @@ def prepare_native(work=None, jobs=None, offline=False):
     with tempfile.TemporaryDirectory(dir=destination.parent) as staging:
         staging = Path(staging)
         (staging / "lib").mkdir()
-        for name in LIBRARIES:
-            filename = f"lib{name}.a"
+        libraries = ("sherpa-onnx-c-api", "onnxruntime") if android else LIBRARIES
+        for name in libraries:
+            filename = f"lib{name}.{'so' if android else 'a'}"
             path = runtime_lib / filename if name == "onnxruntime" else build / "lib" / filename
             if not path.is_file():
                 raise RuntimeError(f"Missing native speech archive: {path}")
             shutil.copy2(path, staging / "lib" / filename)
-            if name != "onnxruntime":
+            if android:
+                run([ndk / "toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip", "--strip-unneeded", staging / "lib" / filename])
+            elif name != "onnxruntime":
                 strip_debug(staging / "lib" / filename)
         licenses = helpers["notices"]([("sherpa-onnx", sherpa), ("onnxruntime", source)]
                                       + [("sherpa-dependencies/" + p.name, p) for p in sorted((build / "_deps").glob("*-src"))]
@@ -212,13 +253,17 @@ def prepare_native(work=None, jobs=None, offline=False):
         (staging / "LICENSE").write_bytes(licenses)
         shutil.copy2(operators / "required_operators.config", staging / "required_operators.config")
         shutil.copytree(operators / "models", staging / "models")
-        provenance = {"fingerprint": fingerprint, "target": pins["target"], "glibc": pins["glibc"],
+        provenance = {"fingerprint": fingerprint, "target": "aarch64-linux-android" if android else pins["target"],
                       "onnxruntime": runtime, "sherpa": json.loads((HERE / "source.json").read_text())["sherpa_commit"],
-                      "models": pins["models"], "operator_analysis": json.loads((operators / "operators.json").read_text()),
+                      "models": model_pins, "operator_analysis": json.loads((operators / "operators.json").read_text()),
                       "runtime_features": {"rtti": False, "operator_type_reduction": True, "minimal_build": True,
                                            "model_format": "ORT", "external_initializers": False,
                                            "disabled_types": ["float8", "float4", "sparsetensor", "optional", "string"]},
                       "files": {str(path.relative_to(staging)): digest(path) for path in staging.rglob("*") if path.is_file()}}
+        if android:
+            provenance.update(android_api=26, ndk=(ndk / "source.properties").read_text())
+        else:
+            provenance["glibc"] = pins["glibc"]
         (staging / "receipt.json").write_text(json.dumps(provenance, indent=2) + "\n")
         if destination.exists():
             shutil.rmtree(destination)

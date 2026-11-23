@@ -13,7 +13,7 @@ use crate::annotations::{IndexSql as AnnotationsIndexSql, TablesSql as Annotatio
 use crate::assets::TablesSql as AssetsTablesSql;
 use crate::native::{IndexSql as NativeIndexSql, TablesSql as NativeTablesSql};
 use crate::placements::{IndexSql as PlacementsIndexSql, TablesSql as PlacementsTablesSql};
-use crate::query_methods::{first_column, query_rows};
+use crate::query_methods::{first_column, parse_uuid_column, query_rows, text_column};
 use crate::shared_sql::SharedSql;
 use crate::sync::{IndexSql as SyncIndexSql, TablesSql as SyncTablesSql};
 use crate::sync_status::{SyncIssueDetail, SyncIssueSummary};
@@ -35,7 +35,7 @@ mod taxonomy_update;
 mod transactions;
 pub mod transfer;
 
-pub const LIBRARY_SCHEMA_VERSION: i64 = 56;
+pub const LIBRARY_SCHEMA_VERSION: i64 = 63;
 
 pub use client_platform_runtime::executor;
 pub use client_platform_runtime::storage_queue;
@@ -188,6 +188,9 @@ impl Database {
             if version < 50 {
                 migration::upgrade_before_50(&transaction, version)?;
             }
+            if version < 61 {
+                migration::upgrade_fingerprints(&transaction)?;
+            }
             if version < 51 {
                 native::migrate_file_work(&transaction)?;
             }
@@ -209,11 +212,28 @@ impl Database {
             transaction.schema_placements_views()?;
             transaction.schema_assets_views()?;
             transaction.initialization_reset_enrichment_policy()?;
-            let raw: String = transaction.initialization_replica_id(|row| row.get(0))?;
-            let replica_id = raw.parse().map_err(DatabaseError::operation)?;
+            let replica_id = transaction.initialization_replica_id(|row| parse_uuid_column(text_column(row, 0)?, 0))?;
             content_identity::initialize_scope(&transaction, library, replica_id)?;
             if version < 55 {
                 migration::book_ids::upgrade(&transaction)?;
+            }
+            if version < 57 {
+                migration::upgrade_review(&transaction)?;
+            }
+            if version < 58 {
+                migration::upgrade_text_index(&transaction)?;
+            }
+            if version < 59 {
+                migration::upgrade_directories(&transaction)?;
+            }
+            if version < 60 {
+                migration::upgrade_scan_progress(&transaction)?;
+            }
+            if version < 63 {
+                migration::upgrade_book_records(&transaction)?;
+            }
+            if version < 62 {
+                migration::upgrade_optional_enrichment(&transaction)?;
             }
             if version != VERSION {
                 transaction.pragma_update(None, "user_version", VERSION)?;
@@ -254,6 +274,9 @@ impl Database {
         transaction.schema_placements_index()?;
         transaction.execute_batch(include_str!("placements/sql/schema/path_indexes.sql"))?;
         transaction.schema_annotations_index()?;
+        migration::upgrade_review(&transaction)?;
+        migration::upgrade_directories(&transaction)?;
+        migration::upgrade_scan_progress(&transaction)?;
         browse::revision::install(&transaction)?;
         let replica_id = sync_common::ReplicaId::new_v4();
         transaction.owner_set_replica_id(&replica_id.to_string())?;
@@ -286,8 +309,7 @@ impl Database {
             if !self.connection.owner_sync_initialized(|row| row.get(0))? {
                 return Ok(LibrarySyncDetails::default());
             }
-            let last_synced_at = first_column::<Option<String>>(|read| self.connection.shared_owner_last_successful_sync_at(read))?.flatten();
-            let last_synced_at = last_synced_at.map(|value| value.parse().map_err(DatabaseError::operation)).transpose()?;
+            let last_synced_at = first_column::<Option<i64>>(|read| self.connection.shared_owner_last_successful_sync_at(read))?.flatten().map(|value| sync::nonnegative_u64(value, 0, "last sync timestamp")).transpose()?;
             Ok(LibrarySyncDetails {
                 has_unsynced_changes: self.connection.owner_has_unsynced_changes(|row| row.get(0))?,
                 last_synced_at,
@@ -306,7 +328,7 @@ impl Database {
 
     pub fn set_storage_policy(&self, storage: &LibraryStorage, reset_cloud_presence: bool) -> Result<(), DatabaseError> {
         use rusqlite::OptionalExtension;
-        let enabled = if storage.uses_bokheim_assets() { "1" } else { "0" };
+        let enabled = storage.uses_bokheim_assets();
         let json = serde_json::to_string(storage).map_err(DatabaseError::operation)?;
         self.write(|transaction| {
             if reset_cloud_presence {

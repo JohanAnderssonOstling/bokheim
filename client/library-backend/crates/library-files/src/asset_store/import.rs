@@ -6,10 +6,14 @@ use client_platform_native::filesystem::parent_directory;
 use client_platform_runtime::executor::run_blocking;
 #[cfg(target_arch = "wasm32")]
 use client_platform_runtime::executor::storage_call;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem as fs;
 use library_model::RelativeBookPath;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::PoisonError;
 
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem::temporary;
 #[derive(Default)]
 pub struct ImportOptions {
     /// Native imports may write directly to a collision-free destination.
@@ -31,10 +35,10 @@ impl AssetStore {
                     if !store.root_available() {
                         return Err(AssetStoreError::operation("library folder is unavailable"));
                     }
-                    use crate::asset_store::native::{placement_path, write_import_bytes, DirectBook, DIRECT_IMPORTS};
+                    use crate::asset_store::native::{DIRECT_IMPORTS, DirectBook, placement_path, write_import_bytes};
                     let requested = relative.file_name();
-                    let directory = parent_directory(&placement_path(&store.0, &relative))?.canonicalize()?;
-                    occupied.extend(std::fs::read_dir(&directory)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?);
+                    let directory = client_platform_runtime::filesystem::canonicalize(parent_directory(&placement_path(&store.0, &relative))?)?;
+                    occupied.extend(fs::read_dir(&directory)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?);
                     for name in library_replica::file_name_candidates(requested, occupied.iter().map(String::as_str)) {
                         let path = directory.join(&name);
                         let imports = DIRECT_IMPORTS.get_or_init(Default::default);
@@ -42,7 +46,7 @@ impl AssetStore {
                             continue;
                         }
                         let direct = DirectBook { path: path.clone() };
-                        let file = match std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path) {
+                        let file = match fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path) {
                             Ok(file) => file,
                             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                                 continue;
@@ -51,8 +55,8 @@ impl AssetStore {
                         };
                         // Wrap the final file only to clean it up on copy/inspection failure.
                         // No temporary filename, rename, hard link, or second copy is involved.
-                        let cleanup = tempfile::TempPath::try_from_path(path)?;
-                        let mut file = tempfile::NamedTempFile::from_parts(file, cleanup);
+                        let cleanup = temporary::TempPath::try_from_path(path)?;
+                        let mut file = temporary::NamedTempFile::from_parts(file, cleanup);
                         let (checksum, size) = write_import_bytes(&store.0, file.as_file_mut(), source.as_mut(), &directory)?;
                         let copied_digest = Some((checksum, size, crate::filesystem::fingerprint(file.path())?));
                         return Ok((name, CopiedBook { inner: super::imp::CopiedBook { copied_digest, temporary_path: file.into_temp_path(), direct: Some(direct) } }));

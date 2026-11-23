@@ -5,7 +5,7 @@ use std::{fmt, future::Future, ops::Deref, sync::Arc};
 use account_client::{AccountSession, AccountStatus, AuthError, Session, SessionAuthority, SessionFuture, SessionPersistence};
 use client_platform_runtime::storage_queue;
 use client_protocol::{BackendError, Failure};
-use sync_transport::{CredentialsFuture, CredentialsSource, SyncCredentials};
+use sync_transport::SyncCredentials;
 use tokio::sync::watch::Receiver;
 
 pub use account_client::{AccountSessionError, AuthenticatedRequestError, RefreshPolicy, authenticated_request};
@@ -30,35 +30,9 @@ pub fn account_error(error: AccountSessionError) -> BackendError {
     }
 }
 
-pub type SharedSyncCredentials = Arc<dyn CredentialsSource>;
-
-/// A managed account supplies both renewal and its live credentials. A caller
-/// that supplies credentials alone explicitly opts out of account renewal.
-#[derive(Clone)]
-pub enum LibraryAuthentication {
-    Account(LibraryAccount),
-    Credentials(SharedSyncCredentials),
-}
-
-impl LibraryAuthentication {
-    pub async fn credentials(&self) -> Option<SyncCredentials> {
-        match self {
-            Self::Account(account) => CredentialsSource::credentials(account).await,
-            Self::Credentials(credentials) => credentials.credentials().await,
-        }
-    }
-
-    pub fn account(&self) -> Option<&LibraryAccount> {
-        match self {
-            Self::Account(account) => Some(account),
-            Self::Credentials(_) => None,
-        }
-    }
-}
-
 /// One shared session supplies account operations and sync credentials.
 /// Async operations own a handle so their futures can outlive the caller.
-trait AccountService: CredentialsSource {
+trait AccountService: Send + Sync {
     fn current(&self) -> Result<Option<Session>, AccountSessionError>;
     fn subscribe(&self) -> Receiver<u64>;
     fn subscribe_status(&self) -> Receiver<AccountStatus>;
@@ -161,14 +135,8 @@ impl LibraryAccount {
     {
         self.while_authorized(account_client::account_request(self, request)).await?
     }
-    pub fn credentials(&self) -> SharedSyncCredentials {
-        Arc::new(self.clone())
-    }
-}
-
-impl CredentialsSource for LibraryAccount {
-    fn credentials(&self) -> CredentialsFuture<'_> {
-        Box::pin(async move { self.session().await.ok().flatten().map(|session| SyncCredentials::new(session.server_url().clone(), session.token())) })
+    pub async fn credentials(&self) -> Option<SyncCredentials> {
+        self.session().await.ok().flatten().map(|session| SyncCredentials::new(session.server_url().clone(), session.token()))
     }
 }
 
@@ -232,15 +200,6 @@ impl<P: SessionPersistence> Deref for LibraryAccountSession<P> {
     }
 }
 
-impl<P> CredentialsSource for LibraryAccountSession<P>
-where
-    P: SessionPersistence + Send + Sync,
-{
-    fn credentials(&self) -> CredentialsFuture<'_> {
-        Box::pin(async move { self.credentials_session().map(|session| SyncCredentials::new(session.server_url().clone(), session.token())) })
-    }
-}
-
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -273,7 +232,7 @@ mod tests {
         let (refresh, stale_rejection, credentials) = {
             let session = account();
             let account = session.library_account();
-            (account.refresh_if_needed(), account.refresh_after_unauthorized("b".repeat(43)), account.credentials())
+            (account.refresh_if_needed(), account.refresh_after_unauthorized("b".repeat(43)), account.clone())
         };
 
         let token = "a".repeat(43);
@@ -286,7 +245,7 @@ mod tests {
     async fn library_credentials_do_not_follow_another_account_and_resume_for_the_owner() {
         let session = account();
         let library = session.library_account().with_authorization(|session| Ok(session.user_id() == "user"));
-        let credentials = library.credentials();
+        let credentials = library.clone();
         let mut changes = library.subscribe();
         assert!(credentials.credentials().await.is_some());
 

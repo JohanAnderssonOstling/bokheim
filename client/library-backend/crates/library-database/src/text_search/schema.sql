@@ -30,3 +30,13 @@ CREATE TRIGGER IF NOT EXISTS book_text_revision_inserted AFTER INSERT ON local_f
 BEGIN DELETE FROM book_text_state WHERE row_id=(SELECT row_id FROM book WHERE content_hash=NEW.book_id); END;
 CREATE TRIGGER IF NOT EXISTS book_text_revision_deleted AFTER DELETE ON local_file_content
 BEGIN DELETE FROM book_text_state WHERE row_id=(SELECT row_id FROM book WHERE content_hash=OLD.book_id); END;
+
+-- Extraction format and canonical fallback bytes are part of the index revision.
+CREATE TRIGGER IF NOT EXISTS book_text_format_updated AFTER UPDATE OF format ON book WHEN OLD.format IS NOT NEW.format
+BEGIN DELETE FROM book_text_state WHERE row_id=NEW.row_id; END;
+CREATE TRIGGER IF NOT EXISTS book_text_canonical_inserted AFTER INSERT ON book_content
+BEGIN DELETE FROM book_text_state WHERE row_id=(SELECT row_id FROM book WHERE content_hash=NEW.book_id); END;
+CREATE TRIGGER IF NOT EXISTS book_text_canonical_updated AFTER UPDATE OF canonical_hash ON book_content WHEN OLD.canonical_hash IS NOT NEW.canonical_hash
+BEGIN DELETE FROM book_text_state WHERE row_id=(SELECT row_id FROM book WHERE content_hash=NEW.book_id); END;
+CREATE TRIGGER IF NOT EXISTS book_text_canonical_deleted AFTER DELETE ON book_content
+BEGIN DELETE FROM book_text_state WHERE row_id=(SELECT row_id FROM book WHERE content_hash=OLD.book_id); END;

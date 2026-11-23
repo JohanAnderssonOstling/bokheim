@@ -13,7 +13,7 @@ axum = "0.7"
 book-model = { path = "../../shared/book-model" }
 flate2 = "1"
 futures-util = "0.3"
-subject-projection = { path = "../../shared/subject-projection", features = ["authoritative-taxonomy"] }
+subject-projection = { path = "../../shared/subject-projection" }
 metadata-contract = { path = "../../shared/metadata-contract" }
 r2d2 = "0.8"
 r2d2_sqlite = "0.35"

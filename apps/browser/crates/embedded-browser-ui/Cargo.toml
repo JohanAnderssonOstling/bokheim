@@ -26,11 +26,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 gpui.workspace = true
 gpui-component.workspace = true
-ui-components = { path = "../../../components" }
+ui-components = { path = "../../../components", default-features = false }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 book-model = { path = "../../../../shared/book-model" }
-client-platform-runtime = { path = "../../../../client/platforms/runtime", features = ["linux-network-cost"] }
+client-platform-runtime = { path = "../../../../client/platforms/runtime" }
 anyhow = "1"
 blake3 = "1"
 getrandom = "0.3"

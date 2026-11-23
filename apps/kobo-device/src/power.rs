@@ -1,7 +1,17 @@
 //! Peripherals remain asleep across unsolicited kernel wakes.
-use crate::{battery::BatteryStatus, brightness, natural_light, rtc::Alarm, wifi};
+use crate::{
+    battery::BatteryStatus,
+    brightness, natural_light,
+    rtc::{self, Alarm},
+    wifi,
+};
 use std::io::{self, ErrorKind};
 use std::time::Duration;
+
+/// Recover a borrowed firmware alarm after an abnormal app exit.
+pub fn restore_rtc_alarm() -> io::Result<()> {
+    rtc::restore_pending()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LightLevels {

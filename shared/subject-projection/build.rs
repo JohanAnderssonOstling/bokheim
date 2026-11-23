@@ -1,4 +1,4 @@
-use flate2::{write::GzEncoder, Compression};
+use flate2::{Compression, write::GzEncoder};
 use rusqlite::Connection;
 use std::env;
 use std::io::Write;
@@ -7,26 +7,33 @@ use subject_taxonomy::{runtime_index as runtime, taxonomy_reader};
 
 #[path = "src/matcher_storage.rs"]
 mod matcher_storage;
-
-const CLIENT_TAXONOMY_DEPTH: u8 = 2;
+#[path = "src/runtime_format.rs"]
+#[allow(dead_code)] // The shared contract also exposes constants used only by client loaders.
+mod runtime_format;
 
 fn main() {
     for path in ["build.rs", "src", "data"] {
         println!("cargo:rerun-if-changed={path}");
     }
     println!("cargo:rerun-if-changed=data/unified-taxonomy-v2.sqlite3");
-    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_AUTHORITATIVE_TAXONOMY");
     println!("cargo:rerun-if-env-changed=BOKHEIM_BUILD_TAXONOMY_SQLITE");
+    println!("cargo:rerun-if-env-changed=BOKHEIM_BUILD_RUNTIME_TAXONOMY");
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"));
-    let database_path = env::var_os("BOKHEIM_BUILD_TAXONOMY_SQLITE").map(PathBuf::from).unwrap_or_else(|| manifest_dir.join("data/unified-taxonomy-v2.sqlite3"));
+    let runtime_input = env::var_os("BOKHEIM_BUILD_RUNTIME_TAXONOMY").map(PathBuf::from);
+    let database_path = runtime_input.clone().or_else(|| env::var_os("BOKHEIM_BUILD_TAXONOMY_SQLITE").map(PathBuf::from)).unwrap_or_else(|| manifest_dir.join("data/unified-taxonomy-v2.sqlite3"));
     println!("cargo:rerun-if-changed={}", database_path.display());
-    let connection = Connection::open(&database_path).unwrap_or_else(|error| panic!("failed to open {}: {error}", database_path.display()));
+    let connection = Connection::open_with_flags(&database_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap_or_else(|error| panic!("failed to open {}: {error}", database_path.display()));
     let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0)).expect("check taxonomy database integrity");
     assert_eq!(integrity, "ok", "taxonomy database failed its integrity check");
     let foreign_key_violations: i64 = connection.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| row.get(0)).expect("check taxonomy database foreign keys");
     assert_eq!(foreign_key_violations, 0, "taxonomy database contains invalid relationships");
     let format_version: String = connection.query_row("SELECT value FROM taxonomy_meta WHERE key='format_version'", [], |row| row.get(0)).expect("taxonomy database has a format version");
-    assert_eq!(format_version, "1", "unsupported taxonomy database format");
+    if runtime_input.is_some() {
+        assert_eq!(format_version, runtime_format::FORMAT_VERSION.to_string(), "packaging requires the published runtime format");
+        runtime_format::validate(&connection).expect("validate published runtime artifact");
+    } else {
+        assert_eq!(format_version, "1", "unsupported authoring taxonomy database format");
+    }
     let published_release_id: u64 =
         connection.query_row("SELECT value FROM taxonomy_meta WHERE key='release_id'", [], |row| row.get::<_, String>(0)).expect("taxonomy database has a release identifier").parse().expect("taxonomy release identifier is an integer");
     assert!(published_release_id > 0, "taxonomy release identifier must be positive");
@@ -56,120 +63,28 @@ fn main() {
     std::fs::write(output_dir.join("bisac-reference-revision.txt"), bisac_revision).expect("write BISAC revision");
     std::fs::write(output_dir.join("bisac-reference-digest.txt"), bisac_digest).expect("write BISAC digest");
     let client_database_path = output_dir.join("unified-taxonomy-client-v2.sqlite3");
-    if env::var_os("CARGO_FEATURE_AUTHORITATIVE_TAXONOMY").is_some() {
-        std::fs::copy(&database_path, &client_database_path).unwrap_or_else(|error| panic!("failed to copy authoritative taxonomy to {}: {error}", client_database_path.display()));
+    if runtime_input.is_some() {
+        std::fs::copy(&database_path, &client_database_path).unwrap_or_else(|error| panic!("failed to copy runtime to {}: {error}", client_database_path.display()));
     } else {
-        build_client_database(&database_path, &client_database_path);
+        connection.backup("main", &client_database_path, None).expect("copy a consistent authoring snapshot");
     }
-    let client_connection = Connection::open(&client_database_path).unwrap_or_else(|error| panic!("failed to open {}: {error}", client_database_path.display()));
-    // Route IDs identify occurrences, so a concept can retain several parents.
-    client_connection.execute_batch(include_str!("src/route_storage.sql")).expect("compile curated navigation routes");
-    let concepts = taxonomy_reader::read_unified_taxonomy_connection(&client_connection, "build-time taxonomy").expect("read bundled taxonomy");
-    let subclasses = taxonomy_reader::read_lcc_subclasses(&client_connection).expect("read taxonomy subclass names");
-    let matcher = runtime::build_runtime_with_subclasses(concepts, subclasses).expect("compile bundled taxonomy matcher");
-    client_connection.execute_batch("BEGIN;").expect("begin matcher preparation");
-    matcher_storage::prepare(&client_connection, &matcher).expect("prepare SQLite matching indexes");
-    client_connection.execute_batch("COMMIT; VACUUM;").expect("compact bundled taxonomy database");
-    std::fs::write(output_dir.join("unified-taxonomy-revision-id.txt"), &matcher.revision_id).expect("write taxonomy revision");
+    let flags = if runtime_input.is_some() { rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY } else { rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE };
+    let client_connection = Connection::open_with_flags(&client_database_path, flags).unwrap_or_else(|error| panic!("failed to open {}: {error}", client_database_path.display()));
+    if runtime_input.is_none() {
+        // Route IDs identify occurrences, so a concept can retain several parents.
+        client_connection.execute_batch(include_str!("src/route_storage.sql")).expect("compile curated navigation routes");
+        let concepts = taxonomy_reader::read_unified_taxonomy_connection(&client_connection, "build-time taxonomy").expect("read bundled taxonomy");
+        let subclasses = taxonomy_reader::read_lcc_subclasses(&client_connection).expect("read taxonomy subclass names");
+        let matcher = runtime::build_runtime_with_subclasses(concepts, subclasses).expect("compile bundled taxonomy matcher");
+        client_connection.execute_batch("BEGIN;").expect("begin matcher preparation");
+        matcher_storage::prepare(&client_connection, &matcher).expect("prepare SQLite matching indexes");
+        client_connection.execute_batch("COMMIT;").expect("commit bundled taxonomy indexes");
+        runtime_format::finish(&client_connection).expect("finish bundled runtime artifact");
+    }
+    std::fs::write(output_dir.join("unified-taxonomy-revision-id.txt"), client_connection.query_row("SELECT value FROM taxonomy_meta WHERE key='client_revision'", [], |r| r.get::<_, String>(0)).expect("runtime content identity"))
+        .expect("write taxonomy revision");
     std::fs::write(output_dir.join("taxonomy-release.rs"), format!("{published_release_id}u64")).expect("write taxonomy release");
-    std::fs::write(output_dir.join("taxonomy-format.rs"), format!("{format_version}u32")).expect("write taxonomy format");
     let image = std::fs::read(&client_database_path).expect("read prepared taxonomy");
     let digest = blake3::hash(&image).to_hex().to_string();
     std::fs::write(output_dir.join("taxonomy.digest"), &digest).expect("write taxonomy digest");
-    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("wasm32") {
-        // OUT_DIR is <profile>/build/<crate>/out. Cargo-run and all native
-        // packagers use the same prepared database beside the executable.
-        let profile = output_dir.ancestors().nth(3).expect("Cargo profile directory");
-        for (name, bytes) in [("taxonomy.sqlite3", image.as_slice()), ("taxonomy.digest", digest.as_bytes())] {
-            let destination = profile.join(name);
-            if std::fs::read(&destination).ok().as_deref() != Some(bytes) {
-                let staging = profile.join(format!(".{name}.{}", std::process::id()));
-                std::fs::write(&staging, bytes).expect("stage bundled taxonomy resource");
-                std::fs::rename(staging, destination).expect("publish bundled taxonomy resource");
-            }
-        }
-    }
-}
-
-fn build_client_database(authority_path: &PathBuf, client_path: &PathBuf) {
-    if client_path.exists() {
-        std::fs::remove_file(client_path).unwrap_or_else(|error| panic!("failed to replace {}: {error}", client_path.display()));
-    }
-    let client = Connection::open(client_path).unwrap_or_else(|error| panic!("failed to create {}: {error}", client_path.display()));
-    client
-        .execute_batch(
-            "PRAGMA foreign_keys=ON;
-             CREATE TABLE taxonomy_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
-             CREATE TABLE concept(concept_id INTEGER PRIMARY KEY,preferred_label TEXT NOT NULL CHECK(length(trim(preferred_label))>0),normalized_label TEXT NOT NULL) STRICT;
-             CREATE TABLE concept_parent(
-                 concept_id INTEGER NOT NULL REFERENCES concept(concept_id) ON DELETE CASCADE,
-                 parent_concept_id INTEGER NOT NULL REFERENCES concept(concept_id),
-                 ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-                 PRIMARY KEY(concept_id,parent_concept_id),UNIQUE(concept_id,ordinal),CHECK(concept_id<>parent_concept_id)
-             ) STRICT, WITHOUT ROWID;
-             CREATE TABLE lcc_selector(
-                 concept_id INTEGER NOT NULL REFERENCES concept(concept_id) ON DELETE CASCADE,
-                 selector TEXT NOT NULL CHECK(length(trim(selector))>0),
-                 PRIMARY KEY(concept_id,selector)
-             ) STRICT, WITHOUT ROWID;
-             CREATE TABLE bisac_selector(
-                 concept_id INTEGER NOT NULL REFERENCES concept(concept_id) ON DELETE CASCADE,
-                 selector TEXT NOT NULL CHECK(length(trim(selector))>0),
-                 PRIMARY KEY(concept_id,selector)
-             ) STRICT, WITHOUT ROWID;
-             CREATE TABLE ddc_selector(
-                 selector TEXT NOT NULL CHECK(length(selector)=3 AND selector GLOB '[0-9][0-9][0-9]'),
-                 concept_id INTEGER NOT NULL REFERENCES concept(concept_id) ON DELETE CASCADE,
-                 PRIMARY KEY(selector)
-             ) STRICT, WITHOUT ROWID;
-             CREATE INDEX concept_parent_parent_idx ON concept_parent(parent_concept_id,ordinal,concept_id);
-             CREATE INDEX lcc_selector_lookup_idx ON lcc_selector(selector,concept_id);
-             CREATE INDEX bisac_selector_lookup_idx ON bisac_selector(selector,concept_id);
-             CREATE INDEX ddc_selector_concept_idx ON ddc_selector(concept_id);
-             CREATE INDEX concept_label_lookup_idx ON concept(normalized_label,concept_id);",
-        )
-        .expect("create client taxonomy schema");
-    client.execute_batch(include_str!("src/range_storage.sql")).expect("create client range schema");
-    // Keep the full taxonomy's classification vocabulary when pruning deep
-    // navigation concepts; matching must not depend on a separate CSV.
-    let authority = Connection::open_with_flags(authority_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open taxonomy class names");
-    let subclasses = taxonomy_reader::read_lcc_subclasses(&authority).expect("read authoritative class names");
-    client.execute_batch("CREATE TABLE lcc_subclass(letters TEXT PRIMARY KEY NOT NULL) STRICT, WITHOUT ROWID;").expect("create taxonomy class names");
-    let transaction = client.unchecked_transaction().expect("begin taxonomy class names");
-    for letters in subclasses {
-        transaction.execute("INSERT INTO lcc_subclass VALUES(?1)", [letters]).expect("store taxonomy class name");
-    }
-    transaction.commit().expect("commit taxonomy class names");
-    client.execute("ATTACH DATABASE ?1 AS authority", [authority_path.to_string_lossy().as_ref()]).expect("attach authoritative taxonomy");
-    client
-        .execute_batch(&format!(
-            "CREATE TEMP TABLE client_concept(concept_id INTEGER PRIMARY KEY);
-             INSERT INTO client_concept
-             WITH RECURSIVE selected(concept_id,depth) AS (
-                 SELECT c.concept_id,0 FROM authority.concept c
-                 WHERE NOT EXISTS(SELECT 1 FROM authority.concept_parent p WHERE p.concept_id=c.concept_id)
-                 UNION
-                 SELECT edge.concept_id,selected.depth+1
-                 FROM selected JOIN authority.concept_parent edge ON edge.parent_concept_id=selected.concept_id
-                 WHERE selected.depth<{CLIENT_TAXONOMY_DEPTH}
-             ), ancestors(concept_id) AS (
-                 SELECT concept_id FROM selected
-                 UNION
-                 SELECT edge.parent_concept_id
-                 FROM authority.concept_parent edge JOIN ancestors ON edge.concept_id=ancestors.concept_id
-             )
-             SELECT DISTINCT concept_id FROM ancestors;
-             INSERT INTO taxonomy_meta SELECT key,value FROM authority.taxonomy_meta;
-             INSERT INTO taxonomy_meta(key,value) VALUES('client_seed_depth','{CLIENT_TAXONOMY_DEPTH}');
-             INSERT INTO concept SELECT concept_id,preferred_label,normalized_label FROM authority.concept WHERE concept_id IN client_concept ORDER BY rowid;
-             INSERT INTO concept_parent SELECT concept_id,parent_concept_id,ordinal FROM authority.concept_parent WHERE concept_id IN client_concept ORDER BY concept_id,ordinal;
-             INSERT INTO lcc_selector SELECT concept_id,selector FROM authority.lcc_selector WHERE concept_id IN client_concept ORDER BY concept_id,selector;
-             INSERT INTO bisac_selector SELECT concept_id,selector FROM authority.bisac_selector WHERE concept_id IN client_concept ORDER BY concept_id,selector;
-             INSERT INTO ddc_selector SELECT selector,concept_id FROM authority.ddc_selector WHERE concept_id IN client_concept ORDER BY selector;
-             INSERT INTO lcc_range SELECT concept_id,start_letters,start_number,start_cutters,end_letters,end_number,end_cutters FROM authority.lcc_range WHERE concept_id IN client_concept ORDER BY concept_id,start_letters,start_number,start_cutters,end_letters,end_number,end_cutters;"
-        ))
-        .expect("populate client taxonomy seed");
-    client.execute_batch("DETACH DATABASE authority; VACUUM; PRAGMA optimize;").expect("finalize client taxonomy seed");
-    let concept_count: i64 = client.query_row("SELECT count(*) FROM concept", [], |row| row.get(0)).expect("count client concepts");
-    assert!((1..=2_000).contains(&concept_count), "client taxonomy seed unexpectedly contains {concept_count} concepts");
 }

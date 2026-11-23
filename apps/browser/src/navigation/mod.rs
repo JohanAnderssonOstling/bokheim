@@ -12,6 +12,7 @@ mod sidebar;
 
 pub(crate) use libraries::Libraries;
 pub(crate) use library_session::{LibraryOperationDialog, LibrarySession};
+use route::PageNavigation;
 pub use route::{GlobalRoute, LibraryRoute, Route};
 pub use shell::BrowserShell;
 
@@ -23,9 +24,9 @@ pub(crate) const LIBRARY_VIEWS: [LibraryRoute; 6] = [LibraryRoute::Books, Librar
 /// The compact heading names the current location and opens the other views.
 fn library_view_heading(current: LibraryRoute, title: impl Into<SharedString>, theme: ui_components::BrowserTheme) -> gpui::Div {
     use gpui_component::menu::DropdownMenu as _;
-    let title = ui_components::mobile_navigation_menu_title("library-view-menu", title, theme).dropdown_menu_with_anchor(gpui::Anchor::TopLeft, move |mut menu, _, cx| {
+    let title = ui_components::mobile_navigation_menu_title("library-view-menu", title, theme).dropdown_menu_with_anchor(gpui::Anchor::TopLeft, move |mut menu, _, _cx| {
         menu = menu.touch_friendly(ui_components::touch_ui());
-        for view in LIBRARY_VIEWS.into_iter().filter(|view| *view != LibraryRoute::Search || crate::stores::preferences::text_search_enabled(cx)) {
+        for view in LIBRARY_VIEWS {
             let (label, icon) = Route::Library(view).presentation();
             menu = menu.item(ui_components::menu_item_with_icon(label, ui_components::navigation_icon(icon), move |_, window, cx| window.dispatch_action(Box::new(crate::OpenLibraryView(view)), cx)).checked(view == current));
         }

@@ -46,22 +46,7 @@ impl ApplicationRoot {
         let active = initial.active_pane;
         let mut saved = std::mem::take(&mut initial.panes);
         if saved.is_empty() {
-            // Upgrade the former same-library, same-view splits.
-            let pages = std::mem::take(&mut initial.pages);
-            if pages.len() > 1 {
-                for (index, page) in pages.into_iter().enumerate() {
-                    let mut pane = initial.clone();
-                    pane.pages = vec![page];
-                    if index > 0 {
-                        pane.reader = None;
-                        pane.pane_id = None;
-                    }
-                    saved.push(pane);
-                }
-            } else {
-                initial.pages = pages;
-                saved.push(initial);
-            }
+            saved.push(initial);
         }
         let mut root = Self {
             services,
@@ -90,9 +75,18 @@ impl ApplicationRoot {
         saved.pane_id = Some(id);
         saved.panes.clear();
         saved.active_pane = 0;
-        let controller = if browser_ui::native_windows_available() {
+        let controller = if browser_ui::independent_panes_available() {
+            #[cfg(target_arch = "wasm32")]
+            let path = Some(PathBuf::from(format!("pane-{id}")));
+            #[cfg(not(target_arch = "wasm32"))]
             let path = self.playback_restore_path.as_ref().map(|base| base.with_extension(format!("pane-{id}.json")));
-            Some(PlaybackController::independent(self.backend.clone(), path, cx))
+            Some(PlaybackController::independent(
+                self.backend.clone(),
+                path,
+                #[cfg(target_arch = "wasm32")]
+                self.panes.is_empty(),
+                cx,
+            ))
         } else {
             None
         };
@@ -147,7 +141,7 @@ impl ApplicationRoot {
             PaneRequest::Close => self.close_pane(index, window, cx),
             PaneRequest::Browse => source.update(cx, |pane, cx| pane.return_to_library(window, cx)),
             PaneRequest::Open { session, side } => {
-                if !browser_ui::native_windows_available() || ui_components::WindowWidthClass::for_window(window).is_compact() {
+                if !browser_ui::split_panes_available(window) {
                     return;
                 }
                 let adjacent = match side {
@@ -337,7 +331,7 @@ impl ApplicationRoot {
 
 impl Render for ApplicationRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let split = browser_ui::native_windows_available() && !ui_components::WindowWidthClass::for_window(window).is_compact();
+        let split = browser_ui::split_panes_available(window);
         let theme = ui_components::browser_theme(cx);
         let multiple = self.panes.len() > 1;
         if multiple {
@@ -346,7 +340,7 @@ impl Render for ApplicationRoot {
         div()
             .size_full()
             .relative()
-            .bg(theme.page_bg)
+            .when(!cfg!(feature = "kobo"), |root| root.bg(theme.page_bg))
             .flex()
             .flex_row()
             .items_stretch()

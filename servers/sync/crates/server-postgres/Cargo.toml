@@ -8,6 +8,7 @@ publish = false
 workspace = true
 
 [dependencies]
+futures-util = "0.3"
 account-contract = { path = "../../../../shared/account-contract" }
 content-address = { path = "../../../../shared/content-address" }
 audiobook-archive = { path = "../../../../shared/audiobook-archive" }

@@ -17,7 +17,7 @@ use super::listing::{BrowseItem, resolve_items};
 use super::navigator::{BrowseNavigator, Loaded};
 use super::page::BrowseSplitSide;
 use super::section_card::SectionCard;
-use crate::library::widgets::{CursorMove, Paginator, PaginatorAxis, PaginatorGroup, PaginatorPosition, activate_paginator};
+use crate::library::widgets::{CursorMove, Paginator, PaginatorAxis, PaginatorEvent, PaginatorGroup, PaginatorPosition, activate_paginator, new_paginator};
 
 /// What a card asks the page to do.
 pub(super) enum CardEvent {
@@ -48,17 +48,21 @@ pub(super) struct CardView {
 }
 
 impl CardView {
-    /// `selectable` lets a rubber band pick up several items, for the commands
-    /// that act on many at once.
-    pub(super) fn new(navigator: Entity<BrowseNavigator>, selectable: bool, events: CardEvents, cx: &mut Context<Self>) -> Self {
+    pub(super) fn select_loaded(&mut self, cx: &mut Context<Self>) {
+        if let Some(card) = self.selected_section.and_then(|id| self.section_cards.get(&id)) {
+            card.update(cx, |card, cx| card.select_loaded(cx));
+        } else {
+            self.paginator.update(cx, |flow, cx| flow.select_loaded(cx));
+        }
+    }
+
+    /// Every card listing supports the same selection commands.
+    pub(super) fn new(navigator: Entity<BrowseNavigator>, events: CardEvents, cx: &mut Context<Self>) -> Self {
         let prefix = navigator.read(cx).kind.list_prefix();
         let menu_navigator = navigator.downgrade();
         let menu_events = events.clone();
-        let paginator = cx.new(|cx| {
-            let paginator = Paginator::new(format!("{prefix}-browse-paginator"), []).flow_axis(PaginatorAxis::Vertical);
-            if !selectable {
-                return paginator;
-            }
+        let paginator = cx.new(|cx: &mut Context<Paginator>| {
+            let paginator = new_paginator(format!("{prefix}-browse-paginator"), []).flow_axis(PaginatorAxis::Vertical);
             let this = cx.entity().downgrade();
             paginator.selectable().on_context_menu(move |id, position, window, cx| {
                 let event = match id {
@@ -76,24 +80,20 @@ impl CardView {
                 menu_events(event, window, cx);
             })
         });
-        let mut previous_selection = Vec::new();
         let subscriptions = [
             cx.subscribe(&navigator, |cards, _, loaded: &Loaded, cx| cards.install(loaded, cx)),
             // Keep the visible database pages loaded as the grid changes.
-            cx.observe(&paginator, move |cards, paginator, cx| {
-                let flow = paginator.read(cx);
-                let selected = flow.selection().iter().copied().collect::<Vec<_>>();
-                if previous_selection != selected {
-                    previous_selection = selected;
-                    if !previous_selection.is_empty() {
+            cx.subscribe(&paginator, |cards, paginator, event: &PaginatorEvent, cx| match event {
+                PaginatorEvent::SelectionChanged => {
+                    if !paginator.read(cx).selection().is_empty() {
                         cards.selected_section = None;
                         cards.clear_section_selections(None, cx);
                     }
                     cx.notify();
                 }
-                let flow = paginator.read(cx);
-                let range = flow.visible_and_adjacent_child_range();
-                cards.load_visible_page(range, cx);
+                PaginatorEvent::PageChanged => {
+                    cards.load_visible_page(paginator.read(cx).visible_and_adjacent_child_range(), cx);
+                }
             }),
             cx.observe_global::<crate::stores::CoverTextSetting>(|cards, cx| cards.refresh_layout(cx)),
         ];
@@ -163,14 +163,11 @@ impl CardView {
             .section_cards
             .iter()
             .map(|(&id, card)| {
-                let mut previous = card.read(cx).selected_ids(cx);
-                cx.observe(card, move |cards, card, cx| {
-                    let selected = card.read(cx).selected_ids(cx);
-                    if previous == selected {
+                cx.subscribe(card, move |cards, card, event: &PaginatorEvent, cx| {
+                    if *event != PaginatorEvent::SelectionChanged {
                         return;
                     }
-                    previous = selected;
-                    if !previous.is_empty() {
+                    if !card.read(cx).selected_ids(cx).is_empty() {
                         cards.selected_section = Some(id);
                         cards.paginator.update(cx, |flow, cx| flow.clear_selection(cx));
                         cards.clear_section_selections(Some(id), cx);
@@ -275,7 +272,7 @@ mod tests {
         cx.condition(&updates, |updates, _| !updates.loading() && !updates.scanning()).await;
         let listing = BrowseListing::new(library.clone(), BrowseKind::Folder, Rc::new(|_, _, _| {}), false);
         let navigator = cx.new(|cx| BrowseNavigator::new(library, BrowseKind::Folder, listing, cx));
-        let cards = cx.new(|cx| CardView::new(navigator.clone(), true, Rc::new(|_, _, _| {}), cx));
+        let cards = cx.new(|cx| CardView::new(navigator.clone(), Rc::new(|_, _, _| {}), cx));
         let window = cx.add_window(|window, cx| gpui_component::Root::new(cards.clone(), window, cx));
         cx.condition(&navigator, |navigator, _| navigator.listing.revision > 0).await;
         let mut visual = VisualTestContext::from_window(window.into(), cx);

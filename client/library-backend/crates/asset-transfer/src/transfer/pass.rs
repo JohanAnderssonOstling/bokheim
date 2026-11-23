@@ -16,7 +16,7 @@ where
     F: FnMut(BookId) -> Fut,
     Fut: std::future::Future<Output = Result<(), TransferError>>,
 {
-    use futures_util::{stream, StreamExt};
+    use futures_util::{StreamExt, stream};
     // Poll on the library thread; no connection or transaction crosses threads.
     let downloads: Vec<_> = hashes.into_iter().map(download).collect();
     let mut downloads = stream::iter(downloads).buffer_unordered(4);
@@ -53,7 +53,7 @@ impl AssetExecutor {
     /// File inspection checks presence before extracting covers. This retains
     /// that ordering while sharing validation and credential renewal with assets.
     pub async fn record_remote_thumbnail_presence(&self, hashes: Vec<BookId>) -> Result<(), TransferError> {
-        if self.authentication.credentials().await.is_none() {
+        if self.account.credentials().await.is_none() {
             return Ok(());
         }
         for page in hashes.chunks(PRESENCE_PAGE) {
@@ -62,19 +62,25 @@ impl AssetExecutor {
         Ok(())
     }
 
-    pub async fn run_asset_pass(&self) -> Result<(), TransferError> {
-        if self.authentication.credentials().await.is_none() {
+    pub async fn run_upload_pass(&self) -> Result<(), TransferError> {
+        self.run_asset_phases(&[TransferJobKind::UploadBook, TransferJobKind::UploadThumbnail]).await
+    }
+
+    pub async fn run_download_pass(&self) -> Result<(), TransferError> {
+        self.run_asset_phases(&[
+            #[cfg(not(target_arch = "wasm32"))]
+            TransferJobKind::DownloadBook,
+            TransferJobKind::DownloadThumbnail,
+        ]).await
+    }
+
+    async fn run_asset_phases(&self, phases: &[TransferJobKind]) -> Result<(), TransferError> {
+        if self.account.credentials().await.is_none() {
             return Ok(());
         }
         let mut failed = false;
         let mut quota_failure = None;
-        for kind in [
-            #[cfg(not(target_arch = "wasm32"))]
-            TransferJobKind::DownloadBook,
-            TransferJobKind::UploadBook,
-            TransferJobKind::UploadThumbnail,
-            TransferJobKind::DownloadThumbnail,
-        ] {
+        for &kind in phases {
             let result = self.asset_phase(kind, &mut failed, &mut quota_failure).await;
             if let Err(error) = &result {
                 if error.failure() == Some(Failure::CloudStorageFull) {

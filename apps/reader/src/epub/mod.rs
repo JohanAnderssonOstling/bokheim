@@ -194,6 +194,7 @@ pub(crate) struct ReaderView {
     image_preview: Option<(String, Arc<gpui::Image>)>,
     image_backdrop: Option<HtmlPageSnapshot>,
     save_opened_image: bool,
+    #[cfg(all(feature = "image-zoom", not(feature = "kobo")))]
     image_canvas: Entity<ui_components::InfiniteCanvas>,
     context_sheet: Option<ContextActions<EpubContextCommand>>,
     focus: FocusHandle,

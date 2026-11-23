@@ -27,7 +27,7 @@ impl LibraryHandle {
     /// Durable confirmation used by management to resume registration after restart.
     pub async fn remote_registration_identity(&self) -> Result<Option<String>, BackendError> {
         let database = self.database();
-        Ok(database.sync_metadata("server_library_created").await?)
+        Ok(database.server_library_created().await?)
     }
 
     /// Management has created or discovered this library for the captured account.
@@ -41,10 +41,10 @@ impl LibraryHandle {
             }
             library.sync.bind_account(account.server_url().as_str()).map_err(BackendError::operation)?;
             let database = &library.database;
-            if database.sync_metadata("server_library_created").await?.as_deref() != Some(identity.as_str()) {
-                database.set_sync_metadata("server_library_created", &identity).await?;
+            if database.server_library_created().await?.as_deref() != Some(identity.as_str()) {
+                database.set_server_library_created(&identity).await?;
                 library.events.sync.request_remote_refresh();
-                library.events.assets.wake();
+                library.events.wake_assets();
             }
             Ok(())
         })

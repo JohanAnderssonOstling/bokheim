@@ -1,0 +1,14 @@
+# label=bokheim-idle
+# battery=/sys/class/power_supply/mc13892_bat
+# current_now_semantics=remaining_charge_mah
+# Units assume the Linux power-supply ABI: uV, uA, uAh, uWh.
+# Gauge accuracy and refresh rate must be checked on the device.
+# kernel=4.1.15-00868-g58a2758be07
+uptime_s	status	capacity	voltage_now	current_now	current_avg	charge_now	energy_now
+67302.02	Discharging	100	4162300	1311	NA	1311000	NA
+67312.03	Discharging	100	4164800	1311	NA	1311000	NA
+67322.07	Discharging	100	4155000	1311	NA	1311000	NA
+67332.11	Discharging	100	4164800	1310	NA	1310000	NA
+67342.14	Discharging	100	4163600	1310	NA	1310000	NA
+67352.18	Discharging	100	4162300	1310	NA	1310000	NA
+67362.22	Discharging	100	4164800	1310	NA	1310000	NA

@@ -1,16 +1,18 @@
 //! Library relocation workflow and durable retirement of the previous root.
 
+use client_platform_runtime::filesystem as fs;
+
 use super::LibraryService;
-use crate::executor;
 use crate::BackendError;
+use crate::executor;
 use library_database::Database;
-use library_files::asset_store::BookLease;
-use library_files::library_move::{book_checksum, checked_path, cleanup_root_matches, stored_relative_path, MovePlan};
 use library_files::AssetStore;
+use library_files::asset_store::BookLease;
+use library_files::library_move::{MovePlan, book_checksum, checked_path, cleanup_root_matches, stored_relative_path};
 use library_registry::LibraryEntry;
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -47,12 +49,10 @@ impl LibraryService {
         let backend = self.clone();
         let original_root = entry.storage_locator().to_owned();
         let result = handle
-            .move_root(
-                Box::new(move |source_identity| match backend.move_library_files(id, source, destination, source_identity) {
-                    Ok(root) => (root, Ok(())),
-                    Err(error) => (original_root, Err(error)),
-                }),
-            )
+            .move_root(Box::new(move |source_identity| match backend.move_library_files(id, source, destination, source_identity) {
+                Ok(root) => (root, Ok(())),
+                Err(error) => (original_root, Err(error)),
+            }))
             .await;
         self.config.library_list_changed.send_replace(());
         if let Err(error) = result {
@@ -84,7 +84,7 @@ impl LibraryService {
         for (book, relative) in db.registered_library_files()? {
             // Remote-only placements have no source bytes to protect.
             let path = checked_path(&source, relative_path(relative.as_str()))?;
-            if !path.try_exists()? {
+            if !fs::try_exists(path)? {
                 continue;
             }
             if !lease_books(&assets, [book], &mut leases)? {
@@ -113,7 +113,7 @@ impl LibraryService {
             };
             // A merged audiobook can acquire extra tracks. Let the scanner
             // identify that new content rather than marking its old revision available.
-            if !db.book_has_content_revision(book, checksum)? || (original.is_dir() && book_checksum(&checked_path(&destination, target)?)? != checksum) {
+            if !db.book_has_content_revision(book, checksum)? || (fs::is_dir(&original) && book_checksum(&checked_path(&destination, target)?)? != checksum) {
                 continue;
             }
             if book.content_hash().is_none() {
@@ -182,7 +182,7 @@ impl LibraryService {
             self.config.registry.remove_value(&key)?;
             return Ok(());
         }
-        if !root.try_exists()? || !cleanup_root_matches(&root, &cleanup.source_identity, cleanup.library)? {
+        if !fs::try_exists(&root)? || !cleanup_root_matches(&root, &cleanup.source_identity, cleanup.library)? {
             return Ok(());
         }
         let source = AssetStore::open(root.to_string_lossy().as_ref())?;
@@ -193,11 +193,7 @@ impl LibraryService {
         let mut checkpoint = cleanup.clone();
         cleanup.plan.cleanup_originals(
             || {
-                if cleanup_root_matches(&root, &cleanup.source_identity, cleanup.library)? {
-                    Ok(())
-                } else {
-                    Err(io::Error::other("old storage changed; original files were retained"))
-                }
+                if cleanup_root_matches(&root, &cleanup.source_identity, cleanup.library)? { Ok(()) } else { Err(io::Error::other("old storage changed; original files were retained")) }
             },
             |plan| {
                 checkpoint.plan = plan.clone();

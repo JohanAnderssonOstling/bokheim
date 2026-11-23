@@ -67,7 +67,7 @@ impl Fixture {
                 audiobook: None,
                 toc: vec![BookTocEntry { title: "Part I".into(), target: "pdf-page:0".into(), children: vec![BookTocEntry { title: "Chapter One".into(), target: "pdf-page:0".into(), children: vec![] }] }],
             }),
-            published: PublishedStagedBook { name: "Original.pdf".into(), relative_path: "/Original.pdf".into(), published: true, fingerprint: Some("first".into()) },
+            published: PublishedStagedBook { name: "Original.pdf".into(), relative_path: "/Original.pdf".into(), published: true, fingerprint: Some(1) },
             request_thumbnail: false,
             restore_paths: vec![],
         })
@@ -241,7 +241,7 @@ async fn assert_foliate_export(bytes: &[u8], identifier: &str) {
         size_bytes: bytes.len() as u64,
         inspection_version: 1,
         inspection: Some(InspectedBook { metadata: BookRecord { metadata: BookDetails { title: "EPUB Book".into(), ..Default::default() }, description: String::new().await }, pdf: None, audiobook: None, toc: vec![] }),
-        published: PublishedStagedBook { name: "Book.epub".into(), relative_path: "/Book.epub".into(), published: true, fingerprint: Some("epub".into()) },
+        published: PublishedStagedBook { name: "Book.epub".into(), relative_path: "/Book.epub".into(), published: true, fingerprint: Some(1) },
         request_thumbnail: false,
         restore_paths: vec![],
     })
@@ -332,7 +332,7 @@ async fn add_epub(f: &Fixture) -> (BookId, Annotation) {
         size_bytes: bytes.len() as u64,
         inspection_version: 1,
         inspection: Some(InspectedBook { metadata: BookRecord { metadata: BookDetails { title: "EPUB Book".into(), ..Default::default() }, description: String::new().await }, pdf: None, audiobook: None, toc: vec![] }),
-        published: PublishedStagedBook { name: "Book.epub".into(), relative_path: "/Book.epub".into(), published: true, fingerprint: Some("epub".into()) },
+        published: PublishedStagedBook { name: "Book.epub".into(), relative_path: "/Book.epub".into(), published: true, fingerprint: Some(1) },
         request_thumbnail: false,
         restore_paths: vec![],
     })

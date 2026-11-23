@@ -49,7 +49,7 @@ const MATCHES: &str = "FROM notebook_annotation n JOIN book b ON b.row_id=n.book
     JOIN library_book_presence p ON p.book_row_id=b.row_id
     WHERE b.deleted_at IS NULL AND (?1=0 OR p.downloaded=1)
     AND (?2=0 OR (COALESCE(b.format,1) & ?2)!=0)
-    AND (?3='' OR instr(n.search_text,?3)>0 OR instr(normalize_search_text(COALESCE(b.title,'')||' '||COALESCE(b.author,'')),?3)>0)";
+    AND (?3='' OR instr(n.search_text,?3)>0 OR instr((b.search_title||' '||b.search_author),?3)>0)";
 
 impl Database {
     /// Notebook is a browse source: selection, caching, ordering and revision

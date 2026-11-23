@@ -1207,7 +1207,7 @@ impl PopupMenu {
     /// Calculate the anchor corner and left offset for child submenu
     fn update_submenu_menu_anchor(&mut self, window: &Window) {
         let bounds = self.bounds;
-        let viewport = window.viewport_size();
+        let viewport = window.input_viewport().size;
         let safe = window.insets().effective();
         let max_width = self.max_width().min((viewport.width - safe.left - safe.right - px(18.)).max(px(1.)));
         let (anchor, left) = if max_width + bounds.origin.x > window.bounds().size.width {
@@ -1483,7 +1483,7 @@ impl Render for PopupMenu {
 
         self.touch_friendly |= cx.supports_touch_input();
         let scrollable = self.scrollable || cx.supports_touch_input();
-        let viewport = window.viewport_size();
+        let viewport = window.input_viewport().size;
         let safe = window.insets().effective();
         // Match the popover's 8 px edge margins and its two 1 px borders.
         let available_height = (viewport.height - safe.top - safe.bottom - px(18.)).max(px(1.));

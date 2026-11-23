@@ -13,10 +13,10 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
         taxonomy.prepare("SELECT concept_id FROM unified_concept_route WHERE parent_route_id=0 AND route_id!=0 ORDER BY route_id LIMIT 2").unwrap().query_map([], |row| row.get::<_, i64>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
     assert_eq!(concepts.len(), 2);
     let content: Option<String> = taxonomy.query_row("SELECT value FROM taxonomy_meta WHERE key='client_revision'", [], |row| row.get(0)).optional().unwrap();
-    let revision = format!("{}:{}", content.as_deref().unwrap_or(subject_projection::BUNDLED_UNIFIED_TAXONOMY_REVISION_ID), subject_projection::UNIFIED_MATCHER_VERSION);
+    let revision = format!("{}:{}", content.as_deref().unwrap_or(subject_projection::BUNDLED_UNIFIED_TAXONOMY_REVISION_ID), subject_projection::UNIFIED_PROJECTION_VERSION);
     let source = Connection::open_in_memory().unwrap();
     source.execute_batch(include_str!("sql/catalog_pagination.sql")).unwrap();
-    source.execute_batch("INSERT INTO snapshot VALUES(1,11,1); INSERT INTO description VALUES(1,'Description unused by cards'); INSERT INTO source VALUES(1,'publicdomainlibrary.org'),(2,'gutenberg.org');").unwrap();
+    source.execute_batch("INSERT INTO snapshot VALUES(1,13,1); INSERT INTO description VALUES(1,'Description unused by cards'); INSERT INTO source VALUES(1,'publicdomainlibrary.org'),(2,'gutenberg.org');").unwrap();
     source.execute("INSERT INTO subject_projection VALUES(1,?1)", [&revision]).unwrap();
     for id in 1_i64..=2 {
         source.execute("INSERT INTO author VALUES(?1,?2,?3)", params![id, uuid::Uuid::from_u128(id as u128).as_bytes().as_slice(), format!("Writer {id}")]).unwrap();
@@ -64,7 +64,7 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
         assert_eq!(catalog::entry(library_model::CardKey([6; 32])).unwrap().unwrap().audiobook_duration_ms, None);
         let writer = library_writer(&path);
         writer.execute("INSERT INTO book(row_id,content_hash,title,format) VALUES(1,?1,'Held',1)", [[2_u8; 32].as_slice()]).unwrap();
-        writer.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES(?1,1,'held.epub','',1)", [sync_common::ROOT_DIR_ID.to_string()]).unwrap();
+        writer.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES(?1,1,'held.epub',NULL,1)", [sync_common::ROOT_DIR_ID.to_string()]).unwrap();
         drop(writer);
         let mut heading_query = LibraryBrowseQuery {
             location: BrowseLocation::CatalogAuthor(None),
@@ -211,7 +211,7 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
         // Snapshots may omit the optional duration table entirely.
         source.execute_batch("DROP TABLE book_audiobook_duration").unwrap();
         source.execute("UPDATE book SET title='Retitled' WHERE row_id=1", []).unwrap();
-        catalog::store(&source.serialize("main").unwrap(), &catalog_path, (1, catalog::FORMAT_VERSION)).unwrap();
+        catalog::store(&source.serialize("main").unwrap(), &catalog_path, (1, 11)).unwrap();
         assert_eq!(catalog::entry(audio_key).unwrap().unwrap().audiobook_duration_ms, None);
         let published: (i64, String) = attached
             .query_row("SELECT browse.row_id,source.title FROM catalog.catalog_hosted source JOIN catalog.catalog_browse_book browse ON source.identity=browse.key WHERE browse.key=?1", [[1_u8; 32].as_slice()], |row| {
@@ -228,7 +228,7 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
         let fresh_revision = fresh.page.as_ref().unwrap().result_revision.as_ref().unwrap();
         source.pragma_update(None, "foreign_keys", false).unwrap();
         source.execute("DELETE FROM description WHERE row_id=1", []).unwrap();
-        assert!(catalog::store(&source.serialize("main").unwrap(), &catalog_path, (1, catalog::FORMAT_VERSION)).is_err(), "invalid foreign keys must roll the whole snapshot back");
+        assert!(catalog::store(&source.serialize("main").unwrap(), &catalog_path, (1, 11)).is_err(), "invalid foreign keys must roll the whole snapshot back");
         let retained = db.browse_result_page(&heading_query, false, fresh_revision, BrowsePageRequest::default()).unwrap().unwrap();
         assert_eq!(retained.contents, fresh.contents);
         assert_eq!(retained.sections, fresh.sections);

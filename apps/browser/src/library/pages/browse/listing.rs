@@ -74,10 +74,8 @@ impl BrowseKind {
 
     /// The graph a kind can be shown as, and the layout it opens in: only the
     /// trees have one. Books, Home's shelves and the author index are flat.
+    #[cfg(all(feature = "graph", not(feature = "kobo")))]
     pub(super) fn graph_layout(self) -> Option<components::GraphLayoutKind> {
-        if cfg!(feature = "kobo") {
-            return None;
-        }
         match self {
             Self::Folder => Some(components::GraphLayoutKind::Columns),
             Self::Subject | Self::Catalog => Some(components::GraphLayoutKind::AdaptiveRadial),
@@ -226,21 +224,35 @@ impl BrowseListing {
     }
 
     fn controls_for(kind: BrowseKind, mut controls: BrowseControls) -> BrowseControls {
+        if kind != BrowseKind::Folder {
+            controls.collection_sorts.retain(|sort| !matches!(sort, BrowseChipSort::Size | BrowseChipSort::SizeDescending | BrowseChipSort::Availability | BrowseChipSort::AvailabilityDescending));
+        }
         if kind == BrowseKind::Books {
             controls.collection_sorts.clear();
         }
         // Catalog books have no reading history to sort by. The catalog can
         // be shown by subject or by author.
         if kind == BrowseKind::Catalog {
-            controls.book_sorts.retain(|sort| *sort != BrowseBookSort::RecentlyRead);
+            controls.book_sorts.retain(|sort| {
+                !matches!(
+                    sort,
+                    BrowseBookSort::RecentlyRead
+                        | BrowseBookSort::Progress
+                        | BrowseBookSort::ProgressDescending
+                        | BrowseBookSort::Availability
+                        | BrowseBookSort::AvailabilityDescending
+                        | BrowseBookSort::Size
+                        | BrowseBookSort::SizeDescending
+                )
+            });
             controls.hide_finished = false;
             controls.groupings = true;
         }
         // Home keeps activity order by default; sorting changes presentation,
         // while its shelves still select books by their original activity rules.
         if kind == BrowseKind::Home {
-            controls.collection_sorts = vec![BrowseChipSort::DefaultOrder, BrowseChipSort::Alphabetical, BrowseChipSort::BookCount];
-            controls.book_sorts = vec![BrowseBookSort::DefaultOrder, BrowseBookSort::Alphabetical];
+            controls.collection_sorts = vec![BrowseChipSort::DefaultOrder, BrowseChipSort::Alphabetical, BrowseChipSort::TitleDescending, BrowseChipSort::BookCount];
+            controls.book_sorts.insert(0, BrowseBookSort::DefaultOrder);
         }
         controls
     }

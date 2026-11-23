@@ -27,7 +27,9 @@ export RUST_LOG="${RUST_LOG:-warn,book_startup=debug}"
 export BOKHEIM_KOBO_CANVAS_MODE_FILE="${BOKHEIM_KOBO_CANVAS_MODE_FILE:-$WORKDIR/data/canvas-mode}"
 NICKEL_WAS_RUNNING=${BOKHEIM_KOBO_RESTORE_NICKEL:-0}
 export BOKHEIM_KOBO_WIFI_HELPER="$WORKDIR/wifi-power.sh"
-# Read only selected hardware hints while Nickel still exists. Never eval /proc data.
+export BOKHEIM_KOBO_RTC_STATE_FILE="/tmp/bokheim-rtc-$$.state"
+# Keep the firmware's network/session context when launched through SSH too.
+# Read only selected entries while Nickel still exists. Never eval /proc data.
 nickel_pid=''
 nickel_pids=$(pidof nickel 2>/dev/null)
 for nickel_pid in $nickel_pids; do
@@ -35,12 +37,26 @@ for nickel_pid in $nickel_pids; do
     break
 done
 if [ -n "$nickel_pid" ] && [ -r "/proc/$nickel_pid/environ" ]; then
-    wifi_hints=$(tr '\000' '\n' < "/proc/$nickel_pid/environ" | grep -E '^(INTERFACE|WIFI_MODULE|PLATFORM|PRODUCT)=')
+    wifi_hints=$(tr '\000' '\n' < "/proc/$nickel_pid/environ" | grep -E '^(INTERFACE|WIFI_MODULE|WIFI_MODULE_PATH|PLATFORM|PRODUCT|DBUS_SESSION_BUS_ADDRESS|NICKEL_HOME)=')
     while IFS= read -r hint; do
-        case "$hint" in INTERFACE=*|WIFI_MODULE=*|PLATFORM=*|PRODUCT=*) export "$hint" ;; esac
+        case "$hint" in INTERFACE=*|WIFI_MODULE=*|WIFI_MODULE_PATH=*|PLATFORM=*|PRODUCT=*|DBUS_SESSION_BUS_ADDRESS=*|NICKEL_HOME=*) export "$hint" ;; esac
     done <<EOF_WIFI_HINTS
 $wifi_hints
 EOF_WIFI_HINTS
+fi
+# Retain the driver hint even if Bokheim unloads it before quitting.
+if [ -z "${WIFI_MODULE:-}" ]; then
+    WIFI_MODULE=$(/bin/sh "$WORKDIR/wifi-power.sh" detect 2>>"$LOG") || WIFI_MODULE=''
+    export WIFI_MODULE
+fi
+if [ -z "${INTERFACE:-}" ] && [ -n "$WIFI_MODULE" ]; then
+    for interface_path in /sys/class/net/*; do
+        interface_module=$(readlink "$interface_path/device/driver/module" 2>/dev/null) || continue
+        [ "${interface_module##*/}" = "$WIFI_MODULE" ] || continue
+        INTERFACE=${interface_path##*/}
+        export INTERFACE
+        break
+    done
 fi
 
 # Reading known PIDs avoids scanning every process on each shutdown poll.
@@ -73,6 +89,49 @@ find_firmware_pids() {
     firmware_live_pids "$firmware_found"
 }
 
+wait_for_nickel_failsafes() {
+    # NickelHook temporarily renames each loaded plugin to *.failsafe. Stopping
+    # Nickel before its restore thread finishes leaves that plugin disabled.
+    # Inspect live mappings so stale files from an earlier crash do not block us.
+    read -r nickel_failsafe_started _ < /proc/uptime
+    nickel_failsafe_deadline=$((${nickel_failsafe_started%.*} + 30))
+    nickel_failsafe_waited=0
+    while :; do
+        nickel_failsafe_pending=''
+        for nickel_failsafe_pid in $(pidof nickel 2>/dev/null); do
+            if [ ! -r "/proc/$nickel_failsafe_pid/maps" ]; then
+                printf 'Cannot inspect Nickel startup failsafes; aborting startup\n'
+                return 1
+            fi
+            while read -r nickel_map_address nickel_map_permissions nickel_map_offset nickel_map_device nickel_map_inode nickel_map_path; do
+                case "$nickel_map_path" in
+                    *.failsafe|*.failsafe\ \(deleted\))
+                        nickel_failsafe_pending=$nickel_map_path
+                        break
+                        ;;
+                esac
+            done < "/proc/$nickel_failsafe_pid/maps"
+            [ -z "$nickel_failsafe_pending" ] || break
+        done
+        if [ -z "$nickel_failsafe_pending" ]; then
+            if [ "$nickel_failsafe_waited" -eq 1 ]; then
+                printf 'Nickel startup failsafes restored; continuing startup\n'
+            fi
+            return 0
+        fi
+        if [ "$nickel_failsafe_waited" -eq 0 ]; then
+            printf 'Waiting for Nickel startup failsafe: %s\n' "$nickel_failsafe_pending"
+            nickel_failsafe_waited=1
+        fi
+        read -r nickel_failsafe_now _ < /proc/uptime
+        if [ "${nickel_failsafe_now%.*}" -ge "$nickel_failsafe_deadline" ]; then
+            printf 'Nickel startup failsafe is still active after 30 seconds; aborting startup\n'
+            return 1
+        fi
+        sleep 0.2
+    done
+}
+
 uninstall_bokheim() {
     # Remove only shipped program files. Books, app data, optional developer
     # SSH setup, and other applications' NickelMenu configurations stay intact.
@@ -87,12 +146,31 @@ uninstall_bokheim() {
     rm -f "$WORKDIR/../nm/desktop-gpui-kobo" "$WORKDIR/fbink"
 }
 
+nickel_wifi_released=0
+release_nickel_wifi() {
+    [ "$nickel_wifi_released" -eq 0 ] || return
+    nickel_wifi_released=1
+    # Like KOReader/Plato, return the radio to its powered-down state before
+    # Nickel starts. It must create its own supplicant and DHCP/DBus clients.
+    if ! /bin/sh "$WORKDIR/command-timeout.sh" 20 /bin/sh "$WORKDIR/wifi-power.sh" handoff >>"$LOG" 2>&1; then
+        printf 'Could not fully release Wi-Fi before restoring Nickel; see %s\n' "$LOG" >&2
+    fi
+}
+
 restart_nickel() {
+    # Rust destructors do not run when the app is terminated by a signal.
+    # Recover before uninstall removes the executable, or Nickel starts.
+    if [ -f "$BOKHEIM_KOBO_RTC_STATE_FILE" ]; then
+        if ! /bin/sh "$WORKDIR/command-timeout.sh" 5 "$WORKDIR/desktop-gpui-kobo" --restore-rtc-alarm >>"$LOG" 2>&1; then
+            printf 'Could not restore firmware RTC alarm; see %s\n' "$LOG" >&2
+        fi
+    fi
     if [ -f "$BOKHEIM_KOBO_EXIT_ACTION_FILE" ]; then
         exit_action=$(head -n 1 "$BOKHEIM_KOBO_EXIT_ACTION_FILE")
         rm -f "$BOKHEIM_KOBO_EXIT_ACTION_FILE"
         case "$exit_action" in
             uninstall)
+                release_nickel_wifi
                 if uninstall_bokheim >>"$LOG" 2>&1; then
                     printf 'Bokheim uninstalled; books and settings kept\n' >>"$LOG"
                 else
@@ -112,9 +190,16 @@ restart_nickel() {
     if [ "$NICKEL_WAS_RUNNING" -ne 1 ] || pidof nickel >/dev/null 2>&1; then
         return
     fi
+    release_nickel_wifi
     (
         cd /
         export LD_LIBRARY_PATH=/usr/local/Kobo
+        # Discard queued hardware events from the previous Nickel session.
+        # udev writes here and must see the FIFO belonging to the new session.
+        if [ -p /tmp/nickel-hardware-status ] || [ ! -e /tmp/nickel-hardware-status ]; then
+            rm -f /tmp/nickel-hardware-status
+            mkfifo /tmp/nickel-hardware-status
+        fi
         /usr/local/Kobo/hindenburg >/dev/null 2>&1 &
         LIBC_FATAL_STDERR_=1 /usr/local/Kobo/nickel \
             -platform kobo >/dev/null 2>&1 &
@@ -141,6 +226,7 @@ Loading...'
     launcher_profile_mark loading_screen
 
     if [ "$NICKEL_WAS_RUNNING" -eq 1 ]; then
+        wait_for_nickel_failsafes || exit 1
         sync
         launcher_profile_mark sync
         read -r nickel_stop_started _ < /proc/uptime
@@ -170,6 +256,7 @@ Loading...'
                 nickel_remaining=$firmware_alive
                 launcher_profile_mark firmware_verify
                 [ -n "$nickel_remaining" ] || break
+                wait_for_nickel_failsafes || exit 1
                 for firmware_pid in $nickel_remaining; do
                     kill -TERM "$firmware_pid" 2>/dev/null || true
                 done
@@ -205,6 +292,12 @@ Loading...'
         printf '[%s] Possible terminating signal: %s\n' "$(date)" "$((app_status - 128))"
     fi
     sync
+    if [ -f "$BOKHEIM_KOBO_EXIT_ACTION_FILE" ] && [ "$(head -n 1 "$BOKHEIM_KOBO_EXIT_ACTION_FILE")" = restart ]; then
+        rm -f "$BOKHEIM_KOBO_EXIT_ACTION_FILE"
+        trap - 0 1 2 15
+        export BOKHEIM_KOBO_RESTORE_NICKEL="$NICKEL_WAS_RUNNING"
+        exec /bin/sh "$WORKDIR/run.sh"
+    fi
     if [ -f "$BOKHEIM_KOBO_EXIT_ACTION_FILE" ] && [ "$(head -n 1 "$BOKHEIM_KOBO_EXIT_ACTION_FILE")" = update ]; then
         rm -f "$BOKHEIM_KOBO_EXIT_ACTION_FILE"
         "$WORKDIR/fbink" -q -c -f -p -m -M -W GC16 -S 3 'Updating Bokheim...' || true

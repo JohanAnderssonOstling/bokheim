@@ -2,7 +2,7 @@ use crate::Url;
 use reqwest::StatusCode;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt::{self, Formatter};
-use sync_common::transport::WireError;
+use sync_common::http::WireError;
 use url::ParseError;
 use web_time::{SystemTime, UNIX_EPOCH};
 

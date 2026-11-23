@@ -31,20 +31,15 @@ impl SyncPage {
         ui_components::authentication_error(error, action)
     }
 
-    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.refresh_with_feedback(true, cx);
-    }
-
     /// Coalesces bursts of account and synchronization notifications.
     pub(crate) fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
-        if self.refresh_scheduled {
+        if !self.open || self.scheduled_refresh.is_some() {
             return;
         }
-        self.refresh_scheduled = true;
         let timer = cx.background_executor().timer(std::time::Duration::from_millis(200));
         #[cfg(target_arch = "wasm32")]
         let events = self.events.clone();
-        cx.spawn(async move |page, cx| {
+        self.scheduled_refresh = Some(cx.spawn(async move |page, cx| {
             timer.await;
             #[cfg(target_arch = "wasm32")]
             {
@@ -54,15 +49,17 @@ impl SyncPage {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let _ = page.update(cx, |page, cx| {
-                    page.refresh_scheduled = false;
                     page.refresh_with_feedback(false, cx);
                 });
             }
-        })
-        .detach();
+        }));
     }
 
     pub(super) fn refresh_with_feedback(&mut self, show_feedback: bool, cx: &mut Context<Self>) {
+        self.scheduled_refresh = None;
+        if !self.open {
+            return;
+        }
         if show_feedback {
             self.local_usage_due = true;
         }
@@ -119,10 +116,9 @@ impl SyncPage {
         self.activity = super::AccountActivity::Idle;
         self.error = None;
         self.message = message.map(Into::into);
-        let refresh_again = self.refresh_pending;
-        self.refresh_pending = false;
+        let refresh_again = std::mem::take(&mut self.refresh_pending);
         cx.notify();
-        if std::mem::take(&mut self.local_usage_due) {
+        if self.open && std::mem::take(&mut self.local_usage_due) {
             #[cfg(target_arch = "wasm32")]
             self.send_event(super::SyncEvent::LocalStorageUsageRequested, cx);
             #[cfg(not(target_arch = "wasm32"))]

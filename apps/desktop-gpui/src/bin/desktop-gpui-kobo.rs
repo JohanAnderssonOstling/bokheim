@@ -68,6 +68,13 @@ fn log_bluetooth_diagnostics() {
 }
 
 fn main() -> Result<(), String> {
+    let mut helper_args = std::env::args_os().skip(1);
+    if helper_args.next().is_some_and(|argument| argument == "--run-isolated") {
+        return Err(kobo_device::process::exec_isolated(helper_args).to_string());
+    }
+    if std::env::args_os().nth(1).is_some_and(|argument| argument == "--restore-rtc-alarm") {
+        return kobo_device::power::restore_rtc_alarm().map_err(|error| error.to_string());
+    }
     let args: Vec<String> = std::env::args().collect();
     #[cfg(target_arch = "arm")]
     if std::env::args().nth(1).as_deref() == Some("--wifi-power-ioctl") {
@@ -98,6 +105,7 @@ fn main() -> Result<(), String> {
     }
     let data_dir = std::env::var_os("BOKHEIM_KOBO_DATA_DIR").map(PathBuf::from).unwrap_or_else(default_data_dir);
     let backend_context = BackendLaunch::initialize(AppDataLocation::native_path(data_dir)).map_err(|error| format!("failed to initialize Kobo app-data directory: {error}"))?;
+    kobo_update::initialize_taxonomy(backend_context.app_data_dir()).map_err(|error| error.to_string())?;
     let libraries_dir = std::env::var_os("BOKHEIM_KOBO_LIBRARIES_DIR").map(PathBuf::from).unwrap_or_else(default_libraries_dir);
     let backend_context = backend_context.with_library_discovery(libraries_dir.clone(), "Kobo".to_owned(), fallback_library_dir(&libraries_dir));
     app::init_logging();
@@ -140,8 +148,9 @@ fn main() -> Result<(), String> {
         },
         wake_ui_ready_handler: Some(kobo_device::wifi::resume_after_ui),
         show_exit_button: false,
-        experience_mode: KoboExperienceMode::LibraryFast,
-        monochrome_threshold: 160,
+        // Use partial GC16 throughout the app, preserving grayscale for both
+        // library controls and reader content without switching render modes.
+        experience_mode: KoboExperienceMode::ReaderQuality,
         ..Default::default()
     })
     .map_err(|error| format!("failed to initialize Kobo GPUI platform: {error}"))?;

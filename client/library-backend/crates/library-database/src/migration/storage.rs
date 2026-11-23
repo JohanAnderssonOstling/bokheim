@@ -92,7 +92,7 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DatabaseError> {
     wire::decode(&body, wire::MAX_DECODED_RESPONSE_BYTES).map_err(DatabaseError::operation)
 }
 
-fn rewrite(tx: &Transaction<'_>, table: &str, column: &str, convert: impl Fn(&[u8]) -> Result<Vec<u8>, DatabaseError>) -> Result<(), DatabaseError> {
+fn rewrite(tx: &Transaction<'_>, table: &str, column: &str, convert: fn(&[u8]) -> Result<Vec<u8>, DatabaseError>) -> Result<(), DatabaseError> {
     let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [table], |row| row.get(0))?;
     if !exists {
         return Ok(());

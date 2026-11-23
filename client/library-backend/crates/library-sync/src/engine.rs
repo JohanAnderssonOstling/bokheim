@@ -1,10 +1,10 @@
 //! Storage-independent state synchronization orchestration.
 
+use crate::error::SyncError;
 use library_replica::StatePublication;
 use std::collections::HashSet;
 use std::error::Error;
-use std::fmt;
-use client_protocol::{BackendError, Classified, Failure};
+use sync_common::transport::WireError;
 use sync_common::{BookId, LibraryId, MutationIssue, OpaquePublication, PullStateResponse, PushBatcher, PushMutationsResponse, ReplicaId, ReplicaSeq, SyncCursor};
 use sync_transport::SyncCredentials;
 
@@ -37,50 +37,6 @@ pub trait SyncStore {
     /// Persists validated push acknowledgments and a pull page. Implementations
     /// may share a commit, but must retain acknowledgments if applying pull fails.
     fn apply_exchange_response(&self, ids: Vec<ReplicaSeq>, page: PullStateResponse) -> StoreFuture<'_, ()>;
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub enum SyncError {
-    AuthenticationRequired,
-    CursorRejected,
-    Failed(BackendError),
-}
-
-
-impl fmt::Display for SyncError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AuthenticationRequired => formatter.write_str("synchronization authentication is required"),
-            Self::CursorRejected => formatter.write_str("the synchronization cursor was rejected after recovery"),
-            Self::Failed(error) => fmt::Display::fmt(error, formatter),
-        }
-    }
-}
-
-impl Error for SyncError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::AuthenticationRequired => Some(&Failure::SignInRequired),
-            Self::Failed(error) => Some(error),
-            Self::CursorRejected => None,
-        }
-    }
-}
-
-impl SyncError {
-    fn failed(error: impl Into<Box<dyn Error + Send + Sync>>) -> Self {
-        Self::Failed(BackendError::operation(error))
-    }
-}
-
-impl From<sync_transport::SyncRequestError> for SyncError {
-    fn from(error: sync_transport::SyncRequestError) -> Self {
-        match error {
-            sync_transport::SyncRequestError::AuthenticationRequired => Self::AuthenticationRequired,
-            sync_transport::SyncRequestError::CursorRejected => Self::CursorRejected,
-            error => Self::failed(error),
-        }
-    }
 }
 
 #[derive(Debug, Default)]
@@ -227,12 +183,21 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
     }
 
     async fn next_push_batch(&self, remaining: &mut Outgoing<S::Outbox>, result: &mut SyncOutcome) -> Result<Vec<OpaquePublication>, SyncError> {
+        let mut issues = Vec::new();
         while !remaining.batches.has_batch() {
             if let Some(publication) = remaining.page.next() {
                 if publication.state.value.book().is_some_and(|book| remaining.deferred.contains(&book)) {
                     continue;
                 }
-                let opaque = sync_common::transport::representation(&publication).map_err(SyncError::failed)?;
+                let sequence = publication.publisher_seq;
+                let opaque = match publication.into_opaque() {
+                    Ok(value) => value,
+                    Err(WireError::TooLarge { .. } | WireError::LimitExceeded(_)) => {
+                        issues.push(MutationIssue::Untransmittable(sequence));
+                        continue;
+                    }
+                    Err(error) => return Err(SyncError::failed(error)),
+                };
                 remaining.batches.push(opaque).map_err(SyncError::failed)?;
             } else {
                 let Some(scan) = remaining.scan.as_mut() else { break };
@@ -243,7 +208,7 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
                 }
             }
         }
-        let issues: Vec<_> = remaining.batches.take_untransmittable().into_iter().map(MutationIssue::Untransmittable).collect();
+        issues.extend(remaining.batches.take_untransmittable().into_iter().map(MutationIssue::Untransmittable));
         self.record_issues(&issues).await?;
         result.mutation_issues.extend(issues);
         Ok(remaining.batches.next_batch())
@@ -310,13 +275,3 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "engine_tests.rs"]
 mod tests;
-
-impl Classified for SyncError {
-    fn failure(&self) -> Option<Failure> {
-        match self {
-            Self::AuthenticationRequired => Some(Failure::SignInRequired),
-            Self::Failed(error) => error.failure(),
-            Self::CursorRejected => None,
-        }
-    }
-}

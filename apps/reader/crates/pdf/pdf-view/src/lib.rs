@@ -2,6 +2,7 @@ use ui_text::text;
 
 mod annotation_paint;
 mod ruler;
+mod selection;
 mod session;
 mod touch;
 pub use ruler::ReadingRulerStyle;
@@ -9,8 +10,8 @@ pub use ruler::ReadingRulerStyle;
 use fixed_page::{DISPLAY_CACHE_BUDGET, PageCache, PageImage, PageSwipe, PageZoom};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Axis, Bounds, ClipboardItem, ContentMask, Context, Corners, DispatchPhase, Element, ElementId, EventEmitter, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseButton, MouseMoveEvent,
-    PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, Style, Task, TouchEvent, TouchId, TouchPhase, Window, canvas, div, fill, point, px, rgba, size,
+    AnyElement, App, Axis, Bounds, ClipboardItem, ContentMask, Context, Corners, DispatchPhase, Element, ElementId, EventEmitter, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseButton,
+    MouseMoveEvent, PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, Style, Task, TouchEvent, TouchId, TouchPhase, Window, canvas, container_query, div, fill, point, px, rgba, size,
 };
 use gpui_component::ElementExt;
 use gpui_image_eviction::track_image;
@@ -127,7 +128,7 @@ pub enum PdfViewEvent {
     },
     /// A right-click lookup when no text is selected.
     WordSelected {
-        selection: PdfSelectionSnapshot,
+        selection: PdfDocumentSelectionSnapshot,
         position: Point<Pixels>,
     },
     /// Published after painting, when window-space passage geometry is current.
@@ -165,6 +166,24 @@ pub struct PdfSelectionSnapshot {
     pub text: String,
     /// Untrimmed, normalized PDF page coordinates.
     pub rects: Vec<NormalizedRect>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PdfDocumentSelectionSnapshot {
+    pub text: String,
+    /// Selected passages in document order, in untrimmed page coordinates.
+    pub pages: Vec<PdfSelectionSnapshot>,
+}
+
+struct SelectedPdfPage {
+    page_index: usize,
+    selection: Arc<PdfTextSelection>,
+    crop: NormalizedRect,
+}
+
+struct SelectionTextPage {
+    layout: Arc<PdfPageTextLayout>,
+    crop: NormalizedRect,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -248,6 +267,9 @@ pub struct PdfView {
     selection_anchor: Option<(f32, f32)>,
     selection_anchor_source_index: Option<usize>,
     selection_active: Option<(f32, f32)>,
+    selection_active_page: Option<usize>,
+    selection_drag_position: Option<Point<Pixels>>,
+    selection_scroll_tick: Option<Instant>,
     tap_start: Option<(Point<Pixels>, Instant)>,
     touch_selection_handles_visible: bool,
     touch_selection_id: Option<TouchId>,
@@ -258,7 +280,9 @@ pub struct PdfView {
     selection_page: Option<usize>,
     selection_page_column: Option<u32>,
     selection_granularity: SelectionGranularity,
-    selection: Option<Arc<PdfTextSelection>>,
+    selection: Vec<SelectedPdfPage>,
+    /// Retain text while dragging through new viewports, without pinning rasters.
+    selection_text: HashMap<usize, SelectionTextPage>,
     annotations: Arc<[PdfAnnotationOverlay]>,
     annotation_paint: Arc<[PdfAnnotationOverlay]>,
     embedded_annotation_pages: HashSet<usize>,
@@ -487,6 +511,9 @@ impl PdfView {
             selection_anchor: None,
             selection_anchor_source_index: None,
             selection_active: None,
+            selection_active_page: None,
+            selection_drag_position: None,
+            selection_scroll_tick: None,
             tap_start: None,
             touch_selection_handles_visible: true,
             touch_selection_id: None,
@@ -497,7 +524,8 @@ impl PdfView {
             selection_page: None,
             selection_page_column: None,
             selection_granularity: SelectionGranularity::Word,
-            selection: None,
+            selection: Vec::new(),
+            selection_text: HashMap::new(),
             annotations: Arc::from([]),
             annotation_paint: Arc::from([]),
             embedded_annotation_pages: Default::default(),
@@ -667,7 +695,9 @@ impl PdfView {
             self.move_viewport_anchor(forward, cx);
         } else {
             let target = self.keyboard_page_target(forward);
-            self.clear_selection();
+            if self.selection_anchor.is_none() {
+                self.clear_selection();
+            }
             self.set_flow_offset(target, cx);
         }
         if before != (self.source_position, self.flow_offset) {
@@ -785,17 +815,15 @@ impl PdfView {
         self.request_current_pages(cx);
     }
 
-    /// The width every page is rastered at, in device pixels.
+    /// The width this page is rastered at, in device pixels.
     ///
-    /// A column is painted `page_display_width()` wide, so rastering at a fixed
-    /// width both blurs wide columns and wastes most of the buffer on narrow
-    /// ones — six columns of a spread are a fraction of the width of one, but
-    /// used to cost the same memory and render time per page. The result is
-    /// rounded up to a bucket so that dragging a window edge or stepping the
-    /// zoom keeps hitting the same cached pages.
+    /// Follow the painted width, including narrower pages in fit-height mode.
+    /// Round up to a bucket so resizing and zooming can reuse cached images.
     fn render_target_width(&self, page_index: usize) -> u16 {
         let crop_width = self.geometry_crop(page_index).width();
-        let device_width = self.page_display_width() * self.device_pixel_ratio.max(1.0) / crop_width;
+        let display_width =
+            if self.zoom_mode == PdfZoomMode::FitHeight { columns_for_page(self.fit_width_plan.columns(), page_index).first().map_or(self.page_display_width(), |column| column.display_width()) } else { self.page_display_width() };
+        let device_width = display_width * self.device_pixel_ratio.max(1.0) / crop_width;
         let bucketed = (device_width / RENDER_WIDTH_BUCKET).ceil() * RENDER_WIDTH_BUCKET;
         let columns = (self.visible_page_count() + 1) as f32;
         let device_height = self.page_display_height() * self.device_pixel_ratio.max(1.0);
@@ -1078,22 +1106,6 @@ impl PdfView {
         cx.emit(PdfViewEvent::SearchChanged { current: next + 1, total: self.search_hits.len() });
     }
 
-    pub fn copy_selection(&self, cx: &mut Context<Self>) -> bool {
-        let Some(selection) = &self.selection else {
-            return false;
-        };
-        cx.write_to_clipboard(ClipboardItem::new_string(selection.text().to_owned()));
-        true
-    }
-
-    pub fn selection_snapshot(&self) -> Option<PdfSelectionSnapshot> {
-        let page_index = self.selection_page?;
-        let selection = self.selection.as_ref()?;
-        let (_, page) = self.pages.iter().find(|(candidate, _)| *candidate == page_index)?;
-        let rects = selection.rects().iter().map(|rect| uncrop_rect(page.page_crop, *rect)).collect::<Vec<_>>();
-        (!selection.text().is_empty() && !rects.is_empty()).then(|| PdfSelectionSnapshot { page_index, text: selection.text().to_owned(), rects })
-    }
-
     /// Only text in the visible page regions. Unpainted neighbouring characters
     /// preserve word boundaries with `None` bounds and cannot become matches.
     /// Reading this never starts PDF extraction or rendering.
@@ -1156,6 +1168,10 @@ impl PdfView {
         let contains = |pages: &[(usize, Arc<DisplayPage>)], index, crop| pages.iter().any(|(candidate, page)| *candidate == index && page.page_crop == crop);
         let changed = self.pages.iter().any(|(index, page)| !contains(&pages, *index, page.page_crop)) || pages.iter().any(|(index, page)| !contains(&self.pages, *index, page.page_crop));
         self.pages = pages;
+        if self.selection_anchor.is_some() {
+            self.retain_selection_text();
+            self.update_selection();
+        }
         let regions_changed = self.update_annotation_regions();
         if changed || regions_changed {
             cx.emit(PdfViewEvent::TextLayersChanged);
@@ -1165,21 +1181,6 @@ impl PdfView {
     pub fn clear_text_selection(&mut self, cx: &mut Context<Self>) {
         self.clear_selection();
         cx.notify();
-    }
-
-    /// PDF has no DOM elements; expand the selected word through the shared
-    /// PDF text geometry's paragraph boundaries instead.
-    pub fn select_containing_paragraph(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(source_index) = self.selection.as_ref().map(|selection| selection.first_source_index()) else { return false };
-        let Some((_, page)) = self.pages.iter().find(|(index, _)| Some(*index) == self.selection_page) else { return false };
-        let Some(character) = page.text_layout.geometry().characters().iter().find(|character| character.source_index() == source_index) else { return false };
-        let bounds = character.bounds();
-        let position = (bounds.left() + bounds.width() / 2.0, bounds.top() + bounds.height() / 2.0);
-        let Some(selection) = page.text_layout.select_from_source_index_with_options(source_index, position, SelectionOptions::default().with_granularity(SelectionGranularity::Paragraph)) else { return false };
-        self.selection = Some(Arc::new(selection));
-        self.selection_granularity = SelectionGranularity::Paragraph;
-        cx.notify();
-        true
     }
 
     pub fn set_annotations(&mut self, mut annotations: Vec<PdfAnnotationOverlay>, cx: &mut Context<Self>) {
@@ -1566,17 +1567,6 @@ impl PdfView {
         cx.emit(PdfViewEvent::PositionChanged { position: self.source_position, total: self.page_count() });
     }
 
-    fn clear_selection(&mut self) {
-        self.touch_selection_id = None;
-        self.selection_anchor = None;
-        self.selection_anchor_source_index = None;
-        self.selection_active = None;
-        self.selection_page = None;
-        self.selection_page_column = None;
-        self.selection_granularity = SelectionGranularity::Word;
-        self.selection = None;
-    }
-
     fn reset_page_scroll(&mut self) {
         let anchor = self.display_anchor(self.source_position);
         self.flow_offset = self.flow_offset_for_page_y(anchor.page_index(), anchor.page_y()).unwrap_or(0.0).clamp(0.0, self.max_flow_offset());
@@ -1647,7 +1637,9 @@ impl PdfView {
         };
         let plan = pager.window().plan().clone();
         self.apply_viewport_plan(plan);
-        self.clear_selection();
+        if self.selection_anchor.is_none() {
+            self.clear_selection();
+        }
         self.request_current_pages(cx);
         true
     }
@@ -1914,50 +1906,6 @@ impl PdfView {
         self.source_position != before
     }
 
-    fn begin_selection(&mut self, page_index: usize, page_column_index: u32, position: (f32, f32), anchor_source_index: usize, granularity: SelectionGranularity, cx: &mut Context<Self>) {
-        self.selection_page = Some(page_index);
-        self.selection_page_column = Some(page_column_index);
-        self.selection_anchor = Some(position);
-        self.selection_anchor_source_index = Some(anchor_source_index);
-        self.selection_active = Some(position);
-        self.selection_granularity = granularity;
-        self.update_selection();
-        cx.notify();
-    }
-
-    fn update_selection_to(&mut self, page_index: usize, _page_column_index: u32, position: (f32, f32), cx: &mut Context<Self>) -> bool {
-        if self.selection_anchor.is_none() || self.selection_page != Some(page_index) {
-            return false;
-        }
-        self.selection_active = Some(position);
-        self.update_selection();
-        cx.notify();
-        true
-    }
-
-    fn update_selection(&mut self) {
-        self.selection = self
-            .pages
-            .iter()
-            .find(|(page_index, _)| Some(*page_index) == self.selection_page)
-            .and_then(|(_, page)| Some((page, self.selection_anchor_source_index?, self.selection_active?)))
-            .and_then(|(page, anchor_source_index, active)| page.text_layout.select_from_source_index_with_options(anchor_source_index, active, SelectionOptions::default().with_granularity(self.selection_granularity)))
-            .map(Arc::new);
-    }
-
-    fn finish_selection_at(&mut self, target: Option<PdfInteractionTarget>, cx: &mut Context<Self>) -> bool {
-        if self.selection_anchor.is_none() {
-            return false;
-        }
-        if let Some(target) = target {
-            self.update_selection_to(target.page_index, target.column.page_column_index(), target.page_point, cx);
-        }
-        self.selection_anchor = None;
-        self.selection_anchor_source_index = None;
-        self.selection_active = None;
-        true
-    }
-
     /// The page the layout is measured against.
     ///
     /// Trimming changes a page's effective size, so this follows the page being
@@ -2134,11 +2082,23 @@ impl PdfView {
     }
 
     fn flow_base_index(&self) -> usize {
-        split_flow_offset(self.flow_offset, self.flow_column_height()).0
+        self.split_flow_offset(self.flow_offset).0
     }
 
     fn flow_remainder(&self) -> f32 {
-        split_flow_offset(self.flow_offset, self.flow_column_height()).1
+        self.split_flow_offset(self.flow_offset).1
+    }
+
+    fn split_flow_offset(&self, offset: f32) -> (usize, f32) {
+        let column_height = self.flow_column_height().max(1.0);
+        let offset = offset.max(0.0);
+        if self.zoom_mode == PdfZoomMode::FitHeight {
+            // Multiplying a fractional viewport height by a page index can
+            // round below the page boundary. Flooring or taking the remainder
+            // then selects the previous page or shifts this one out of view.
+            return ((offset / column_height).round() as usize, 0.0);
+        }
+        ((offset / column_height).floor() as usize, offset.rem_euclid(column_height))
     }
 
     fn max_flow_offset(&self) -> f32 {
@@ -2177,7 +2137,7 @@ impl PdfView {
     }
 
     fn flow_anchor_at(&self, offset: f32) -> Option<FitWidthAnchor> {
-        let (display_index, remainder) = split_flow_offset(offset, self.flow_column_height());
+        let (display_index, remainder) = self.split_flow_offset(offset);
         let columns = columns_for_display(self.fit_width_plan.columns(), display_index);
         let first = *columns.first()?;
         if self.zoom_mode == PdfZoomMode::FitHeight {
@@ -2362,12 +2322,6 @@ fn screen_column_stream(base_index: usize, slot_index: usize, total: usize) -> i
 
 fn flow_window_start(current: usize, total: usize, page_count: usize) -> usize {
     current.min(total.saturating_sub(page_count.max(1)))
-}
-
-fn split_flow_offset(offset: f32, column_height: f32) -> (usize, f32) {
-    let column_height = column_height.max(1.0);
-    let offset = offset.max(0.0);
-    ((offset / column_height).floor() as usize, offset.rem_euclid(column_height))
 }
 
 fn whole_page_offset(offset: f32, viewport_height: f32) -> f32 {
@@ -2630,7 +2584,7 @@ impl PdfView {
                                     column: self.painting_column(column),
                                     page: page.clone(),
                                     tiles: self.pages.iter().filter(|(candidate, _)| *candidate == page_index).map(|(_, page)| page.clone()).collect(),
-                                    selection: (self.selection_page == Some(page_index)).then(|| self.selection.clone()).flatten(),
+                                    selection: self.selection_for_page(page_index).cloned(),
                                     annotations: self.annotation_paint.clone(),
                                     reading_highlight: self.reading_highlight.as_ref().filter(|(page, _)| *page == page_index).map(|(_, rects)| rects.clone()),
                                     active_annotation_id: self.active_annotation_id.clone(),
@@ -2679,18 +2633,35 @@ fn pdf_document_colors(theme: components::BrowserTheme) -> ([u8; 3], [u8; 3]) {
 }
 
 impl Render for PdfView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity();
+        // Resolve both dimensions before constructing the page columns. Updating
+        // them in the surface's prepaint would paint the old layout for one frame.
+        container_query(move |viewport, window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_available_size(f32::from(viewport.width), f32::from(viewport.height), cx);
+                view.render_surface(window, cx)
+            })
+        })
+        .min_w_0()
+        .min_h_0()
+    }
+}
+
+impl PdfView {
+    fn render_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = components::browser_theme(cx);
         let (paper_color, ink_color) = pdf_document_colors(theme);
-        if self.paper_color != paper_color || self.ink_color != ink_color {
+        let device_pixel_ratio = window.scale_factor();
+        if self.paper_color != paper_color || self.ink_color != ink_color || self.device_pixel_ratio != device_pixel_ratio {
             self.paper_color = paper_color;
             self.ink_color = ink_color;
+            self.device_pixel_ratio = device_pixel_ratio;
             self.page_turn = None;
             self.scroll_animation = None;
             self.swipe_preview.clear();
             self.request_current_pages(cx);
         }
-        self.device_pixel_ratio = window.scale_factor();
         // Cleared before the page elements are built, so what they record in
         // paint describes this frame and not the last one.
         self.passage_bounds.set(None);
@@ -2702,10 +2673,13 @@ impl Render for PdfView {
             self.scroll_touch_content(delta.y, cx);
             self.touch_momentum.constrain(self.touch_scroll_offset);
         }
-        if self.touch_momentum.is_animating() { window.request_animation_frame(); }
+        if self.touch_momentum.is_animating() {
+            window.request_animation_frame();
+        }
         if self.advance_scroll_animation(cx) {
             window.request_animation_frame();
         }
+        self.advance_selection_scroll(window, cx);
         if self.pages.is_empty() && self.page_turn.is_none() {
             let message = match self.error.clone() {
                 Some(message) => message,
@@ -2771,8 +2745,6 @@ impl Render for PdfView {
         let mouse_down_target = view.clone();
         let right_click_bounds = surface_bounds.clone();
         let right_click_target = view.clone();
-        let mouse_move_bounds = surface_bounds.clone();
-        let mouse_move_target = view.clone();
         let mouse_up_bounds = surface_bounds.clone();
         let mouse_up_target = view.clone();
         let mouse_up_out_bounds = surface_bounds.clone();
@@ -2780,7 +2752,7 @@ impl Render for PdfView {
         let key_target = view.clone();
         let pinch_target = view.clone();
         let wheel_target = view;
-        components::reader_pdf_scroll_surface(&self.scroll_handle, theme, cx)
+        components::reader_pdf_scroll_surface(&self.scroll_handle, theme, window, cx)
             .debug_selector(|| "pdf-reader-document".into())
             .track_focus(&self.focus)
             .key_context("PdfReaderDocument")
@@ -2789,24 +2761,20 @@ impl Render for PdfView {
                 let press_target = measure_target.downgrade();
                 // Movement outside the surface still cancels a click, even
                 // if the pointer later returns before its release.
-                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
                     if phase == DispatchPhase::Capture {
-                        let _ = press_target.update(cx, |view, _| {
+                        let _ = press_target.update(cx, |view, cx| {
                             if view.tap_start.is_some_and(|(start, _)| f32::from(event.position.x - start.x).abs() > 8.0 || f32::from(event.position.y - start.y).abs() > 8.0) {
                                 view.tap_start = None;
+                            }
+                            if event.dragging() && !components::uses_mobile_reader_controls(window) && view.drag_selection_to(event.position, cx) {
+                                cx.stop_propagation();
                             }
                         });
                     }
                 });
                 measured_bounds.set(bounds);
-                let viewport_width = f32::from(bounds.size.width);
-                let viewport_height = f32::from(bounds.size.height);
-                if viewport_width > 0.0 && viewport_height > 0.0 {
-                    measure_target.update(cx, |view, cx| {
-                        view.surface_bounds = bounds;
-                        view.set_available_size(viewport_width, viewport_height, cx);
-                    });
-                }
+                measure_target.update(cx, |view, _| view.surface_bounds = bounds);
             })
             // Resolve direct lookup before the enclosing context-menu wrapper
             // handles the press during bubbling. A click within the selection keeps it.
@@ -2816,10 +2784,8 @@ impl Render for PdfView {
                 }
                 right_click_target.update(cx, |view, cx| {
                     let Some(target) = view.interaction_target(event.position, right_click_bounds.get()) else { return };
-                    let had_selection = view.selection.as_ref().is_some_and(|selection| !selection.text().is_empty() && !selection.rects().is_empty());
-                    if view.selection_page == Some(target.page_index)
-                        && view.selection.as_ref().is_some_and(|selection| selection.rects().iter().any(|rect| normalized_rect_contains(*rect, target.page_point)))
-                    {
+                    let had_selection = !view.selection.is_empty();
+                    if view.selection_for_page(target.page_index).is_some_and(|selection| selection.rects().iter().any(|rect| normalized_rect_contains(*rect, target.page_point))) {
                         return;
                     }
                     let Some(source_index) = view.selection_anchor_source_index(target) else { return };
@@ -2827,6 +2793,7 @@ impl Render for PdfView {
                     view.selection_anchor = None;
                     view.selection_anchor_source_index = None;
                     view.selection_active = None;
+                    view.selection_active_page = None;
                     view.tap_start = None;
                     window.prevent_default();
                     // Retarget an existing selection before the menu is built.
@@ -2839,7 +2806,9 @@ impl Render for PdfView {
                 });
             })
             .on_long_press(cx.listener(|view, event: &LongPressEvent, window, cx| {
-                if !components::uses_mobile_reader_controls(window) { return; }
+                if !components::uses_mobile_reader_controls(window) {
+                    return;
+                }
                 let Some(target) = view.interaction_target(event.position, view.surface_bounds) else { return };
                 let Some(source_index) = view.selection_anchor_source_index(target) else { return };
                 view.begin_selection(target.page_index, target.column.page_column_index(), target.page_point, source_index, SelectionGranularity::Word, cx);
@@ -2854,13 +2823,13 @@ impl Render for PdfView {
                 if view.touch_selection_handles_visible && event.phase == TouchPhase::Started && components::uses_mobile_reader_controls(window) {
                     view.begin_selection_handle(event, window, cx);
                 }
-                if view.touch_selection_id != Some(event.id) { return; }
+                if view.touch_selection_id != Some(event.id) {
+                    return;
+                }
                 let target = view.interaction_target(event.position - view.touch_selection_offset, view.surface_bounds);
                 match event.phase {
                     TouchPhase::Moved => {
-                        if let Some(target) = target {
-                            view.update_selection_to(target.page_index, target.column.page_column_index(), target.page_point, cx);
-                        }
+                        view.drag_selection_to(event.position - view.touch_selection_offset, cx);
                     }
                     TouchPhase::Ended | TouchPhase::Cancelled => {
                         view.touch_selection_id = None;
@@ -2879,8 +2848,9 @@ impl Render for PdfView {
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 mouse_down_target.update(cx, |view, cx| {
                     view.scroll_animation = None;
+                    view.clear_text_selection(cx);
+                    view.tap_start = None;
                     if components::uses_mobile_reader_controls(window) {
-                        view.clear_text_selection(cx);
                         view.tap_start = Some((event.position, Instant::now()));
                         cx.stop_propagation();
                         return;
@@ -2899,19 +2869,12 @@ impl Render for PdfView {
                     };
                     let Some(anchor_source_index) = view.selection_anchor_source_index(target) else { return };
                     view.begin_selection(target.page_index, target.column.page_column_index(), target.page_point, anchor_source_index, granularity, cx);
+                    // A single press starts a drag; double-clicking selects a word.
+                    if event.click_count == 1 {
+                        view.selection.clear();
+                    }
                     view.tap_start = Some((event.position, Instant::now()));
                     cx.stop_propagation();
-                });
-            })
-            .on_mouse_move(move |event, window, cx| {
-                if components::uses_mobile_reader_controls(window) || !event.dragging() {
-                    return;
-                }
-                mouse_move_target.update(cx, |view, cx| {
-                    let Some(target) = view.interaction_target(event.position, mouse_move_bounds.get()) else { return };
-                    if view.update_selection_to(target.page_index, target.column.page_column_index(), target.page_point, cx) {
-                        cx.stop_propagation();
-                    }
                 });
             })
             .on_mouse_up(MouseButton::Left, move |event, window, cx| {
@@ -2929,8 +2892,11 @@ impl Render for PdfView {
                     if view.finish_selection_at(target, cx) {
                         if let Some((start, started_at)) = view.tap_start.take() {
                             let moved = f32::from(event.position.x - start.x).abs() > 8.0 || f32::from(event.position.y - start.y).abs() > 8.0;
-                            if !moved && event.click_count == 1 && started_at.elapsed() < Duration::from_millis(600) {
-                                cx.emit(PdfViewEvent::PageTapped);
+                            if !moved && event.click_count == 1 {
+                                view.clear_text_selection(cx);
+                                if started_at.elapsed() < Duration::from_millis(600) {
+                                    cx.emit(PdfViewEvent::PageTapped);
+                                }
                             }
                         }
                         cx.stop_propagation();
@@ -3173,10 +3139,10 @@ mod tests {
         view.update(cx, |view, cx| {
             view.pages = vec![(0, page)];
             view.begin_selection(0, 0, start, source_index, SelectionGranularity::Word, cx);
-            assert!(view.selection.as_ref().unwrap().last_source_index() < expected.last_source_index());
+            assert!(view.selection.first().unwrap().selection.last_source_index() < expected.last_source_index());
             let target = PdfInteractionTarget { page_index: 0, column: view.fit_width_plan.columns()[0], page_point: end, page_display_size: (600.0, 2400.0) };
             assert!(view.finish_selection_at(Some(target), cx));
-            assert_eq!(view.selection.as_deref(), Some(&expected));
+            assert_eq!(view.selection.first().map(|page| page.selection.as_ref()), Some(&expected));
             assert!(view.selection_anchor.is_none());
             assert!(view.selection_anchor_source_index.is_none());
             assert!(view.selection_active.is_none());
@@ -3262,7 +3228,7 @@ mod tests {
                 view.select_containing_paragraph(cx),
                 "selection page {:?}, source {:?}, loaded {:?}",
                 view.selection_page,
-                view.selection.as_ref().map(|selection| selection.first_source_index()),
+                view.selection.first().map(|page| page.selection.first_source_index()),
                 view.pages.iter().map(|(page, display)| (*page, display.text_layout.geometry().characters().len())).collect::<Vec<_>>()
             );
             assert_eq!(view.passage_bounds(), Some(word_bounds), "geometry is stale until the next paint");

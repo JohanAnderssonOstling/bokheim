@@ -12,6 +12,14 @@ pub(super) struct AndroidAuthentication {
 }
 impl SyncPage {
     pub(super) fn open_android_authentication(&mut self, cx: &mut Context<Self>) {
+        self.open_android_account(false, cx);
+    }
+
+    pub(super) fn open_android_password_change(&mut self, cx: &mut Context<Self>) {
+        self.open_android_account(true, cx);
+    }
+
+    fn open_android_account(&mut self, reset_password: bool, cx: &mut Context<Self>) {
         self.android_authentication = None;
         let theme = ui_components::browser_theme(cx);
         let argb = |color: Hsla| {
@@ -29,7 +37,9 @@ impl SyncPage {
             danger: argb(theme.danger),
             selection: argb(theme.accent_wash),
         };
-        let (session, requests) = match Session::open(theme) {
+        let email = self.state.read(cx).account_status.email().map(str::to_owned);
+        let reset_email = reset_password.then_some(email.as_deref()).flatten();
+        let (session, requests) = match Session::open(theme, reset_email) {
             Ok(value) => value,
             Err(error) => {
                 self.error = Some(user_facing_error(&error, text!(account::could_not_open_the_sign_in_form_please_try_again)).into());

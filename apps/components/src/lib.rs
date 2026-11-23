@@ -12,8 +12,10 @@ pub use annotation_editor::{
 pub mod account;
 pub mod assets;
 pub mod audiobook;
+mod book_metadata;
 pub mod book_overlay;
 mod book_transfer_error;
+pub mod browse_profile;
 pub mod browser;
 pub mod browser_download;
 pub mod browser_start;
@@ -25,7 +27,9 @@ mod errors;
 mod fonts;
 mod languages;
 pub use languages::LANGUAGE_NAMES;
+#[cfg(all(feature = "graph", not(feature = "kobo")))]
 pub mod graph;
+#[cfg(all(feature = "canvas", not(feature = "kobo")))]
 pub mod infinite_canvas;
 pub mod keyboard;
 pub mod keyboard_settings;
@@ -64,10 +68,12 @@ pub use contents::*;
 pub use detail::*;
 pub use errors::{AccountAction, authentication_error, user_facing_error, wifi_error_message};
 pub use fonts::{
-    BundledFontLoader, BundledFontRequest, CJK_FONT_FAMILY, FontCatalog, FontCatalogTarget, SystemFontFamilies, bundled_font_loader, configured_ui_font_name, ensure_bundled_font, ensure_cjk_fonts, ensure_text_fonts, equal_choice_group_width, interface_label_width,
-    load_font_catalog, observe_font_catalog, register_fonts, register_interface_fonts,
+    BundledFontLoader, BundledFontRequest, CJK_FONT_FAMILY, FontCatalog, FontPicker, FontPickerEvent, SystemFontFamilies, bundled_font_loader, configured_ui_font_name, ensure_bundled_font, ensure_cjk_fonts, ensure_text_fonts,
+    equal_choice_group_width, interface_label_width, register_fonts, register_interface_fonts,
 };
+#[cfg(all(feature = "graph", not(feature = "kobo")))]
 pub use graph::*;
+#[cfg(all(feature = "canvas", not(feature = "kobo")))]
 pub use infinite_canvas::*;
 pub use keyboard::*;
 pub use keyboard_settings::*;

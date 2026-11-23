@@ -4,6 +4,7 @@
 //! book from a website, enriched like any import.
 
 use client_protocol::BackendError;
+use cpu_contract::{cover, CpuHost, ThumbnailBytes};
 use library_database::catalog::CatalogBook;
 use library_model::CardKey;
 use library_placement::stage_import;
@@ -30,14 +31,14 @@ impl LibraryImport<'_> {
         self.store_catalog_cover(hash, &versions).await
     }
 
-    async fn fetch_catalog_cover(cpu: &dyn cpu_host::CpuHost, entry: CardKey) -> Result<Option<cpu_host::ThumbnailBytes>, BackendError> {
+    async fn fetch_catalog_cover(cpu: &dyn CpuHost, entry: CardKey) -> Result<Option<ThumbnailBytes>, BackendError> {
         let Some(bytes) = library_catalog::fresh_catalog_cover(entry).await? else { return Ok(None) };
-        cpu_host::cover(cpu, bytes).await.map(Some)
+        cover(cpu, bytes).await.map(Some)
     }
 
     /// Publish selected artwork separately from generated covers so a late
     /// thumbnail job cannot replace it.
-    async fn store_catalog_cover(&self, hash: BookId, versions: &cpu_host::ThumbnailBytes) -> Result<bool, BackendError> {
+    async fn store_catalog_cover(&self, hash: BookId, versions: &ThumbnailBytes) -> Result<bool, BackendError> {
         // Keep existing thumbnails until the replacement has been decoded.
         if self.storage.database().thumbnail_book_format(hash).await.map_err(BackendError::operation)?.is_none() {
             return Ok(false);
@@ -49,11 +50,18 @@ impl LibraryImport<'_> {
     }
 
     pub async fn import_catalog_download(&self, parent_id: DirId, book: CatalogBook, bytes: Vec<u8>) -> Result<BookId, BackendError> {
+        self.import_catalog_reader(parent_id, book, Box::new(std::io::Cursor::new(bytes))).await
+    }
+
+    pub async fn import_catalog_reader(&self, parent_id: DirId, book: CatalogBook, reader: Box<dyn std::io::Read + Send>) -> Result<BookId, BackendError> {
         let entry = book.key;
         let extension = book.format().canonical_extension();
         let name = if book.author.is_empty() { book.title } else { format!("{} - {}", book.author, book.title) };
         let file_name = format!("{}.{extension}", name.replace(['/', '\\', ':'], " ").trim());
-        let imported = self.import_downloaded_book(parent_id, &file_name, bytes).await?;
+        let mut import = self.validate_import(&parent_id, &file_name).await?;
+        let (name, staged) = stage_import(self.storage.assets(), self.storage.database(), parent_id, &import.file_name, reader, Default::default()).await.map_err(BackendError::operation)?;
+        import.file_name = name;
+        let imported = self.finish_import(import, staged).await?;
         self.storage.database().record_catalog_answer(&imported, book.record).await.map_err(BackendError::operation)?;
         self.refresh_catalog_cover(imported, entry).await?;
         Ok(imported)
@@ -140,7 +148,7 @@ mod tests {
         library_database::catalog::activate(catalog.serialize("main").unwrap().to_vec()).unwrap();
 
         let assets = AssetStore::open(root.path().to_str().unwrap()).unwrap();
-        let old = cpu_host::cover(&*cpu, picture([240, 20, 20])).await.unwrap();
+        let old = cpu_contract::cover(&*cpu, picture([240, 20, 20])).await.unwrap();
         assets.write_thumbnail_set(&hash, &old.high_density, &old.browse, &old.card_high_density).await.unwrap();
         database.complete_thumbnail_work(&hash, true).await.unwrap();
         let story = root.path().join("Story");
@@ -154,13 +162,13 @@ mod tests {
         // A renamed copy uses the catalog only when its actual bytes match.
         let added = importer.import_downloaded_book(ROOT_DIR_ID, "renamed.epub", epub_bytes.clone()).await.unwrap();
         assert!(added.is_local());
-        assert_eq!(database.resolve_book_identity(epub_hash).unwrap(), added);
+        assert_eq!(database.resolve_book_identity(epub_hash).await.unwrap(), added);
         let answer = database.enrichment_cover_record(&added).await.unwrap().unwrap();
         assert_eq!(answer.metadata.title, inspected.inspection.metadata.metadata.title);
         assert_eq!(answer.book.subjects[0].source(), "catalog:concept");
         assert_eq!(answer.book.subjects[0].code(), Some("concept:4107"));
         assert_eq!(answer.book.subjects[0].authority(), Some("unified"));
-        assert!(database.enrichment_candidates(&[added], i64::MAX).unwrap().is_empty());
+        assert!(database.enrichment_candidates(i64::MAX, None).await.unwrap().0.is_empty());
         assert!(import_record(added, BookFormat::Pdf).unwrap().is_none());
         assert!(import_record(BookId::from_bytes(key.0), BookFormat::Mp3Folder).unwrap().is_none());
         // Discovery of an EPUB already on disk uses the same curated answer.
@@ -189,7 +197,7 @@ mod tests {
         assert_eq!(discovered.apply_filesystem_scan_batch(&mut snapshot, &discovery, books, true, None).unwrap(), ScanApplyResult::Applied);
         let discovered_id = discovered.resolve_book_identity(epub_hash).unwrap();
         assert_eq!(discovered.enrichment_cover_record(&discovered_id).unwrap().unwrap().book.subjects, answer.book.subjects);
-        assert!(discovered.enrichment_candidates(&[discovered_id], i64::MAX).unwrap().is_empty());
+        assert!(discovered.enrichment_candidates(i64::MAX, None).unwrap().0.is_empty());
         // A valid EPUB with different bytes and the same embedded metadata must
         // still use ordinary enrichment rather than a title/author match.
         let mut different = epub_bytes.clone();
@@ -200,8 +208,8 @@ mod tests {
         different.extend_from_slice(comment);
         let other = importer.import_downloaded_book(ROOT_DIR_ID, "different.epub", different).await.unwrap();
         assert_ne!(other, added);
-        assert_eq!(database.enrichment_candidates(&[other], i64::MAX).unwrap().len(), 1);
-        assert!(database.enrichment_cover_record(&other).unwrap().is_none());
+        assert_eq!(database.enrichment_candidates(i64::MAX, None).await.unwrap().0.len(), 1);
+        assert!(database.enrichment_cover_record(&other).await.unwrap().is_none());
         assert_eq!(std::fs::read(root.path().join("renamed.epub")).unwrap(), epub_bytes);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         std::env::set_var("BOKHEIM_CATALOG_ORIGIN", format!("http://{}", listener.local_addr().unwrap()));
@@ -224,8 +232,8 @@ mod tests {
         assert_eq!(assets.read_bytes(BlobKind::Thumbnail, &hash).await.unwrap().unwrap(), master);
         let decoded = image::load_from_memory(&master).unwrap().to_rgb8();
         assert!(decoded.get_pixel(0, 0)[2] > 200);
-        assert!(assets.thumbnail_set_exists(&hash).unwrap());
-        assert_eq!(database.thumbnail_work_state(&hash).unwrap().as_deref(), Some("ready"));
+        assert!(assets.thumbnail_set_exists(&hash).await.unwrap());
+        assert_eq!(database.thumbnail_work_state(&hash).await.unwrap().as_deref(), Some("ready"));
         assert_eq!(std::fs::read(story.join("01.mp3")).unwrap(), b"original audio and tags");
         assert!(!story.join("cover.jpg").exists());
         // Verify the actual stored display variants, not just the decoder output.

@@ -97,7 +97,10 @@ impl Database {
                 shelf.books = self.ordered_books(&shelf.books.iter().copied().collect(), options)?;
             }
         }
-        let mut rows = shelves.iter().map(|shelf| BrowseRow { id: BrowseLocation::Home(Some(shelf.shelf)), name: shelf.shelf.label().to_owned(), path: None, book_count: shelf.books.len(), downloaded_book_count: 0 }).collect::<Vec<_>>();
+        let mut rows = shelves
+            .iter()
+            .map(|shelf| BrowseRow { id: BrowseLocation::Home(Some(shelf.shelf)), name: shelf.shelf.label().to_owned(), path: None, book_count: shelf.books.len(), downloaded_book_count: 0, size_bytes: None })
+            .collect::<Vec<_>>();
         super::ordering::sort_rows(&mut rows, options.chip_sort);
         let positions: HashMap<_, _> = rows.iter().enumerate().map(|(index, row)| (row.id, index)).collect();
         shelves.sort_by_key(|shelf| positions[&BrowseLocation::Home(Some(shelf.shelf))]);
@@ -120,6 +123,7 @@ impl Database {
                         path: None,
                         book_count: shelf.books.len(),
                         downloaded_book_count: shelf.books.iter().filter(|book| matching.downloaded.contains(book)).count(),
+                        size_bytes: None,
                     })
                     .collect();
                 (rows, Vec::new())

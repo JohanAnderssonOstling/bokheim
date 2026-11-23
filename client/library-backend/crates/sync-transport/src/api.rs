@@ -1,24 +1,22 @@
 use crate::{PerformanceTrace, SyncRequestError};
+use client_platform_runtime::executor::timeout;
 use reqwest::{header, RequestBuilder, Url};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use sync_common::transport as wire;
+use std::time::Duration;
+use sync_common::http as wire;
+use sync_common::http::Contract;
 
-pub(crate) async fn send<T: Serialize + ?Sized, R: DeserializeOwned>(request: RequestBuilder, value: &T) -> Result<R, SyncRequestError> {
+pub(crate) async fn send<T: Contract, R: Contract>(request: RequestBuilder, value: &T) -> Result<R, SyncRequestError> {
     let mut trace = PerformanceTrace::new("binary_request", "encode_request_response_decode");
-    send_decoded(request, value, &mut trace, wire::decode).await
+    send_with_trace(request, value, &mut trace).await
 }
 
-pub(crate) fn encoded_request<T: Serialize + ?Sized>(request: RequestBuilder, value: &T) -> Result<RequestBuilder, wire::WireError> {
+pub(crate) fn encoded_request<T: Contract>(request: RequestBuilder, value: &T) -> Result<RequestBuilder, wire::WireError> {
     Ok(request.header(header::ACCEPT, wire::MEDIA_TYPE).header(header::CONTENT_TYPE, wire::MEDIA_TYPE).body(wire::encode(value)?))
 }
 
-pub(crate) async fn send_with_trace_byte_fields<T: Serialize + ?Sized, R: DeserializeOwned>(request: RequestBuilder, value: &T, trace: &mut PerformanceTrace) -> Result<R, SyncRequestError> {
-    send_decoded(request, value, trace, wire::decode_byte_fields).await
-}
-
-async fn send_decoded<T: Serialize + ?Sized, R>(request: RequestBuilder, value: &T, trace: &mut PerformanceTrace, decode: fn(&[u8], usize) -> Result<R, wire::WireError>) -> Result<R, SyncRequestError> {
-    let result = async {
+pub(crate) async fn send_with_trace<T: Contract, R: Contract>(request: RequestBuilder, value: &T, trace: &mut PerformanceTrace) -> Result<R, SyncRequestError> {
+    // Bound headers and response-body consumption together, on native and web.
+    let result = timeout(Duration::from_secs(60), async {
         let response = encoded_request(request.header("x-bokheim-trace-id", trace.id()), value)?.send().await?;
         let status = response.status();
         if matches!(status, reqwest::StatusCode::TOO_MANY_REQUESTS | reqwest::StatusCode::SERVICE_UNAVAILABLE) {
@@ -28,9 +26,10 @@ async fn send_decoded<T: Serialize + ?Sized, R>(request: RequestBuilder, value: 
         }
         let response = response.error_for_status()?;
         let bytes = crate::body::read(response, wire::MAX_DECODED_RESPONSE_BYTES).await.map_err(SyncRequestError::from)?;
-        Ok(decode(&bytes, wire::MAX_DECODED_RESPONSE_BYTES)?)
-    }
-    .await;
+        Ok(wire::decode(&bytes, wire::MAX_DECODED_RESPONSE_BYTES)?)
+    })
+    .await
+    .unwrap_or(Err(SyncRequestError::TimedOut));
     trace.finish(result.is_ok());
     result
 }
@@ -98,24 +97,31 @@ mod tests {
     #[tokio::test]
     async fn sync_exchange_transports_compact_payloads_and_book_hashes() {
         use crate::exchange_changes;
-        use sync_common::{ConflictRank, BookId, LibraryId, LibraryRevision, OpaquePublication, OpaqueStateEntry, PullStateResponse, PushMutationsResponse, ReplicaId, ReplicaSeq, StateAddress, StateDelivery, SyncCursor, SyncExchangeRequest, SyncExchangeResponse, VersionKey, Versioned};
+        use sync_common::{
+            BookId, ConflictRank, LibraryId, LibraryRevision, OpaquePublication, OpaqueStateEntry, PullStateResponse, PushMutationsResponse, ReplicaId, ReplicaSeq, StateAddress, StateDelivery, SyncCursor, SyncExchangeRequest,
+            SyncExchangeResponse, VersionKey, Versioned,
+        };
 
-        let app = Router::new().route("/api/sync/exchange", post(|headers: HeaderMap, body: Bytes| async move {
-            assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), wire::MEDIA_TYPE);
-            let request: SyncExchangeRequest = wire::decode_byte_fields(&body, wire::MAX_DECODED_REQUEST_BYTES).unwrap();
-            assert_eq!(request.mutations.len(), 1);
-            let publication = request.mutations.into_iter().next().unwrap();
-            assert_eq!(publication.state.value.bytes, (0..128 * 1024).map(|byte| byte as u8).collect::<Vec<_>>());
-            assert_eq!(publication.state.value.address.entity_key.book(), publication.state.value.book);
-            wire::encode(&SyncExchangeResponse {
-                push: PushMutationsResponse { rejected: Vec::new() },
-                pull: PullStateResponse {
-                    mutations: vec![StateDelivery { state: publication.state, revision: LibraryRevision::new(1).unwrap() }],
-                    next_cursor: SyncCursor { generation: Some(LibraryId::from_u128(2)), field_revision: Some(LibraryRevision::new(1).unwrap()), ..SyncCursor::default() },
-                    has_more: false,
-                },
-            }).unwrap()
-        }));
+        let app = Router::new().route(
+            "/api/sync/exchange",
+            post(|headers: HeaderMap, body: Bytes| async move {
+                assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), wire::MEDIA_TYPE);
+                let request: SyncExchangeRequest = wire::decode(&body, wire::MAX_DECODED_REQUEST_BYTES).unwrap();
+                assert_eq!(request.mutations.len(), 1);
+                let publication = request.mutations.into_iter().next().unwrap();
+                assert_eq!(publication.state.value.bytes, (0..128 * 1024).map(|byte| byte as u8).collect::<Vec<_>>());
+                assert_eq!(publication.state.value.address.entity_key.book(), publication.state.value.book);
+                wire::encode(&SyncExchangeResponse {
+                    push: PushMutationsResponse { rejected: Vec::new() },
+                    pull: PullStateResponse {
+                        mutations: vec![StateDelivery { state: publication.state, revision: LibraryRevision::new(1).unwrap() }],
+                        next_cursor: SyncCursor { generation: Some(LibraryId::from_u128(2)), field_revision: Some(LibraryRevision::new(1).unwrap()), ..SyncCursor::default() },
+                        has_more: false,
+                    },
+                })
+                .unwrap()
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let credentials = SyncCredentials::new(Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap(), "test-token");
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -124,7 +130,10 @@ mod tests {
             value: OpaqueStateEntry { address: StateAddress { kind: "reading_position".into(), entity_key: book.into(), entity_subkey: "epub".into() }, book: Some(book), bytes: (0..128 * 1024).map(|byte| byte as u8).collect() },
             version: VersionKey::new(1, ConflictRank::Update, ReplicaId::from_u128(1), ReplicaSeq::new(1).unwrap()),
         };
-        let response = exchange_changes(&http_response::client(), &credentials, LibraryId::from_u128(3), ReplicaId::from_u128(1), vec![OpaquePublication { publisher_seq: ReplicaSeq::new(1).unwrap(), state: state.clone() }], SyncCursor::default()).await.unwrap();
+        let response =
+            exchange_changes(&http_response::client(), &credentials, LibraryId::from_u128(3), ReplicaId::from_u128(1), vec![OpaquePublication { publisher_seq: ReplicaSeq::new(1).unwrap(), state: state.clone() }], SyncCursor::default())
+                .await
+                .unwrap();
         assert_eq!(response.pull.mutations[0].state, state);
         assert_eq!(response.pull.next_cursor.generation, Some(LibraryId::from_u128(2)));
         server.abort();

@@ -4,6 +4,8 @@
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 use std::time::Instant;
 
 static EPOCH: OnceLock<Instant> = OnceLock::new();
@@ -116,13 +118,22 @@ impl<R: Seek> Seek for ProfileIo<R> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn operation<T, F: FnOnce() -> T>(operation: F) -> T {
     use std::any::type_name;
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    use std::time::Duration;
     static ENABLED: OnceLock<bool> = OnceLock::new();
     if !*ENABLED.get_or_init(|| std::env::var_os("BOKHEIM_CPU_PROFILE").is_some()) {
         return operation();
     }
+    let started = Instant::now();
+    let result = operation();
+    record_operation(type_name::<F>(), started.elapsed());
+    result
+}
+
+// Share aggregation and reporting across operation types.
+#[cfg(not(target_arch = "wasm32"))]
+fn record_operation(name: &'static str, elapsed: Duration) {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
     struct Aggregate {
         since: Instant,
         entries: HashMap<&'static str, (u64, Duration)>,
@@ -130,12 +141,9 @@ pub fn operation<T, F: FnOnce() -> T>(operation: F) -> T {
     thread_local! {
         static TOTALS: RefCell<Aggregate> = RefCell::new(Aggregate { since: Instant::now(), entries: HashMap::new() });
     }
-    let started = Instant::now();
-    let result = operation();
-    let elapsed = started.elapsed();
     TOTALS.with(|totals| {
         let mut totals = totals.borrow_mut();
-        let entry = totals.entries.entry(type_name::<F>()).or_default();
+        let entry = totals.entries.entry(name).or_default();
         entry.0 += 1;
         entry.1 += elapsed;
         if totals.since.elapsed() >= Duration::from_secs(10) {
@@ -148,5 +156,4 @@ pub fn operation<T, F: FnOnce() -> T>(operation: F) -> T {
             totals.since = Instant::now();
         }
     });
-    result
 }

@@ -3,7 +3,7 @@ use crate::asset_store::AssetStore;
 use crate::library::{LibraryHandle, LibraryResources};
 use crate::{BackendError, BookId};
 use client_platform_runtime::{executor, text_search};
-use cpu_host::{BookOperation, CpuHost, IndexText, TextMatches};
+use cpu_contract::{as_cpu_reader, submit_book, BookOperation, CpuHost, IndexText, TextMatches};
 use library_database::{text_search::TextMatchPage, DatabaseClient};
 use library_model::{BookTextMatchPage, BookTextSearchPage, NotebookQuery, NotebookRequest};
 use std::mem;
@@ -83,7 +83,7 @@ async fn pass(session: &LibraryResources) -> Result<(), BackendError> {
 
 async fn book_text<O: BookOperation>(assets: &AssetStore, cpu: &dyn CpuHost, book: BookId, paths: Vec<library_model::RelativeBookPath>, operation: O) -> Result<Option<O::Reply>, BackendError> {
     let Some(reader) = assets.open_book_reader(&book, paths).await.map_err(BackendError::operation)? else { return Ok(None) };
-    cpu_host::submit_book(cpu, operation, cpu_host::as_cpu_reader(reader)).await.map(Some)
+    submit_book(cpu, operation, as_cpu_reader(reader)).await.map(Some)
 }
 
 pub(super) async fn search(db: &DatabaseClient, query: NotebookQuery, request: NotebookRequest) -> Result<Option<BookTextSearchPage>, BackendError> {
@@ -105,7 +105,7 @@ pub(super) async fn resolve_matches(session: &LibraryResources, book: BookId, se
             (storage.database().clone(), reader)
         };
         if let Some(reader) = reader {
-            prepared.page.matches = cpu_host::submit_book(&*session.cpu, TextMatches { format: prepared.format, locations: prepared.locations, query: search }, cpu_host::as_cpu_reader(reader)).await?;
+            prepared.page.matches = submit_book(&*session.cpu, TextMatches { format: prepared.format, locations: prepared.locations, query: search }, as_cpu_reader(reader)).await?;
         } else {
             database.remove_text_match(book, &prepared.revision).await?;
         }

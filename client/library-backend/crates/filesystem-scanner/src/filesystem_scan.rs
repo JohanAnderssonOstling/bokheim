@@ -7,6 +7,8 @@ pub use crate::discovery::is_audiobook_folder;
 use crate::discovery::{audiobook_member, audiobook_tracks, next_book_entry};
 use crate::ingestion::fingerprint as book_fingerprint;
 use crate::ingestion::{READER_EPUB_METADATA_VERSION, READER_PDF_METADATA_VERSION, ingest_audiobook_folder};
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem as fs;
 use futures_util::StreamExt;
 use library_files::asset_store::import_in_progress;
 use std::collections::{HashMap, HashSet};
@@ -15,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use book_model::BookFormat;
+use cpu_contract::CpuHost;
 use library_database::{FilesystemScan, InspectedFilesystemScan, ScanDirectoryObservation, ScanFileObservation, ScanKnownBook, ScanSnapshot, ScannedBook};
 use sync_common::{DirId, ROOT_DIR_ID};
 
@@ -246,13 +249,13 @@ fn retryable(error: &std::io::Error) -> bool {
 /// permits a placement cleanup pass. A book whose metadata cannot be
 /// extracted is left out of this pass entirely (not committed title-less)
 /// and picked up again by a later scan.
-pub async fn inspect(root: impl Into<PathBuf>, scan: &FilesystemScan, snapshot: &ScanSnapshot, host: &Arc<dyn cpu_host::CpuHost>) -> InspectedFilesystemScan {
+pub async fn inspect(root: impl Into<PathBuf>, scan: &FilesystemScan, snapshot: &ScanSnapshot, host: &Arc<dyn CpuHost>) -> InspectedFilesystemScan {
     let known = ScanBookIndex::new(snapshot);
     inspect_files(root, &scan.files, scan.readable, snapshot, &known, host).await
 }
 
 /// Inspect a borrowed batch using the lookup shared by the complete scan.
-pub async fn inspect_files(root: impl Into<PathBuf>, files: &[ScanFileObservation], readable: bool, snapshot: &ScanSnapshot, known: &ScanBookIndex, host: &Arc<dyn cpu_host::CpuHost>) -> InspectedFilesystemScan {
+pub async fn inspect_files(root: impl Into<PathBuf>, files: &[ScanFileObservation], readable: bool, snapshot: &ScanSnapshot, known: &ScanBookIndex, host: &Arc<dyn CpuHost>) -> InspectedFilesystemScan {
     let root = root.into();
     let mut result = InspectedFilesystemScan { readable, ..InspectedFilesystemScan::default() };
     let candidates: Vec<_> = files
@@ -263,7 +266,7 @@ pub async fn inspect_files(root: impl Into<PathBuf>, files: &[ScanFileObservatio
             // audiobooks can reuse complete synced playback facts. Reader-library
             // PDFs retain their supplied metadata and defer reader data to opening.
             // Other legacy records without an inspection must be populated once.
-            let format = if root.join(&file.path).is_dir() { Some(BookFormat::Mp3Folder) } else { BookFormat::from_file_name(&file.name) };
+            let format = if fs::is_dir(&root.join(&file.path)) { Some(BookFormat::Mp3Folder) } else { BookFormat::from_file_name(&file.name) };
             let version = format.map(book_inspection::inspection_version);
             !known.get(snapshot, file.directory, &file.name).is_some_and(|book| {
                 book.fingerprint == file.fingerprint
@@ -288,7 +291,7 @@ pub async fn inspect_files(root: impl Into<PathBuf>, files: &[ScanFileObservatio
                         if import_in_progress(&path) {
                             return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "book publication is still being prepared"));
                         }
-                        let ingested = if path.is_dir() {
+                        let ingested = if fs::is_dir(&path) {
                             if excluded_audiobook_member(path.strip_prefix(&root).unwrap_or(&path), &snapshot.excluded_paths) {
                                 return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "audiobook contains a temporarily excluded file"));
                             }
@@ -348,18 +351,18 @@ mod tests {
     /// Inspection dispatch is unreachable here: fixtures exercise selection and
     /// failure plumbing with the book file absent, so hashing fails first.
     struct FailingHost;
-    impl cpu_host::CpuHost for FailingHost {
-        fn book(&self, _task: cpu_host::BookTask, _reader: cpu_host::BoxedCpuReader) -> client_platform_runtime::executor::BoxedBackendFuture<'_, Result<cpu_host::CpuResponse, client_protocol::BackendError>> {
+    impl cpu_contract::CpuHost for FailingHost {
+        fn book(&self, _task: cpu_contract::BookTask, _reader: cpu_contract::BoxedCpuReader) -> client_platform_runtime::executor::BoxedBackendFuture<'_, Result<cpu_contract::CpuResponse, client_protocol::BackendError>> {
             Box::pin(async { Err("no CPU host in scanner tests".into()) })
         }
-        fn request(&self, _request: cpu_host::CpuRequest) -> client_platform_runtime::executor::BoxedBackendFuture<'_, Result<cpu_host::CpuResponse, client_protocol::BackendError>> {
+        fn request(&self, _request: cpu_contract::CpuRequest) -> client_platform_runtime::executor::BoxedBackendFuture<'_, Result<cpu_contract::CpuResponse, client_protocol::BackendError>> {
             Box::pin(async { Err("no CPU host in scanner tests".into()) })
         }
-        fn generate_thumbnail(&self, _extension: String, _reader: cpu_host::BoxedCpuReader) -> client_platform_runtime::executor::BoxedBackendFuture<'_, Result<Option<cpu_host::ThumbnailBytes>, client_protocol::BackendError>> {
+        fn generate_thumbnail(&self, _extension: String, _reader: cpu_contract::BoxedCpuReader) -> client_platform_runtime::executor::BoxedBackendFuture<'_, Result<Option<cpu_contract::ThumbnailBytes>, client_protocol::BackendError>> {
             Box::pin(async { Err("no CPU host in scanner tests".into()) })
         }
     }
-    fn host() -> Arc<dyn cpu_host::CpuHost> {
+    fn host() -> Arc<dyn cpu_contract::CpuHost> {
         Arc::new(FailingHost)
     }
 
@@ -382,8 +385,8 @@ mod tests {
                 }
                 let database_path = root.path().join(".library.db");
                 let db = Database::open(&database_path).unwrap();
-                db.initialize_library().await.unwrap();
-                let mut snapshot = db.scan_snapshot(book_inspection::inspection_version(book_model::BookFormat::Pdf)).await.unwrap();
+                db.initialize_library().unwrap();
+                let mut snapshot = db.scan_snapshot(book_inspection::inspection_version(book_model::BookFormat::Pdf)).unwrap();
                 let discovery = discover(root.path(), &snapshot);
                 let fingerprint = discovery.files[0].fingerprint;
                 let hash = BookId::from(blake3::hash(b"book"));
@@ -408,11 +411,11 @@ mod tests {
                 };
                 let inspected = InspectedFilesystemScan { readable: true, books: vec![book] };
                 assert_eq!(db.apply_filesystem_scan_batch(&mut snapshot, &discovery, inspected, true, None).unwrap(), ScanApplyResult::Applied);
-                let hash = db.resolve_scanned_content(hash.content_hash().unwrap(), None).await.unwrap();
+                let hash = db.resolve_scanned_content(hash.content_hash().unwrap(), None).unwrap();
                 if remove_last_placement {
                     assert!(db.remove_book_placement(&hash, &ROOT_DIR_ID).unwrap());
                 } else {
-                    db.trash_book(&hash).await.unwrap();
+                    db.trash_book(&hash).unwrap();
                 }
                 drop(db);
 

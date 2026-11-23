@@ -11,6 +11,9 @@ use std::num::NonZeroU64;
 pub mod api;
 pub mod storage;
 pub use protobuf_wire as transport;
+pub use protobuf_wire::typed as http;
+mod http_contracts;
+mod http_notifications;
 pub use wire;
 mod protocol;
 mod transport_fields;
@@ -40,16 +43,19 @@ pub type FileName = String;
 /// The canonical root directory. No generated directory can collide with nil.
 pub const ROOT_DIR_ID: DirId = uuid::Uuid::nil();
 
+/// Stored-state format required by this release, independent of HTTP and SQL schema versions.
+/// The payload schema and conversion remain client-owned; the relay uses this only for readiness.
+pub const STATE_STORAGE_VERSION: u32 = 34;
+
 /// Maximum encoded size of a synchronized JPEG cover.
 pub const MAX_THUMBNAIL_BYTES: u64 = 4 * 1024 * 1024;
-/// Decoded-byte budget for a pull page, without a separate change-count cap.
-/// Reserve 512 KiB below the hard response limit for the outer envelope and
-/// push rejections. HTTP compression determines the transferred byte count.
-pub const MAX_PULL_BATCH_BYTES: usize = transport::MAX_DECODED_RESPONSE_BYTES - 512 * 1024;
+/// A small pull-page budget bounds transient memory on constrained devices.
+/// The delivery allowance also bounds the number of entries below 4096.
+pub const MAX_PULL_BATCH_BYTES: usize = 4 * 1024 * 1024;
 /// Fixed protobuf wrapper allowance; variable-length fields are counted too.
 pub const STATE_DELIVERY_OVERHEAD_BYTES: usize = 1_024;
 pub const MAX_PUSH_MUTATIONS: usize = 1_000;
-/// Target ceiling for the encoded mutations in one push request.
+/// Ceiling for a complete encoded push/exchange request, including its cursor.
 pub const MAX_PUSH_BATCH_BYTES: usize = 4 * 1024 * 1024;
 /// Admission bound shared by the generic service and domain clients.
 pub const MAX_LWW_FUTURE_SKEW_MS: u64 = 5 * 60 * 1_000;
@@ -223,6 +229,17 @@ pub struct Publication<T> {
     pub state: Versioned<T>,
 }
 
+impl<T: StatePayload> Publication<T> {
+    /// Encode the domain value once and move the existing version into the envelope.
+    pub fn into_opaque(self) -> Result<OpaquePublication, transport::WireError> {
+        if self.state.version.changed_at > i64::MAX as u64 {
+            return Err(transport::WireError::Decode("timestamp exceeds storage range".into()));
+        }
+        self.state.value.validate_version(&self.state.version)?;
+        Ok(Publication { publisher_seq: self.publisher_seq, state: Versioned { value: self.state.value.into_entry()?, version: self.state.version } })
+    }
+}
+
 /// The only representation needed by the service: an open state address, the
 /// book the value belongs to, and the opaque serialized domain value. A purge
 /// removes every value of its book; a book lifecycle holds the book's bytes
@@ -239,7 +256,7 @@ pub struct OpaqueStateEntry {
 
 impl OpaqueStateEntry {
     pub fn delivery_byte_budget(&self) -> usize {
-        self.bytes.len().saturating_add(self.address.kind.len()).saturating_add(self.address.entity_key.as_bytes().len()).saturating_add(self.address.entity_subkey.len()).saturating_add(STATE_DELIVERY_OVERHEAD_BYTES)
+        self.address.delivery_byte_budget(self.bytes.len())
     }
 }
 
@@ -252,11 +269,27 @@ pub trait StatePayload: Serialize + serde::de::DeserializeOwned + Sized {
     fn validate_version(&self, _: &VersionKey) -> Result<(), transport::WireError> {
         Ok(())
     }
+    /// Produce the opaque payload directly, without a generic Serde value tree.
+    fn encode_entry(&self) -> Result<OpaqueStateEntry, transport::WireError>;
+    fn into_entry(self) -> Result<OpaqueStateEntry, transport::WireError> {
+        self.encode_entry()
+    }
+    /// Interpret an already-decoded envelope without re-packing its payload.
+    fn decode_entry(entry: &OpaqueStateEntry) -> Result<Self, transport::WireError>;
     fn serialize_entry<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error>;
     fn deserialize_entry<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error>;
 }
 
 impl StatePayload for OpaqueStateEntry {
+    fn encode_entry(&self) -> Result<OpaqueStateEntry, transport::WireError> {
+        Ok(self.clone())
+    }
+    fn into_entry(self) -> Result<OpaqueStateEntry, transport::WireError> {
+        Ok(self)
+    }
+    fn decode_entry(entry: &OpaqueStateEntry) -> Result<Self, transport::WireError> {
+        Ok(entry.clone())
+    }
     fn serialize_entry<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         transport_fields::opaque::serialize(self, serializer)
     }
@@ -271,18 +304,10 @@ pub mod state_encoding {
     use super::*;
 
     pub fn serialize<T: StatePayload, S: serde::Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
-        if serializer.is_human_readable() {
-            value.serialize_entry(serializer)
-        } else {
-            value.serialize(serializer)
-        }
+        if serializer.is_human_readable() { value.serialize_entry(serializer) } else { value.serialize(serializer) }
     }
     pub fn deserialize<'de, T: StatePayload, D: serde::Deserializer<'de>>(deserializer: D) -> Result<T, D::Error> {
-        if deserializer.is_human_readable() {
-            T::deserialize_entry(deserializer)
-        } else {
-            T::deserialize(deserializer)
-        }
+        if deserializer.is_human_readable() { T::deserialize_entry(deserializer) } else { T::deserialize(deserializer) }
     }
 
     /// Unknown kinds are retained by the relay and skipped by older domain clients.
@@ -290,7 +315,12 @@ pub mod state_encoding {
         if !T::recognizes_kind(&state.value.address.kind) {
             return Ok(None);
         }
-        transport::representation(state).map(Some)
+        if state.version.changed_at > i64::MAX as u64 {
+            return Err(transport::WireError::Decode("timestamp exceeds storage range".into()));
+        }
+        let value = T::decode_entry(&state.value)?;
+        value.validate_version(&state.version)?;
+        Ok(Some(Versioned { value, version: state.version.clone() }))
     }
 }
 
@@ -413,6 +443,19 @@ pub struct StateAddress {
     pub entity_subkey: String,
 }
 
+impl StateAddress {
+    /// Matches the relay's SQL page accounting, including variable address bytes.
+    pub fn delivery_byte_budget(&self, payload_bytes: usize) -> usize {
+        payload_bytes.saturating_add(self.kind.len()).saturating_add(self.entity_key.as_bytes().len()).saturating_add(self.entity_subkey.len()).saturating_add(STATE_DELIVERY_OVERHEAD_BYTES)
+    }
+
+    /// Reserve address bytes and the wrapper allowance before admitting a value.
+    /// The allowance also covers a single publication and exchange request cursor.
+    pub fn payload_byte_limit(&self) -> usize {
+        MAX_PULL_BATCH_BYTES.min(MAX_PUSH_BATCH_BYTES).saturating_sub(self.delivery_byte_budget(0))
+    }
+}
+
 fn deserialize_library_cursor<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<LibraryRevision>, D::Error> {
     match Option::<u64>::deserialize(deserializer)? {
         None | Some(0) => Ok(None),
@@ -433,8 +476,12 @@ impl<'de> Deserialize<'de> for StateAddress {
         }
         let Address { kind, mut entity_key, entity_subkey } = Address::deserialize(deserializer)?;
         if state_key::book_kind(&kind) {
-            if let StateKey::Text(text) = entity_key { entity_key = StateKey::Book(text.parse().map_err(serde::de::Error::custom)?); }
-        } else if matches!(entity_key,StateKey::Book(_)) { return Err(serde::de::Error::custom("text register requires a text key")); }
+            if let StateKey::Text(text) = entity_key {
+                entity_key = StateKey::Book(text.parse().map_err(serde::de::Error::custom)?);
+            }
+        } else if matches!(entity_key, StateKey::Book(_)) {
+            return Err(serde::de::Error::custom("text register requires a text key"));
+        }
         Ok(Self { kind, entity_key, entity_subkey })
     }
 }

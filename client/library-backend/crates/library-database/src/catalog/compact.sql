@@ -1,3 +1,9 @@
+-- Format 11 snapshots may omit duration metadata. Normalize the optional
+-- relation before creating the browse view that joins it.
+CREATE TABLE IF NOT EXISTS book_audiobook_duration(
+ book_row_id INTEGER PRIMARY KEY REFERENCES book(row_id),
+ duration_ms INTEGER NOT NULL CHECK(duration_ms>0)
+) STRICT;
 CREATE TABLE catalog_browse_revision(
  singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL,
  release_id INTEGER NOT NULL,format_version INTEGER NOT NULL,taxonomy_revision TEXT NOT NULL
@@ -25,3 +31,7 @@ CREATE TABLE catalog_browse_concept(book_row_id INTEGER NOT NULL,concept_id INTE
 
 -- Author pages seek memberships by author; the source primary key starts with book.
 CREATE INDEX IF NOT EXISTS catalog_author_books ON book_author(author_row_id,book_row_id);
+
+-- Source credits for one book seek the entry bindings in either direction.
+CREATE INDEX IF NOT EXISTS catalog_source_hosted ON source_entry(hosted_row_id) WHERE hosted_row_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS catalog_source_external ON source_entry(external_row_id) WHERE external_row_id IS NOT NULL;

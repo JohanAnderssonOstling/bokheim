@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bokheim · Compact browser settings</title>
+  <style>
+    @font-face { font-family: NVGaramond; src: url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf'); }
+    @font-face { font-family: NVJost; src: url('../../desktop-gpui/assets/fonts/NV_Jost-Regular.ttf'); }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    :root { color-scheme: light; --ink: #171714; --paper: #fff; --rule: #aaa9a3; --muted: #605f57; }
+    body { margin: 0; background: #efeee9; color: var(--ink); font: 15px/1.45 NVJost, sans-serif; }
+    button, select { font: inherit; color: inherit; }
+    button, summary { cursor: pointer; }
+    button:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+    main { max-width: 1320px; margin: auto; padding: 28px 32px; }
+    .masthead { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--rule); padding-bottom: 20px; }
+    .eyebrow { text-transform: uppercase; letter-spacing: .13em; font-size: 11px; color: var(--muted); }
+    h1 { font: 36px/1.1 NVGaramond, serif; margin: 8px 0 0; }
+    .masthead p { margin: 0; color: var(--muted); font-size: 13px; }
+    .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; margin: 20px 0 16px; }
+    .tools label { display: flex; align-items: center; gap: 10px; }
+    select, .tools button { min-height: 40px; padding: 6px 12px; border: 1px solid var(--rule); background: transparent; border-radius: 3px; }
+    .proposals { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
+    .proposals button { flex: 1 1 190px; min-height: 62px; text-align: left; border: 1px solid var(--rule); border-radius: 3px; padding: 9px 14px; background: transparent; }
+    .proposals small { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .proposals [aria-pressed=true] { background: var(--paper); border-color: var(--ink); box-shadow: inset 0 -2px var(--ink); }
+    .workbench { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 32px; align-items: start; }
+    .preview { min-width: 0; }
+    .preview-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-bottom: 10px; font-size: 12px; color: var(--muted); }
+    .stage { position: relative; width: 100%; }
+    .screen { --ui: 16px; --target: calc(var(--ui) * 3); --inset: 16px; --gap: 16px; --tile-height: 70px; position: absolute; top: 0; left: 50%; transform-origin: top center; width: 632px; height: 840px; display: flex; flex-direction: column; overflow: hidden; border: 1px solid #777; background: var(--paper); color: #111; font: var(--ui)/1.3 NVGaramond, serif; }
+    .screen button, .screen summary { background: var(--paper); border: 0; border-radius: 0; min-height: var(--target); font: inherit; }
+    .screen button:hover:enabled, .screen summary:hover { background: #f0efeb; }
+    .screen button:disabled { color: #888; cursor: default; }
+    .screen [aria-pressed=true] { box-shadow: inset 0 -2px #111; }
+    .screen-header { flex: none; display: flex; align-items: center; gap: 12px; padding: 0 var(--inset); min-height: 56px; border-bottom: 1px solid var(--rule); }
+    .screen-header strong { font-weight: 400; font-feature-settings: 'smcp' 1, 'c2sc' 1; }
+    .device { margin-left: auto; font-size: .875em; }
+    .screen-header .close { width: var(--target); padding: 0; font-size: 1.5em; }
+    .scroller { min-height: 0; flex: 1; overflow: auto; scrollbar-width: none; }
+    .scroller::-webkit-scrollbar { display: none; }
+    .settings { width: 100%; }
+    .setting-group { padding: var(--inset); border-bottom: 1px solid var(--rule); display: flex; flex-direction: column; gap: var(--gap); }
+    .fields { display: flex; flex-wrap: wrap; gap: var(--gap); align-items: start; width: 100%; }
+    .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; max-width: 100%; flex: 1 1 max-content; }
+    .name { font-size: .875em; color: #555; font-feature-settings: 'smcp' 1, 'c2sc' 1; }
+    .picture-fields > .field { flex-basis: calc(var(--ui) * 20); }
+    .steps > .field { flex-basis: calc(var(--ui) * 11); }
+    .spacing > .field { flex-basis: calc(var(--ui) * 15); }
+    .choices { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(max-content, 1fr); min-width: 0; width: 100%; border: 1px solid var(--rule); border-radius: 3px; overflow: hidden; }
+    .choices > button { min-width: var(--target); padding: 3px 8px; border-right: 1px solid var(--rule); }
+    .choices > button:last-child { border-right: 0; }
+    .pictures { border: 0; gap: 8px; overflow: visible; }
+    .pictures > button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: max(var(--target), var(--tile-height)); border: 1px solid var(--rule); border-radius: 3px; padding: 4px; }
+    .pictures > button:last-child { border-right: 1px solid var(--rule); }
+    .pictures > [aria-pressed=true] { outline: 1px solid #111; outline-offset: -2px; box-shadow: none; }
+    .sample { font-size: 1.5em; height: 1.5em; display: flex; align-items: center; }
+    .sample.sans { font-family: NVJost, sans-serif; }
+    .picture { width: 2.25em; height: 2.25em; }
+    .stepper { display: flex; align-items: stretch; min-width: 0; width: 100%; border: 1px solid var(--rule); border-radius: 3px; }
+    .stepper > button { flex: 0 0 var(--target); padding: 0; font-size: 1.25em; }
+    .stepper output { flex: 1 1 calc(var(--ui) * 3.5); min-width: calc(var(--ui) * 3); display: flex; align-items: center; justify-content: center; padding: 0 4px; white-space: nowrap; }
+    .override { display: flex; align-items: stretch; gap: 8px; min-width: 0; }
+    .override > .choices { flex: 0 0 auto; width: auto; }
+    .override .stepper { flex: 1; }
+    .override .book-options { min-height: max(var(--target), var(--tile-height)); }
+    .book-options > button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 4px; }
+    .stepper > .tile-value { flex: 1 1 calc(var(--ui) * 3.5); min-width: calc(var(--ui) * 3); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 4px; font-size: 1em; }
+    .tile-value .picture, .book-options .picture, .value-menu .picture { flex: none; }
+    .ruler > .field:first-child { flex-grow: 2; }
+    .ruler > .field:last-child { flex: 1 1 calc(var(--ui) * 11); }
+    .ruler .choices button { padding-inline: 8px; }
+    .bottom { flex: none; min-height: 60px; display: flex; align-items: stretch; border-top: 1px solid var(--rule); }
+    .bottom button { flex: 1; min-width: 0; padding: 6px 4px; font-size: .875em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .trim, .inline, .value { --inset: 12px; --gap: 10px; }
+    .inline .picture-fields > .field, .value .picture-fields > .field { flex-basis: max-content; }
+    .inline .pictures > button, .value .pictures > button { flex-direction: row; gap: 4px; min-height: var(--target); }
+    .inline .pictures, .value .pictures { gap: 6px; }
+    .inline .sample, .value .sample { font-size: 1.25em; height: auto; }
+    .inline .pictures [data-choice="Custom"] .sample, .value .pictures [data-choice="Custom"] .sample { display: none; }
+    .inline .picture, .value .picture { width: 1.25em; height: 1.25em; }
+    .inline .book-options, .value .book-options { min-height: var(--target); }
+    .inline .book-options > button, .inline .stepper > .tile-value { flex-direction: row; gap: 4px; }
+    .inline .spacing > .field:has(.override) { flex-basis: max-content; }
+    .inline .stepper > .tile-value { min-width: max-content; }
+    .value .spacing > .field { flex-basis: calc(var(--ui) * 11); }
+    .value-menu { position: relative; flex: 1 1 calc(var(--ui) * 3.5); min-width: calc(var(--ui) * 3); }
+    .value-menu > summary { list-style: none; height: 100%; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 0 4px; white-space: nowrap; }
+    .value-menu > summary::-webkit-details-marker { display: none; }
+    .value-menu > summary::after { content: '⌄'; color: #555; font-size: .75em; }
+    .value-menu .menu { position: absolute; top: calc(100% + 4px); left: 50%; transform: translateX(-50%); z-index: 5; min-width: max-content; border: 1px solid #555; background: var(--paper); box-shadow: 0 3px 8px #0002; padding: 4px; }
+    .value-menu .menu button { display: block; width: 100%; text-align: left; padding: 4px 12px; }
+    .value-menu .menu button[aria-pressed=true] { box-shadow: none; text-decoration: underline; text-underline-offset: 5px; }
+    .inactive output { color: #888; }
+    .metrics { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 12px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    aside h2 { font: 30px/1.1 NVGaramond, serif; margin: 7px 0 14px; }
+    aside p { margin: 12px 0; font-size: 14px; }
+    aside .tradeoff { border-top: 1px solid var(--rule); padding-top: 12px; color: var(--muted); }
+    .comparison { border-collapse: collapse; width: 100%; margin: 24px 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+    .comparison caption { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .1em; padding-bottom: 10px; color: var(--muted); }
+    .comparison th, .comparison td { text-align: left; padding: 9px 0; border-bottom: 1px solid #cfcec8; font-weight: 400; }
+    .comparison th:last-child, .comparison td:last-child { text-align: right; }
+    .comparison tr.active td { font-weight: 500; }
+    .recommendation { border-left: 2px solid var(--ink); padding-left: 14px; }
+    .notes { max-width: 940px; font-size: 12px; color: var(--muted); margin-top: 24px; }
+    .notes a { color: inherit; }
+    .measure { position: fixed !important; left: -20000px !important; top: 0; visibility: hidden; transform: none !important; pointer-events: none; }
+    @media(max-width: 1050px) { .workbench { grid-template-columns: 1fr; } aside { max-width: 700px; } }
+    @media(max-width: 650px) { main { padding: 20px 14px; } h1 { font-size: 30px; } .proposals button { flex-basis: 40%; padding: 8px; } }
+
+    .screen { --ui: 16px; --target: calc(var(--ui) * 3); --inset: 16px; --section-gap: 32px; }
+    .screen.desktop { --target: calc(var(--ui) * 2); }
+    .screen button, .screen select, .screen input { font: inherit; }
+    .screen button, .screen select { min-height: var(--target); }
+    .screen input[type=checkbox] { width: 1.125em; height: 1.125em; accent-color: #171714; }
+    .screen select { min-width: 0; max-width: 100%; border: 1px solid var(--rule); border-radius: 3px; background: white; padding: 4px 10px; }
+    .setting-scroll { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: #aaa white; }
+    .settings-page { width: 100%; max-width: 640px; margin: auto; padding: 24px var(--inset); display: flex; flex-direction: column; gap: var(--section-gap); }
+    .settings-flow { display: flex; flex-direction: column; gap: var(--section-gap); min-width: 0; }
+    .settings-section { min-width: 0; }
+    .section-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; min-height: calc(var(--target) + 16px); }
+    .section-heading h2 { font-size: 1.375em; font-weight: 400; margin: 0; }
+    .section-actions { display: flex; flex-wrap: wrap; gap: 8px; max-width: 100%; }
+    .action { min-width: var(--target); max-width: 100%; border: 1px solid var(--rule) !important; border-radius: 3px !important; padding: 4px 10px; }
+    .preferences { display: flex; flex-direction: column; min-width: 0; }
+    .pref-run { display: contents; }
+    .pref { min-width: 0; max-width: 100%; padding: 8px 0; border-top: 1px solid var(--rule); display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+    .pref:first-child { border-top: 0; }
+    .pref-title { font-size: .875em; color: #555; }
+    .pref > .choice-control, .pref > .type-control, .pref > .power-control, .pref > .palette { flex: 0 1 calc(var(--ui) * 15); width: calc(var(--ui) * 15); }
+    .choice-control, .type-control, .power-control { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0,1fr); min-width: 0; max-width: 100%; border: 1px solid var(--rule); border-radius: 3px; overflow: hidden; }
+    .choice-control button, .power-control button { min-width: 0; padding: 4px 8px; border-right: 1px solid var(--rule); }
+    .choice-control button:last-child { border: 0; }
+    .type-control { display: flex; flex-wrap: wrap; gap: 6px; border: 0; overflow: visible; }
+    .type-control button { flex: 1 1 auto; min-width: var(--target); max-width: 100%; display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 4px; border: 1px solid var(--rule); border-radius: 3px; padding: 4px; }
+    .type-control button > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .type-control .aa { font-size: 1.25em; flex: none; }
+    .type-control .sans { font-family: NVJost, sans-serif; }
+    .power-control { grid-auto-flow: row; grid-template-columns: repeat(2,minmax(0,1fr)); grid-auto-columns: auto; gap: 1px; background: var(--rule); border-color: var(--rule); }
+    .power-control button { border: 0; white-space: normal; }
+    .font-stepper { display: flex; align-items: stretch; border: 1px solid var(--rule); border-radius: 3px; min-width: calc(var(--ui) * 10); }
+    .font-stepper button { flex: 0 0 var(--target); padding: 0; font-size: 1.25em; }
+    .font-stepper output { flex: 1; min-width: calc(var(--ui) * 3.5); display: flex; justify-content: center; align-items: center; padding: 0 4px; }
+    .palette { display: flex; gap: 8px; justify-content: space-between; }
+    .palette button { min-width: var(--target); min-height: var(--target); font-size: 1.25em; border: 1px solid var(--rule); }
+    .palette button:nth-child(2) { color: #333; background: #f1f4f7; }
+    .palette button:nth-child(3) { color: #e9e2cf; background: #292720; }
+    .palette button:nth-child(4) { color: #e5ebee; background: #24282d; }
+    .dictionary-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0; }
+    .dictionary-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; border-top: 1px solid var(--rule); padding: 8px 0; }
+    .dictionary-name { display: flex; flex: 1 1 calc(var(--ui) * 8); min-width: 0; gap: 8px; align-items: center; min-height: var(--target); }
+    .subtle { font-size: .875em; color: #555; }
+    .dictionary-row .subtle { white-space: nowrap; }
+    .dictionary-name .subtle { white-space: normal; }
+    .dictionary-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+    .dictionary-tools img { width: 1.125em; height: 1.125em; vertical-align: middle; }
+    .dictionary-tools button:disabled img { opacity: .35; }
+    .dictionary-detail { flex-basis: 100%; padding: 12px; font-size: .875em; }
+    .icon-action { width: var(--target); min-width: var(--target); padding: 0; }
+    .account-body { padding: 8px 0; display: flex; flex-direction: column; gap: 12px; }
+    .screen button.identity-avatar { flex: none; width: max(2.5em,var(--target)); height: max(2.5em,var(--target)); display: flex; align-items: center; justify-content: center; background: white; color: #111; border: 1px solid #111; padding: 0; }
+    .screen button.identity-avatar:hover:enabled { background: #eee; }
+    .screen.desktop button.identity-avatar, .screen.phone button.identity-avatar { background: #466654; color: white; border-color: #466654; }
+    .screen.desktop button.identity-avatar:hover:enabled, .screen.phone button.identity-avatar:hover:enabled { background: #385443; }
+    .account-header-identity { display: flex; align-items: center; justify-content: end; gap: 12px; min-width: 0; max-width: 100%; }
+    .account-header-email { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .875em; }
+    .section-heading:has(.account-header-identity) { flex-wrap: nowrap; }
+    .section-actions:has(.account-header-identity) { flex: 1; min-width: 0; justify-content: end; }
+    .account-menu-actions { display: flex; flex-direction: column; gap: 8px; }
+    .account-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+    .quota { display: flex; flex-direction: column; gap: 8px; }
+    .quota-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+    .meter { height: 5px; background: #e3e2dc; }
+    .meter > span { display: block; width: 24%; height: 100%; background: #333; }
+    .breakdown { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; font-size: .875em; }
+    .summary-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+    .summary-row p { margin: 0; }
+    .summary-control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .usage { padding: 8px 0; font-size: .875em; color: #555; }
+    .danger-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; border-top: 1px solid var(--rule); padding-top: 12px; margin-top: 8px; }
+    .library-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .library-table { width: 100%; border-collapse: collapse; }
+    .library-table th, .library-table td { text-align: left; padding: 10px 0; border-bottom: 1px solid var(--rule); font-weight: 400; }
+    .library-table th { color: #555; font-size: .875em; }
+    .library-table td:first-child { min-width: 0; overflow-wrap: anywhere; }
+    .library-table td:last-child, .library-table th:last-child { text-align: right; }
+    .library-sync { display: inline-flex; align-items: center; gap: 6px; min-height: var(--target); }
+    .library-list { min-width: 0; overflow-x: auto; }
+    .library-line { display: grid; grid-template-columns: minmax(8em,1fr) 6.5em 9em 5em var(--target); gap: 12px; align-items: center; padding: 12px 0; border-top: 1px solid var(--rule); min-width: 0; }
+    .library-heading { font-feature-settings: 'smcp' 1, 'c2sc' 1; }
+    .library-heading > span { font-size: .875em; }
+    .library-line > :not(:first-child) { text-align: center; }
+    .library-summary { display: contents; }
+    .library-size { text-align: center; }
+    .library-name { min-width: 0; overflow-wrap: anywhere; }
+    .library-name strong { font-weight: 500; }
+    .library-path { display: block; margin-top: 4px; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; font-size: .875em !important; }
+    .library-status { display: flex; align-items: center; justify-content: center; gap: 6px; font-size: .75em; }
+    .library-status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #777; flex: none; }
+    .library-cloud { display: flex; justify-content: center; align-items: center; min-height: var(--target); }
+    .library-location { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 12px; }
+    .library-location .action { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+    .library-list.compact .library-line { grid-template-columns: minmax(3.5em,1fr) 4em minmax(3.5em,1fr) max(3em,var(--target)) var(--target); min-width: calc(11em + max(3em,var(--target)) + var(--target) + 32px); gap: 8px; }
+    .library-list.compact .library-summary { display: contents; }
+    .library-list.compact .library-name { grid-column: 1; grid-row: 1; text-align: left; }
+    .library-list.compact .library-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .library-list.compact .library-size { grid-column: 2; grid-row: 1; text-align: center; white-space: nowrap; }
+    .library-list.compact .library-status { grid-column: 3; grid-row: 1; min-width: 0; }
+    .library-status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .library-list.compact .library-cloud { grid-column: 4; grid-row: 1; }
+    .library-list.compact .library-more { grid-column: 5; grid-row: 1; }
+    .account-storage-tabs { display: inline-grid; grid-auto-columns: minmax(0,1fr); max-width: 100%; align-self: start; }
+    .account-storage-tabs button { white-space: normal; }
+    .account-form { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+    .account-form input { width: 100%; min-height: var(--target); padding: 8px; border: 1px solid var(--rule); background: white; }
+    .quota-breakdown { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 8px 12px; font-size: .875em; }
+    .quota-breakdown.books { grid-template-columns: minmax(0,1fr) auto; }
+    .platform-tabs { display: flex; border-bottom: 1px solid var(--rule); flex: none; }
+    .platform-tabs button { flex: 1; min-width: 0; }
+    .sidebar-nav { flex: none; display: none; width: 144px; padding: 16px 12px; border-right: 1px solid var(--rule); }
+    .sidebar-nav button { width: 100%; text-align: left; display: block; padding: 4px 8px; }
+    .desktop .sidebar-nav { display: block; }
+    .screen-workspace { display: flex; flex: 1; min-height: 0; }
+    .screen-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    .notice { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--rule); padding: 10px 0; }
+    .paired, .columns, .summaries { --inset: 12px; --section-gap: 20px; }
+    .paired .settings-page, .columns .settings-page, .summaries .settings-page { max-width: 1080px; padding-top: 12px; padding-bottom: 12px; }
+    .paired .section-heading, .columns .section-heading, .summaries .section-heading { min-height: 28px; padding: 0 0 8px; }
+    .paired .section-heading h2, .columns .section-heading h2, .summaries .section-heading h2 { font-size: 1.125em; font-feature-settings: 'smcp' 1, 'c2sc' 1; }
+    .paired .preferences, .columns .preferences, .summaries .preferences { flex-direction: row; flex-wrap: wrap; align-items: start; gap: 10px; }
+    .paired .pref-run, .columns .pref-run, .summaries .pref-run { display: flex; flex-wrap: wrap; align-items: start; gap: 10px; width: 100%; min-width: 0; }
+    .paired .pref, .columns .pref, .summaries .pref { flex: 1 1 max-content; flex-direction: column; align-items: stretch; justify-content: start; gap: 4px; padding: 0; border: 0; }
+    .paired .pref-title, .columns .pref-title, .summaries .pref-title { font-feature-settings: 'smcp' 1, 'c2sc' 1; }
+    .paired .pref > *, .columns .pref > *, .summaries .pref > * { flex: none; width: auto; }
+    .paired .pref .choice-control, .columns .pref .choice-control, .summaries .pref .choice-control { grid-auto-columns: minmax(max-content,1fr); }
+    .paired .type-control button, .columns .type-control button, .summaries .type-control button { flex-direction: row; gap: 4px; }
+    .paired .pref[data-pref=typeface], .columns .pref[data-pref=typeface], .summaries .pref[data-pref=typeface] { flex-basis: max-content; }
+    .paired .pref[data-pref=fontSize], .columns .pref[data-pref=fontSize], .summaries .pref[data-pref=fontSize] { flex-basis: calc(var(--ui) * 10); }
+    .paired .pref:has(.power-control), .columns .pref:has(.power-control) { flex-basis: calc(var(--ui) * 15); }
+    .paired .power-control, .columns .power-control { grid-template-columns: repeat(3,minmax(0,1fr)); }
+    .paired .dictionary-actions, .columns .dictionary-actions, .summaries .dictionary-actions { padding: 0; }
+    .paired .dictionary-row, .columns .dictionary-row, .summaries .dictionary-row { padding: 4px 0; }
+    .columns .settings-flow { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,360px),1fr)); gap: 20px; align-items: start; }
+    .columns .library-dictionary-row .section-heading { min-height: calc(var(--target) + 8px); }
+    .column-stack { min-width: 0; display: flex; flex-direction: column; gap: 20px; }
+    .summaries .summary-row { min-height: var(--target); }
+    .summaries .power-select { width: 100%; }
+    .screen-dialog { position: absolute; z-index: 4; inset: 0; background: #0003; display: flex; align-items: center; justify-content: center; padding: 16px; }
+    .screen-dialog .dialog { background: white; border: 1px solid #777; padding: 16px; width: min(100%,440px); max-height: 90%; overflow: hidden; display: flex; flex-direction: column; gap: 12px; }
+    .screen-dialog.account-sheet { align-items: flex-end; padding: 0; }
+    .screen-dialog.account-sheet .dialog { width: 100%; max-height: 80%; border-bottom: 0; }
+    .screen-dialog.account-popover { display: block; padding: 0; background: transparent; }
+    .screen-dialog.account-popover .dialog { position: absolute; width: min(20em,calc(100% - 32px)); }
+    .screen-dialog h2 { font-size: 1.125em; font-weight: 400; margin: 0; }
+    .screen-dialog p { margin: 0; }
+    .dialog-header { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; }
+    .dialog-header h2 { min-width: 0; }
+    .dialog-close { flex: none; }
+    .dialog-close img { width: 1.125em; height: 1.125em; vertical-align: middle; }
+    .dialog-body { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
+    .mock-message { padding: 8px; border: 1px solid var(--rule); font-size: .875em; }
+    .keyboard-rows { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 10px; }
+    .keyboard-rows span { padding-block: 8px; }
+    .screen.phone .library-table th:nth-child(2), .screen.phone .library-table td:nth-child(2) { display: none; }
+    @media(max-width: 1050px) { .workbench { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<main id="browser-settings-study">
+  <header class="masthead"><div><div class="eyebrow">Bokheim / browser settings / layout study</div><h1>A shorter route through settings.</h1></div><p>Interactive proposals · Sample values</p></header>
+  <div class="tools">
+    <label>View <select id="viewport"><option value="portrait">Kobo · portrait</option><option value="landscape">Kobo · landscape</option><option value="desktop">Desktop</option><option value="phone">Phone · Android</option></select></label>
+    <label>Text size <select id="text-size"><option>16</option><option>20</option><option>24</option></select></label>
+    <label>Account <select id="account-state"><option value="in">Signed in</option><option value="out">Signed out</option></select></label>
+    <label><input type="checkbox" id="show-update"> Update available</label>
+    <button id="reset" type="button">Reset sample</button>
+  </div>
+  <nav class="proposals" aria-label="Browser settings proposals">
+    <button type="button" data-variant="baseline" aria-pressed="false">Current structure<small>One column · labels on the left</small></button>
+    <button type="button" data-variant="paired" aria-pressed="true">A · Paired controls<small>Headings above · shared full-width rows</small></button>
+    <button type="button" data-variant="columns" aria-pressed="false">B · Parallel sections<small>A + use the width in landscape</small></button>
+    <button type="button" data-variant="summaries" aria-pressed="false">C · Compact summaries<small>A + expand the less-used details</small></button>
+  </nav>
+  <div class="workbench">
+    <section class="preview" aria-label="Browser settings mockup">
+      <div class="preview-meta"><span id="dimensions"></span><span id="scale"></span></div>
+      <div class="stage"><div id="screen" class="screen paired"></div></div>
+      <div class="metrics" aria-live="polite"><span id="visible"></span><span id="scroll"></span><span id="target"></span></div>
+    </section>
+    <aside>
+      <div class="eyebrow" id="proposal-label"></div><h2 id="proposal-title"></h2><div id="proposal-copy"></div>
+      <table class="comparison"><caption>Content height · selected view</caption><thead><tr><th>Proposal</th><th>Height</th><th>Saved</th></tr></thead><tbody id="comparison"></tbody></table>
+      <p class="recommendation">Start with A. Add B on wide screens if you prefer more sections visible together. C trades fewer rows for an extra tap.</p>
+      <p class="notes">Appearance stays first. Dictionaries follow Libraries when stacked. B places them side by side when space allows. Change text size or import a sample dictionary to see how the layout grows. “Cloud” controls book-file storage, separately from library sync status.</p>
+    </aside>
+  </div>
+  <p class="notes">Controls checked against <a href="../../browser/src/universal/settings.rs">Settings</a>, <a href="../../browser/src/universal/sync/view.rs">Account and Libraries</a>, and <a href="../../dictionary-settings/src/lib.rs">Dictionaries</a>. Text search is always enabled and has no settings section. Values and account data are examples. Proposal C adds disclosure controls around existing settings; it adds no new library actions. Counts and heights describe this mockup, not GPUI. Touch targets are 48px and desktop targets 32px at 16px text. Every action changes sample data only. <a href="kobo-settings-compactness.html">Reader compactness study</a>.</p>
+</main>
+<script>
+(() => {
+  const root = document.getElementById('browser-settings-study'), screen = root.querySelector('#screen');
+  const views = { portrait:[632,840,'Kobo Libra 2 · portrait'], landscape:[840,632,'Kobo Libra 2 · landscape'], desktop:[1200,820,'Desktop'], phone:[390,844,'Android phone'] };
+  const defaults = { coverText:'Always', covers:'Book art', typeface:'Serif', animations:'On', sleep:15, power:0, palette:0 };
+  let values={...defaults}, variant='paired', view='portrait', ui=16, signedIn=true, update=false, keyboard=false, message='', expanded=new Set(), storageTab='libraries', dictionaryDetails=null, customFont=null;
+  const initialDictionaries=[{name:'English',language:'English definitions'},{name:'Svenska',language:'Swedish definitions'}];
+  const initialLibraries=[{name:'Fiction',size:'180 MB',status:'Up to date',cloud:true},{name:'Reference',size:'42 MB',status:'Changes pending',cloud:true},{name:'Travel',size:'18 MB',status:'Local storage',cloud:false}];
+  let dictionaries=initialDictionaries.map(d=>({...d})), libraries=initialLibraries.map(l=>({...l}));
+  const descriptions={
+    baseline:['Reference','The current structure.','<p>A centred column up to 640px wide. Each label sits beside its control when space permits. Sections, dictionary actions and power-option grids stack vertically.</p><p class="tradeoff">Faithful to the structure and option sets; embedded forms and sample account data are simplified.</p>'],
+    paired:['Proposal A · Recommended','Pair the settings, keep the choices.','<p>Use small-caps headings above controls, 12px outer insets and 10px gaps between paired settings. Cover text and cover art share a row; typeface and font size can share the next.</p><p>Put dictionary actions in the section header. Show the six sleep and power-off options in three columns, pairing the two controls when they fit.</p><p class="tradeoff">All common options remain visible. Long labels and larger text can move controls to their own row.</p>'],
+    columns:['Proposal B','Let the sections share the width.','<p>Includes A. In landscape and desktop views, place Appearance and device settings beside Account. Libraries and Dictionaries share the next row, side by side.</p><p>Portrait falls back to the same flow as A. The content can grow to 1080px instead of stopping at 640px.</p><p class="tradeoff">More section headings are visible at once. Each column is narrower, so some controls need more rows. Compare it in landscape.</p>'],
+    summaries:['Proposal C','Show the summary, open the details.','<p>Includes A. Replace each power preset grid with a select showing its current value. Keep the same six choices.</p><p>Dictionaries show the installed count with a Manage button. Account keeps cloud use visible; open Details for the storage breakdown. The header shows email beside the avatar, which opens account actions.</p><p class="tradeoff">Common appearance controls stay visible. Dictionary management and the storage breakdown take an extra tap. Expand them to see the real space cost.</p>']
+  };
+  const esc=text=>String(text).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const kobo=()=>view==='portrait'||view==='landscape';
+  const action=(label,id,extra='')=>`<button type="button" class="action" data-action="${id}" ${extra}>${label}</button>`;
+  const onoff=key=>choices(key,['Off','On']);
+  function choices(key,options) { return `<div class="choice-control" role="group" aria-label="${key}">${options.map(option=>`<button type="button" data-key="${key}" data-choice="${option}" aria-pressed="${values[key]===option}">${option}</button>`).join('')}</div>`; }
+  function pref(key,label,control) { return `<div class="pref" data-pref="${key}"><span class="pref-title">${label}</span>${control}</div>`; }
+  function heading(title,actions='') { return `<header class="section-heading"><h2>${title}</h2>${actions?`<div class="section-actions">${actions}</div>`:''}</header>`; }
+  function section(key,title,body,actions='') { return `<section class="settings-section" data-section="${key}">${heading(title,actions)}${body}</section>`; }
+  function appearance(layout) {
+    const fields={};
+    if(!kobo()) fields.palette=pref('palette','Application theme',`<div class="palette" role="group" aria-label="Application theme">${['Warm light','Cool light','Warm dark','Cool dark'].map((name,index)=>`<button type="button" data-key="palette" data-choice="${index}" aria-pressed="${values.palette===index}" aria-label="${name}" title="${name}">Aa</button>`).join('')}</div>`);
+    fields.coverText=pref('coverText','Cover text',choices('coverText',['Always','Cover only']));
+    if(kobo()) fields.covers=pref('covers','Covers',choices('covers',['Book art','Generated']));
+    fields.typeface=pref('typeface','Typeface',`<div class="type-control" role="group" aria-label="Typeface">${['Serif','Sans serif','Custom'].map(name=>`<button type="button" data-key="typeface" data-choice="${name}" aria-pressed="${values.typeface===name}"><span class="aa ${name==='Sans serif'?'sans':''}">Aa</span><span>${name==='Custom'&&customFont?esc(customFont):name}</span></button>`).join('')}</div>`);
+    fields.fontSize=pref('fontSize','Font size',`<div class="font-stepper" role="group" aria-label="Font size"><button type="button" data-font="-1" aria-label="Decrease Font size" ${ui<=12?'disabled':''}>−</button><output>${ui}px</output><button type="button" data-font="1" aria-label="Increase Font size" ${ui>=32?'disabled':''}>+</button></div>`);
+    if(!kobo()) fields.animations=pref('animations','Animations',onoff('animations'));
+    const runs=kobo()?[['coverText','covers'],['typeface','fontSize']]:[['palette'],['coverText','animations'],['typeface','fontSize']];
+    const body=layout==='baseline'?Object.values(fields).join(''):runs.map(keys=>`<div class="pref-run">${keys.map(key=>fields[key]).join('')}</div>`).join('');
+    return section('appearance','Appearance',`<div class="preferences">${body}</div>`);
+  }
+  function dictionarySection(layout) {
+    const tools=action('Import','importDictionary')+action('Download','downloadDictionary');
+    const summary=`<div class="summary-row"><div>${dictionaries.length} installed</div>${action(expanded.has('dictionaries')?'Close':'Manage','expandDictionaries','aria-expanded="'+expanded.has('dictionaries')+'"')}</div>`;
+    const rows=dictionaries.map((d,i)=>`<div class="dictionary-row"><div class="dictionary-name">${esc(d.name)}</div><div class="dictionary-tools" data-dictionary-index="${i}"><button type="button" class="icon-action" data-dictionary-info="${i}" aria-label="Dictionary details for ${esc(d.name)}" aria-expanded="${dictionaryDetails===i}"><img src="assets/phosphor-light/info.svg" alt=""></button><button type="button" class="icon-action" data-remove-dictionary="${i}" aria-label="Remove ${esc(d.name)}"><img src="assets/phosphor-light/trash.svg" alt=""></button><button type="button" class="icon-action" data-move-dictionary="-1" aria-label="Move ${esc(d.name)} up" ${i===0?'disabled':''}><img src="assets/phosphor-light/arrow-up.svg" alt=""></button><button type="button" class="icon-action" data-move-dictionary="1" aria-label="Move ${esc(d.name)} down" ${i===dictionaries.length-1?'disabled':''}><img src="assets/phosphor-light/arrow-down.svg" alt=""></button></div>${dictionaryDetails===i?`<div class="dictionary-detail">${esc(d.name)}<br><br>${esc(d.language)}. Sample dictionary metadata.</div>`:''}</div>`).join('')||'<p class="subtle">No dictionaries installed.</p>';
+    const collapsed=layout==='summaries'&&!expanded.has('dictionaries');
+    const body=layout==='summaries'?summary+(collapsed?'':rows):layout==='baseline'?`<div class="dictionary-actions">${tools}</div>${rows}`:rows;
+    return section('dictionaries','Dictionaries',body,layout!=='baseline'&&!collapsed?tools:'');
+  }
+  function powerControl(key,layout) {
+    const options=[5,10,15,30,60,0];
+    const name=key==='sleep'?'Automatic sleep':'Automatic power-off';
+    return layout==='summaries'?`<select class="power-select" data-power="${key}" aria-label="${name}">${options.map(n=>`<option value="${n}" ${values[key]===n?'selected':''}>${n?n+' min':'Never'}</option>`).join('')}</select>`:`<div class="power-control" role="group" aria-label="${name}">${options.map(n=>`<button type="button" data-key="${key}" data-choice="${n}" aria-pressed="${values[key]===n}">${n?n+' min':'Never'}</button>`).join('')}</div>`;
+  }
+  function deviceSection(layout) {
+    return section('device','Kobo',`<div class="preferences">${pref('sleep','Automatic sleep',powerControl('sleep',layout))}${pref('power','Automatic power-off',powerControl('power',layout))}</div><div class="danger-row">${action('Uninstall Bokheim','uninstall')}</div>`);
+  }
+  function accountSection(layout) {
+    if(!signedIn) {
+      if(view==='desktop') return section('account','Account',`<div class="account-body"><div>Sign in</div><div class="account-form"><input type="email" placeholder="Email" aria-label="Email"><input type="password" placeholder="Password" aria-label="Password"><div class="account-actions">${action('Sign in','signIn')}${action('Create account','register')}${action('Password reset','resetPassword')}</div></div></div>`);
+      return section('account','Account','',action('Create account','register')+action('Log in','signIn'));
+    }
+    const tabs=`<div class="choice-control account-storage-tabs" role="group" aria-label="Storage breakdown"><button type="button" data-storage-tab="libraries" aria-pressed="${storageTab==='libraries'}">Largest libraries</button><button type="button" data-storage-tab="books" aria-pressed="${storageTab==='books'}">Largest books</button></div>`;
+    const breakdown=storageTab==='libraries'?'<div class="quota-breakdown"><span>Fiction</span><span>18%</span><span>180 MB</span><span>Reference</span><span>4.2%</span><span>42 MB</span><span>Travel</span><span>1.8%</span><span>18 MB</span></div>':'<div class="quota-breakdown books"><span>The Odyssey</span><span>90 MB</span><span>The Time Machine</span><span>45 MB</span><span>A Room of One’s Own</span><span>24 MB</span></div>';
+    const avatar='<div class="account-header-identity"><span class="account-header-email" title="reader@example.com">reader@example.com</span><button type="button" class="identity-avatar" data-action="accountMenu" aria-label="Account details and actions" aria-haspopup="dialog" aria-expanded="false">R</button></div>';
+    const details=`<div class="quota"><div class="quota-heading"><span>240 MB of 1 GB used</span>${tabs}</div><div class="subtle">12 MB waiting to upload</div>${!kobo()?'<div class="meter" role="meter" aria-label="Cloud storage" aria-valuenow="24" aria-valuemin="0" aria-valuemax="100"><span></span></div>':''}${breakdown}</div>`;
+    if(layout==='summaries') return section('account','Account',`<div class="account-body"><div class="summary-row"><span class="subtle">240 MB of 1 GB used</span>${action(expanded.has('account')?'Close':'Details','expandAccount','aria-expanded="'+expanded.has('account')+'"')}</div>${expanded.has('account')?details:''}</div>`,avatar);
+    return section('account','Account',`<div class="account-body">${details}</div>`,avatar);
+  }
+  function librarySection(layout) {
+    const width=Math.min(layout==='baseline'?640:1080,views[view][0]-(view==='desktop'?144:0))-2*(layout==='baseline'?16:12)-16;
+    const libraryWidth=layout==='columns'&&width>=740?(width-20)/2:width;
+    const compact=libraryWidth<ui*(8+6.5+9+5+(view==='desktop'?2:3))+48;
+    const location=(view==='desktop'||view==='phone')?`<div class="library-location"><span class="pref-title">Default location for new libraries</span>${action(view==='phone'?'Documents/Bokheim':'~/Books/Bokheim','defaultLocation','title="Library location"')}</div>`:'';
+    const header='<div class="library-line library-heading"><span>Library</span><span>Local storage</span><span>Status</span><span>Cloud</span><span></span></div>';
+    const rows=libraries.map((l,i)=>`<div class="library-line"><div class="library-summary"><div class="library-name"><strong>${esc(l.name)}</strong>${(view==='desktop'||view==='phone')?`<button type="button" class="action library-path" data-library-path="${i}" title="${view==='phone'?'Documents/Bokheim':'~/Books/Bokheim'}/${esc(l.name)}">${view==='phone'?'Documents/Bokheim':'~/Books/Bokheim'}/${esc(l.name)}</button>`:''}</div><span class="library-size subtle">${l.size}</span></div><span class="library-status"><span class="library-status-text">${signedIn?l.status:l.cloud?'Sign in to library account':'Local storage'}</span></span><label class="library-cloud"><input type="checkbox" data-library="${i}" aria-label="Cloud for ${esc(l.name)}" ${l.cloud?'checked':''} ${!signedIn&&!l.cloud?'disabled':''}></label><button type="button" class="icon-action library-more" data-library-menu="${i}" aria-label="More actions for ${esc(l.name)}">⋯</button></div>`).join('');
+    return section('libraries','Libraries',`${location}<div class="library-list ${compact?'compact':''}">${header}${rows}</div>`);
+  }
+  function content(layout) {
+    const app=appearance(layout), dictionaries=dictionarySection(layout), account=accountSection(layout), device=kobo()?deviceSection(layout):'';
+    const storage='';
+    const flow=layout==='columns'&&['landscape','desktop'].includes(view)?`<div class="settings-flow"><div class="column-stack">${app}${device}</div><div class="column-stack">${account}${storage}</div></div>`:`<div class="settings-flow">${app}${account}${device}${storage}</div>`;
+    const libraryAndDictionaries=layout==='columns'&&['landscape','desktop'].includes(view)?`<div class="settings-flow library-dictionary-row">${librarySection(layout)}${dictionaries}</div>`:librarySection(layout)+dictionaries;
+    const banner=update?`<div class="notice"><span>Bokheim update available</span>${action('Download update','update')}</div>`:'';
+    const keyboardBody=section('keyboard','Keyboard shortcuts','<p class="subtle">The existing keyboard shortcut editor is unchanged by these General settings proposals.</p>');
+    const tabs=view==='desktop'?`<nav class="platform-tabs" aria-label="Settings pages"><button type="button" data-tab="general" aria-pressed="${!keyboard}">General</button><button type="button" data-tab="keyboard" aria-pressed="${keyboard}">Keyboard</button></nav>`:'';
+    const destinations=['Home','Books','Folders','Subjects','Authors','Search','Notes','Catalog','Settings'];
+    const nav=view==='desktop'?`<nav class="sidebar-nav" aria-label="Application navigation"><button type="button" data-action="navigate">Fiction ▾</button>${destinations.map(label=>`<button type="button" ${label==='Settings'?'aria-pressed="true" data-tab="general"':'data-action="navigate"'}>${label}</button>`).join('')}</nav>`:'';
+    const header=view==='desktop'?'':`<header class="screen-header">${kobo()?'<button type="button" class="close" data-action="navigate" aria-label="Back">←</button>':''}<strong>Settings</strong></header>`;
+    const bottom=view==='desktop'?'':`<nav class="bottom" aria-label="Application navigation">${['Home','Library','Catalog','Settings','Fiction'].map(label=>`<button type="button" ${label==='Settings'?'data-tab="general" aria-pressed="true"':'data-action="navigate"'}>${label}</button>`).join('')}</nav>`;
+    return `${header}<div class="screen-workspace">${nav}<div class="screen-main">${tabs}<div class="setting-scroll" tabindex="0" aria-label="Scrollable browser settings"><div class="settings-page">${keyboard&&view==='desktop'?keyboardBody:banner+flow+libraryAndDictionaries}${message?`<div class="mock-message" role="status">${esc(message)}</div>`:''}</div></div></div></div>${bottom}`;
+  }
+  function render(keepScroll=false) {
+    const scroll=keepScroll?screen.querySelector('.setting-scroll')?.scrollTop||0:0;
+    screen.className=`screen ${variant} ${view==='desktop'?'desktop':''} ${view==='phone'?'phone':''}`;
+    screen.style.setProperty('--ui',ui+'px');
+    screen.innerHTML=content(variant);
+    screen.querySelector('.setting-scroll').scrollTop=scroll;
+    screen.querySelector('.setting-scroll').addEventListener('scroll',metrics,{passive:true});
+    root.querySelectorAll('[data-variant]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.variant===variant)));
+    const [label,title,copy]=descriptions[variant];
+    root.querySelector('#proposal-label').textContent=label; root.querySelector('#proposal-title').textContent=title; root.querySelector('#proposal-copy').innerHTML=copy;
+    resize();
+  }
+  function resize() {
+    const [width,height,name]=views[view], stage=root.querySelector('.stage'), scale=Math.min(1,stage.clientWidth/width);
+    screen.style.width=width+'px';screen.style.height=height+'px';screen.style.transform=`translateX(-50%) scale(${scale})`;stage.style.height=height*scale+'px';
+    root.querySelector('#dimensions').textContent=`${name} · ${width} × ${height}`;root.querySelector('#scale').textContent=`Preview ${Math.round(scale*100)}%`;
+    root.querySelector('#target').textContent=`${ui*(view==='desktop'?2:3)}px control targets`;
+    requestAnimationFrame(()=>{comparison();metrics();});
+  }
+  function comparison() {
+    if(keyboard&&view==='desktop') {root.querySelector('#comparison').innerHTML='<tr><td colspan="3">General settings comparison</td></tr>';return;}
+    const sizes=Object.keys(descriptions).map(layout=>{
+      const clone=document.createElement('div');clone.className=`${screen.className.replace(variant,layout)} measure`;clone.style.width=screen.style.width;clone.style.height=screen.style.height;clone.style.setProperty('--ui',ui+'px');clone.innerHTML=content(layout);root.append(clone);
+      const height=Math.ceil(clone.querySelector('.settings-page').getBoundingClientRect().height);clone.remove();return {layout,height};
+    });
+    root.querySelector('#comparison').innerHTML=sizes.map(({layout,height},i)=>`<tr class="${layout===variant?'active':''}"><td>${['Current','A · Paired','B · Sections','C · Summaries'][i]}</td><td>${height}px</td><td>${i?Math.round((1-height/sizes[0].height)*100)+'%':'—'}</td></tr>`).join('');
+  }
+  function metrics() {
+    const scroll=screen.querySelector('.setting-scroll');if(!scroll)return;
+    const bounds=scroll.getBoundingClientRect(), sections=[...scroll.querySelectorAll('.settings-section')];
+    const visible=sections.filter(s=>{const b=s.getBoundingClientRect();return b.top>=bounds.top-1&&b.bottom<=bounds.bottom+1;}).length;
+    root.querySelector('#visible').textContent=`${visible} of ${sections.length} sections fully visible`;
+    root.querySelector('#scroll').textContent=`${Math.max(0,scroll.scrollHeight-scroll.clientHeight)}px scroll range`;
+  }
+  function closeDialog() {
+    const overlay=screen.querySelector('.screen-dialog');
+    const account=overlay?.dataset.accountMenu==='true';overlay?.remove();
+    if(account) {const trigger=screen.querySelector('[data-action="accountMenu"]');trigger?.setAttribute('aria-expanded','false');trigger?.focus();}
+  }
+  function dialog(title,body,kind='') {
+    closeDialog();
+    screen.insertAdjacentHTML('beforeend',`<div class="screen-dialog ${kind}"><section class="dialog" role="dialog" aria-modal="true" aria-label="${esc(title)}"><header class="dialog-header"><h2>${title}</h2><button type="button" class="icon-action dialog-close" data-action="closeDialog" aria-label="Close" title="Close"><img src="assets/phosphor-light/x.svg" alt=""></button></header><div class="dialog-body">${body}</div></section></div>`);
+    screen.querySelector('.screen-dialog button')?.focus();
+  }
+  function accountMenu() {
+    const trigger=screen.querySelector('[data-action="accountMenu"]');
+    const bounds=trigger.getBoundingClientRect(), frame=screen.getBoundingClientRect(), scale=frame.width/screen.clientWidth;
+    const actions=[['Change password','password'],['Log out','logOut'],['Delete account','deleteAccount']].map(([label,id])=>action(label,id)).join('');
+    dialog('Account',`<div class="account-menu-actions">${actions}</div>`,view==='desktop'?'account-popover':view==='phone'?'account-sheet':'');
+    const overlay=screen.querySelector('.screen-dialog');overlay.dataset.accountMenu='true';trigger.setAttribute('aria-expanded','true');
+    if(view==='desktop') {
+      const panel=overlay.querySelector('.dialog'), top=(bounds.bottom-frame.top)/scale+8;
+      panel.style.top=Math.min(top,screen.clientHeight-panel.offsetHeight-8)+'px';
+      panel.style.right=Math.max(8,(frame.right-bounds.right)/scale)+'px';
+      panel.style.maxHeight=(screen.clientHeight-16)+'px';
+    }
+  }
+  function handleAction(id) {
+    if(id==='closeDialog') {closeDialog();return;}
+    if(id==='accountMenu') {accountMenu();return;}
+    if(id==='expandDictionaries'||id==='expandAccount') {const key=id==='expandDictionaries'?'dictionaries':'account';expanded.has(key)?expanded.delete(key):expanded.add(key);render(true);return;}
+    if(id==='downloadDictionary'||id==='importDictionary') {dialog(id==='downloadDictionary'?'Download dictionary':'Import dictionary',`<p>Sample data for the existing dictionary ${id==='downloadDictionary'?'download picker':'file picker'}.</p>${action('German · 36 MiB','addDictionary')}${action('French · 42 MiB','addFrenchDictionary')}`);return;}
+    if(id==='addDictionary'||id==='addFrenchDictionary') {const french=id==='addFrenchDictionary';dictionaries.push({name:french?'Français':'Deutsch',language:french?'French definitions':'German definitions'});expanded.add('dictionaries');render(true);return;}
+    if(id==='signIn'||id==='register') {dialog(id==='register'?'Create account':'Log in',`<p>Preview of the existing account flow. No account is contacted.</p>${action('Use sample account','confirmSignIn')}`);return;}
+    if(id==='confirmSignIn') {signedIn=true;root.querySelector('#account-state').value='in';render(true);return;}
+    if(id==='logOut') {signedIn=false;root.querySelector('#account-state').value='out';render(true);return;}
+    if(id==='uninstall') {dialog('Uninstall Bokheim',`<p>This is a mockup. Your installation, books and settings stay unchanged.</p>${action('Cancel','closeDialog')}`);return;}
+    if(id==='deleteAccount') {closeDialog();dialog('Delete account',`<p>Account deletion would open here. This preview only contains sample account data.</p>${action('Cancel','closeDialog')}`);return;}
+    if(id==='password') {closeDialog();dialog('Change password','<p>The existing password change form would open here.</p>');return;}
+    if(id==='customFont') {dialog('Choose Typeface',`<p>Sample installed fonts.</p>${['Garamond','Jost','Georgia'].map(name=>action(name,'font-'+name)).join('')}`);return;}
+    if(id.startsWith('font-')) {values.typeface='Custom';customFont=id.slice(5);message='Sample custom font: '+customFont;render(true);return;}
+    if(id==='defaultLocation') {dialog('Default location for new libraries','<p>The existing folder picker would open here. Sample path: ~/Books/Bokheim.</p>');return;}
+    if(id.startsWith('libraryDownload-')||id.startsWith('libraryRemove-')||id.startsWith('libraryExport-')) {
+      const [operation,index]=id.split('-'), name=libraries[Number(index)].name;
+      screen.querySelector('.screen-dialog')?.remove();
+      const title=operation==='libraryDownload'?'Download all books':operation==='libraryRemove'?'Remove downloaded books':'Export annotations';
+      dialog(title,`<p>${esc(name)}</p><p>Preview of the existing library action. No files are changed.</p>`);return;
+    }
+    const messages={navigate:'Navigation preview — settings remain open.',password:'The existing password change form would open here.',resetPassword:'The existing password reset form would open here.',update:'Sample update download started.'};
+    message=messages[id]||'';render(true);
+  }
+  root.addEventListener('click',event=>{
+    if(event.target.classList.contains('screen-dialog')) {closeDialog();return;}
+    const button=event.target.closest('button');if(!button)return;
+    if(button.dataset.variant) {variant=button.dataset.variant;message='';render();return;}
+    if(button.id==='reset') {values={...defaults};ui=16;expanded.clear();message='';signedIn=true;update=false;keyboard=false;storageTab='libraries';dictionaryDetails=null;customFont=null;dictionaries=initialDictionaries.map(d=>({...d}));libraries=initialLibraries.map(l=>({...l}));root.querySelector('#text-size').value='16';root.querySelector('#account-state').value='in';root.querySelector('#show-update').checked=false;render();return;}
+    if(button.dataset.action) {handleAction(button.dataset.action);return;}
+    if(button.dataset.dictionaryInfo!==undefined) {const index=Number(button.dataset.dictionaryInfo);dictionaryDetails=dictionaryDetails===index?null:index;render(true);return;}
+    if(button.dataset.moveDictionary!==undefined) {const index=Number(button.closest('[data-dictionary-index]').dataset.dictionaryIndex), next=index+Number(button.dataset.moveDictionary);if(next>=0&&next<dictionaries.length)[dictionaries[index],dictionaries[next]]=[dictionaries[next],dictionaries[index]];dictionaryDetails=null;render(true);return;}
+    if(button.dataset.storageTab) {storageTab=button.dataset.storageTab;render(true);return;}
+    if(button.dataset.libraryMenu!==undefined) {const i=Number(button.dataset.libraryMenu), l=libraries[i];dialog(esc(l.name),`${l.cloud?action('Download all books','libraryDownload-'+i)+action('Remove downloaded books','libraryRemove-'+i):''}${action('Export annotations','libraryExport-'+i)}`);return;}
+    if(button.dataset.libraryPath!==undefined) {dialog('Open library folder',`<p>The existing system folder action would open ~/Books/Bokheim/${esc(libraries[Number(button.dataset.libraryPath)].name)}.</p>`);return;}
+    if(button.dataset.tab) {keyboard=button.dataset.tab==='keyboard';render();return;}
+    if(button.dataset.removeDictionary!==undefined) {dictionaries.splice(Number(button.dataset.removeDictionary),1);dictionaryDetails=null;render(true);return;}
+    if(button.dataset.font) {ui=Math.max(12,Math.min(32,ui+Number(button.dataset.font)));syncTextSelect();render(true);return;}
+    if(button.dataset.key) {
+      const key=button.dataset.key;
+      if(key==='typeface'&&button.dataset.choice==='Custom') {handleAction('customFont');return;}
+      values[key]=['sleep','power','palette'].includes(key)?Number(button.dataset.choice):button.dataset.choice;render(true);
+    }
+  });
+  root.addEventListener('change',event=>{
+    const input=event.target;
+    if(input.id==='viewport') {view=input.value;keyboard=false;render();}
+    else if(input.id==='text-size') {ui=Number(input.value);render();}
+    else if(input.id==='account-state') {signedIn=input.value==='in';render(true);}
+    else if(input.id==='show-update') {update=input.checked;render(true);}
+    else if(input.dataset.library!==undefined) {const l=libraries[Number(input.dataset.library)];l.cloud=input.checked;l.status=input.checked?'Sync pending':'Local storage';render(true);}
+    else if(input.dataset.power) {values[input.dataset.power]=Number(input.value);render(true);}
+  });
+  root.addEventListener('keydown',event=>{
+    if(event.key==='Escape') {closeDialog();return;}
+    const overlay=screen.querySelector('.screen-dialog');
+    if(event.key==='Tab'&&overlay) {
+      const buttons=[...overlay.querySelectorAll('button:not(:disabled),input,select,[tabindex="0"]')];
+      if(event.shiftKey&&document.activeElement===buttons[0]) {event.preventDefault();buttons.at(-1)?.focus();}
+      else if(!event.shiftKey&&document.activeElement===buttons.at(-1)) {event.preventDefault();buttons[0]?.focus();}
+    }
+  });
+  function syncTextSelect() {const select=root.querySelector('#text-size');if(![...select.options].some(o=>Number(o.value)===ui))select.add(new Option(String(ui),String(ui)));select.value=String(ui);}
+  new ResizeObserver(resize).observe(root.querySelector('.stage'));document.fonts.ready.then(resize);render();
+})();
+</script>
+</body>
+</html>

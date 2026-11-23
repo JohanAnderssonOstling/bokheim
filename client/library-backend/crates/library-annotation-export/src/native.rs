@@ -6,6 +6,7 @@ use book_inspection::{PdfSourceIdentity, PreparedPdfAnnotationExport, prepare_pd
 use book_model::Annotation;
 use client_platform_native::file_fingerprint::file_fingerprint;
 use client_platform_runtime::executor::run_blocking;
+use client_platform_runtime::filesystem::{self as fs, temporary::NamedTempFile};
 use content_address::{ContentHash, hash_file};
 use library_database::DatabaseClient;
 use library_files::AssetStore;
@@ -14,13 +15,11 @@ use library_model::*;
 use md5::{Digest, Md5};
 use std::{
     collections::HashMap,
-    fs::{self, File},
     io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 use sync_common::LibraryId;
-use tempfile::NamedTempFile;
 
 /// Export locally, preserving external annotations in structured destinations.
 /// Existing annotations never enter the library or its upload queue.
@@ -97,7 +96,7 @@ pub(crate) async fn export_with_profiles(
     let configured_root = assets.native_library_root().to_owned();
     let destinations = plan.items.iter().filter(|item| item.format != AnnotationExportFormat::Pdf && !preparation_errors.contains_key(&item.path)).map(|item| item.path.clone()).collect::<Vec<_>>();
     let root = run_blocking(move || -> io::Result<PathBuf> {
-        let root = if configured_root.try_exists()? { fs::canonicalize(configured_root)? } else { resolve_destination(&configured_root)? };
+        let root = if fs::try_exists(&configured_root)? { fs::canonicalize(configured_root)? } else { resolve_destination(&configured_root)? };
         for destination in destinations {
             outside_library(&destination, &root)?;
         }
@@ -201,7 +200,7 @@ pub(crate) fn read_destination(path: &Path) -> io::Result<Option<Vec<u8>>> {
                 return Err(failure(AnnotationExportFailureKind::LimitExceeded, "annotation export destination is not a regular file within the 32 MiB size limit"));
             }
             let mut bytes = Vec::new();
-            File::open(path)?.take(32 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+            fs::open(path)?.take(32 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
             if bytes.len() > 32 * 1024 * 1024 {
                 return Err(failure(AnnotationExportFailureKind::LimitExceeded, "annotation export exceeds the size limit"));
             }
@@ -312,7 +311,7 @@ async fn write_pdf(database: &DatabaseClient, assets: &AssetStore, root: &Path, 
     let read_path = path.clone();
     let (observed_hash, prepared, annotations) = run_blocking(move || -> io::Result<_> {
         let observed_hash = checksum(&read_path)?;
-        let prepared = prepare_pdf_annotation_export(File::open(&read_path)?, source.book_id, &known).map_err(input)?;
+        let prepared = prepare_pdf_annotation_export(fs::open(&read_path)?, source.book_id, &known).map_err(input)?;
         Ok((observed_hash, prepared, known))
     })
     .await
@@ -328,7 +327,7 @@ async fn write_pdf(database: &DatabaseClient, assets: &AssetStore, root: &Path, 
     }
     let (checksum, size, fingerprint) = run_blocking(move || staged.publish()).await.map_err(io::Error::other)??;
     assets.remember_local_content(book.book_id, checksum).map_err(tracking)?;
-    database.record_local_annotation_export(book.book_id, placement.directory_id, checksum, &fingerprint, size).await.map_err(tracking)?;
+    database.record_local_annotation_export(book.book_id, placement.directory_id, checksum, fingerprint, size).await.map_err(tracking)?;
     for current in &mut book.placements {
         if current.directory_id == placement.directory_id {
             current.local_hash = Some(checksum);
@@ -362,12 +361,12 @@ fn stage_pdf(path: &Path, previous_hash: ContentHash, prepared: PreparedPdfAnnot
     Ok(StagedPdf { temporary, path: path.to_owned(), previous_hash, checksum, size })
 }
 impl StagedPdf {
-    fn publish(self) -> io::Result<(ContentHash, u64, String)> {
+    fn publish(self) -> io::Result<(ContentHash, u64, u64)> {
         if self.checksum != self.previous_hash {
             self.temporary.persist(&self.path).map_err(|error| error.error)?;
             sync_folder(self.path.parent().expect("PDF parent")).map_err(tracking)?;
         }
-        Ok((self.checksum, self.size, file_fingerprint(&self.path).map_err(tracking)?.to_string()))
+        Ok((self.checksum, self.size, file_fingerprint(&self.path).map_err(tracking)?))
     }
 }
 
@@ -449,7 +448,7 @@ fn resolve_destination(path: &Path) -> io::Result<PathBuf> {
     let path = if path.is_absolute() { path.to_owned() } else { std::env::current_dir()?.join(path) };
     let mut ancestor = path.parent().ok_or_else(|| failure(AnnotationExportFailureKind::InvalidData, "export file has no parent folder"))?.to_owned();
     let mut suffix = Vec::new();
-    while !ancestor.try_exists()? {
+    while !fs::try_exists(&ancestor)? {
         suffix.push(ancestor.file_name().ok_or_else(|| failure(AnnotationExportFailureKind::InvalidData, "invalid export directory"))?.to_os_string());
         ancestor.pop();
     }
@@ -463,7 +462,7 @@ fn resolve_destination(path: &Path) -> io::Result<PathBuf> {
 fn sync_folder(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
-        File::open(path)?.sync_all()?;
+        fs::open(path)?.sync_all()?;
     }
     #[cfg(not(unix))]
     let _ = path;
@@ -471,7 +470,7 @@ fn sync_folder(path: &Path) -> io::Result<()> {
 }
 
 fn checksum(path: &Path) -> io::Result<ContentHash> {
-    hash_file(&mut File::open(path)?)
+    hash_file(&mut fs::open(path)?)
 }
 
 #[cfg(test)]

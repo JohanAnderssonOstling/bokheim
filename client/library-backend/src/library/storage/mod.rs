@@ -5,4 +5,4 @@ mod placements;
 pub(crate) mod transfer;
 mod trash;
 
-pub use transfer::StorageCopyProgress;
+pub use transfer::{StorageCopiedBook, StorageCopyProgress};

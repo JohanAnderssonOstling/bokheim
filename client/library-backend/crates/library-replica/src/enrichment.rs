@@ -1,8 +1,7 @@
 use book_model::BookTocEntry;
 use serde::{Deserialize, Serialize};
 
-/// A definitive lookup outcome; its metadata is already applied to the book.
-/// Failures are device-local retry work.
+/// The most recent optional enrichment applied to the book record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "StoredEnrichment", into = "StoredEnrichment")]
 pub enum EnrichmentResult {
@@ -11,6 +10,7 @@ pub enum EnrichmentResult {
         toc: Option<Vec<BookTocEntry>>,
         cover_id: Option<String>,
     },
+    /// The provider completed lookup without matching external metadata.
     NoMatch,
 }
 
@@ -66,7 +66,7 @@ mod tests {
     }
 
     fn provider() -> BookRecord {
-        use book_model::{AUTHOR_MARC_RELATOR_CODE, BookSubject, Contributor, ContributorId};
+        use book_model::{BookSubject, Contributor, ContributorId, AUTHOR_MARC_RELATOR_CODE};
         let mut record = BookRecord { metadata: Default::default(), description: "Provider description".into() };
         record.title = "Provider title".into();
         record.subtitle = Some("Provider subtitle".into());

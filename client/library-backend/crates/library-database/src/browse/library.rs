@@ -2,7 +2,7 @@
 
 use crate::books::toc::{TocSql, entry_title};
 use crate::browse::{DetailSql, invalid_integer_column, invalid_text_column, parse_uuid_column};
-use crate::query_methods::{first_column, query_last, query_rows};
+use crate::query_methods::{first_column, query_last, query_rows, text_column};
 use crate::{Database, DatabaseError, chapters_from_navigation};
 use book_model::{AUTHOR_MARC_RELATOR_CODE, NARRATOR_MARC_RELATOR_CODE};
 use description_storage::{Source as DescriptionSource, read as read_description};
@@ -44,13 +44,13 @@ impl Database {
             };
             let path = path.into_iter().map(|component| library_model::BrowsePathSegment { id: library_model::BrowseLocation::Folder(component.id), name: component.name }).collect();
 
-            let authors = query_rows(|read| self.connection.book_detail_authors(hash, AUTHOR_MARC_RELATOR_CODE.0.as_slice(), read), |row| Ok(BookDetailAuthor { id: parse_uuid_column(row.get(0)?, 0)?, name: row.get(1)? }))?;
+            let authors = query_rows(|read| self.connection.book_detail_authors(hash, AUTHOR_MARC_RELATOR_CODE.0.as_slice(), read), |row| Ok(BookDetailAuthor { id: parse_uuid_column(text_column(row, 0)?, 0)?, name: row.get(1)? }))?;
 
             // Narrators are the only non-author credits shown in book details.
             let credits = query_rows(
                 |read| self.connection.book_detail_credits(hash, NARRATOR_MARC_RELATOR_CODE.0.as_slice(), read),
                 |row| {
-                    let id: String = row.get(0)?;
+                    let id = text_column(row, 0)?;
                     let role: Vec<u8> = row.get(2)?;
                     Ok(library_model::BookDetailCredit { id: parse_uuid_column(id, 0)?, name: row.get(1)?, role: String::from_utf8(role).map_err(|error| invalid_text_column(2, error.to_string()))? })
                 },
@@ -104,7 +104,7 @@ fn year_from_record(record: Option<Vec<u8>>) -> Result<Option<i32>, DatabaseErro
     let Some(record) = record else { return Ok(None) };
     match wire::decode::<LibraryStateEntry>(&record, wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? {
         LibraryStateEntry::BookAdd { value, .. } => Ok(value.record.book.year),
-        _ => Err(DatabaseError::message("a book's year requires an immutable book addition")),
+        _ => Err(DatabaseError::message("a book's year requires a book record")),
     }
 }
 

@@ -44,6 +44,7 @@ pub mod skeleton;
 pub mod slider;
 pub mod spinner;
 pub mod switch;
+pub mod table;
 pub mod text;
 pub mod theme;
 pub mod tooltip;
@@ -85,6 +86,7 @@ pub fn init(cx: &mut App) {
     menu::init(cx);
     text::init(cx);
     tree::init(cx);
+    table::init(cx);
     tooltip::init(cx);
 }
 

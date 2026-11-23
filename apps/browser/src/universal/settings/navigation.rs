@@ -109,9 +109,6 @@ impl SettingsPage {
             }
             #[cfg(not(feature = "kobo"))]
             Section::Animations => (increase != preferences.animations()).then_some(BrowsingPreferencePatch::Animations(increase)),
-            #[cfg(not(feature = "kobo"))]
-            Section::Transfers => (increase != preferences.allow_metered_transfers()).then_some(BrowsingPreferencePatch::AllowMeteredTransfers(increase)),
-            Section::TextSearch => (increase != preferences.text_search()).then_some(BrowsingPreferencePatch::TextSearch(increase)),
             #[cfg(feature = "kobo")]
             Section::GeneratedCovers => (increase != preferences.generated_covers_only()).then_some(BrowsingPreferencePatch::GeneratedCoversOnly(increase)),
             #[cfg(feature = "kobo")]

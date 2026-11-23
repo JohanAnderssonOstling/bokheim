@@ -1,5 +1,7 @@
 //! Persistent pages owned by one library session.
 
+use crate::services::notify_error;
+use ui_components::user_facing_error;
 use ui_text::text;
 
 use std::collections::HashMap;
@@ -12,13 +14,13 @@ use gpui::{AnyView, App, AppContext, Context, DismissEvent, Entity, EventEmitter
 use gpui_component::IconName;
 use library_backend::LibraryClient;
 use library_management::management::ManagementClient;
-use library_model::{BrowseLocation, BrowsePathSegment, LibraryBusyReason};
+use library_model::{BookCardRow, BrowseLocation, BrowsePathSegment, LibraryBusyReason};
 #[cfg(test)]
 use sync_common::LibraryId;
-use sync_common::{DirId, ROOT_DIR_ID};
+use sync_common::ROOT_DIR_ID;
 
-use super::LibraryRoute;
-use crate::library::{BrowseKind, BrowsePage, LibraryContext, LibraryUpdateBridge, NotebookPage, OpenBook, TrashPage, UndoEntry, UndoStack};
+use super::{LibraryRoute, PageNavigation};
+use crate::library::{BrowseKind, BrowsePage, LibraryContext, LibraryFileActionsChanged, LibraryUpdateBridge, LoadedCover, NotebookPage, OpenBook, TrashPage, UndoEntry, UndoStack};
 use crate::{BrowsePageSession, PaneRequest};
 
 #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -26,12 +28,10 @@ mod reader_import;
 
 pub(crate) struct LibrarySession {
     operation_dialog: Option<LibraryDialog>,
-    #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    reader_import: Option<(Entity<reader_import::ReaderImportDialog>, Subscription)>,
     busy_focus: FocusHandle,
     undo: UndoStack,
     library: LibraryContext,
-    route: LibraryRoute,
+    navigation: Rc<PageNavigation>,
     trash: Option<Entity<TrashPage>>,
     notebook: Option<Entity<NotebookPage>>,
     text_search: Option<Entity<NotebookPage>>,
@@ -41,7 +41,7 @@ pub(crate) struct LibrarySession {
 
 struct LibraryDialog {
     view: AnyView,
-    width: f32,
+    width_rem: f32,
     focus: FocusHandle,
     dismiss: Box<dyn Fn(&mut Window, &mut App)>,
     _dismiss: Subscription,
@@ -54,48 +54,42 @@ pub(crate) trait LibraryOperationDialog: Render + Focusable + EventEmitter<Dismi
     }
 }
 
-impl gpui::EventEmitter<PaneRequest> for LibrarySession {}
+impl EventEmitter<PaneRequest> for LibrarySession {}
+impl EventEmitter<LibraryRoute> for LibrarySession {}
 
 impl LibrarySession {
     #[cfg(test)]
     pub(super) fn new(management: ManagementClient, open_book: OpenBook, library_id: LibraryId, cx: &mut Context<Self>) -> Self {
         let now_playing = cx.new(|_| crate::NowPlaying::default());
         let library = management.library(library_id).unwrap();
-        Self::with_now_playing(management, open_book, library, now_playing, cx)
+        Self::with_now_playing(management, open_book, library, now_playing, Rc::new(PageNavigation::new(Some(library_id))), cx)
     }
 
-    pub(super) fn with_now_playing(management: ManagementClient, open_book: OpenBook, library: LibraryClient, now_playing: Entity<crate::NowPlaying>, cx: &mut Context<Self>) -> Self {
-        cx.observe_global::<crate::stores::preferences::TextSearchEnabled>(|session: &mut Self, cx| {
-            if !crate::stores::preferences::text_search_enabled(cx) {
-                session.text_search = None;
-                if session.route == LibraryRoute::Search {
-                    session.route = LibraryRoute::Home;
-                }
-                cx.notify();
-            }
-        })
-        .detach();
+    pub(super) fn with_now_playing(management: ManagementClient, open_book: OpenBook, library: LibraryClient, now_playing: Entity<crate::NowPlaying>, navigation: Rc<PageNavigation>, cx: &mut Context<Self>) -> Self {
         let library_backend = Rc::new(library);
         let updates = LibraryUpdateBridge::create(library_backend.as_ref().clone(), cx);
         let library = LibraryContext::new(management, library_backend, open_book, updates, cx.entity().downgrade(), now_playing);
         let library_updates = library.updates();
-        let library_updates_subscription = cx.observe(&library_updates, |_, _, cx| cx.notify());
-        let mut session = Self {
+        let mut busy_reason = library_updates.read(cx).busy_reason();
+        let library_updates_subscription = cx.subscribe(&library_updates, move |_, updates, _: &LibraryFileActionsChanged, cx| {
+            let next = updates.read(cx).busy_reason();
+            if next != busy_reason {
+                busy_reason = next;
+                cx.notify();
+            }
+        });
+        Self {
             operation_dialog: None,
-            #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-            reader_import: None,
             busy_focus: cx.focus_handle(),
             undo: Default::default(),
             library,
-            route: LibraryRoute::Home,
+            navigation,
             trash: None,
             notebook: None,
             text_search: None,
             browse_pages: HashMap::new(),
             _library_updates_subscription: library_updates_subscription,
-        };
-        session.browse_page(BrowseKind::Home, cx);
-        session
+        }
     }
 
     /// Reservations apply only to pages in this library, never its switcher.
@@ -103,14 +97,10 @@ impl LibrarySession {
         if self.operation_dialog.is_some() || self.library.updates().read(cx).busy_reason().is_some() {
             return true;
         }
-        #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        if self.reader_import.as_ref().is_some_and(|(dialog, _)| dialog.read(cx).importing) {
-            return true;
-        }
         false
     }
 
-    pub(crate) fn show_operation_dialog<V: LibraryOperationDialog>(&mut self, view: Entity<V>, width: f32, activate: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_operation_dialog<V: LibraryOperationDialog>(&mut self, view: Entity<V>, width_rem: f32, activate: bool, window: &mut Window, cx: &mut Context<Self>) {
         // Preserve an existing draft when another command opens a dialog.
         if self.operation_dialog.is_some() {
             if activate {
@@ -134,7 +124,7 @@ impl LibrarySession {
         let request_dismiss = Box::new(move |window: &mut Window, cx: &mut App| {
             let _ = target.update(cx, |view, cx| view.dismiss(window, cx));
         });
-        self.operation_dialog = Some(LibraryDialog { view: view.into(), width, focus: focus.clone(), dismiss: request_dismiss, _dismiss: dismiss });
+        self.operation_dialog = Some(LibraryDialog { view: view.into(), width_rem, focus: focus.clone(), dismiss: request_dismiss, _dismiss: dismiss });
         if activate {
             focus.focus(window, cx);
         }
@@ -194,66 +184,48 @@ impl LibrarySession {
     }
 
     fn current_browse_page(&self) -> Option<&Entity<BrowsePage>> {
-        self.route.browse_kind().and_then(|kind| self.browse_pages.get(&kind).map(|(page, _)| page))
+        self.route().browse_kind().and_then(|kind| self.browse_pages.get(&kind).map(|(page, _)| page))
     }
 
-    pub(super) fn saved_pages(&self, cx: &App) -> Vec<BrowsePageSession> {
-        self.current_browse_page().map(|page| vec![page.read(cx).saved_session(cx)]).unwrap_or_default()
+    pub(super) fn saved_page(&self, cx: &App) -> Option<BrowsePageSession> {
+        self.current_browse_page().map(|page| page.read(cx).saved_session(cx))
     }
 
-    pub(super) fn restore(&mut self, route: LibraryRoute, pages: Vec<BrowsePageSession>, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(route, window, cx);
-        if let Some(kind) = route.browse_kind()
-            && let Some(saved) = pages.into_iter().next()
-        {
+    pub(super) fn restore_page(&mut self, saved: BrowsePageSession, cx: &mut Context<Self>) {
+        if let Some(kind) = self.route().browse_kind() {
             self.browse_page(kind, cx).update(cx, |page, cx| page.restore_session(saved, cx));
         }
     }
 
     pub(super) fn route(&self) -> LibraryRoute {
-        self.route
+        self.navigation.library_route()
     }
 
     pub(super) fn dismiss_page(&mut self, cx: &mut Context<Self>) -> bool {
         if self.library.updates().read(cx).busy_reason().is_some() {
             return true;
         }
-        #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        if self.dismiss_reader_import(cx) {
-            return true;
-        }
-        if self.route == LibraryRoute::Search {
+        if self.route() == LibraryRoute::Search {
             return self.text_search.as_ref().is_some_and(|page| page.update(cx, |page, cx| page.dismiss(cx)));
         }
-        if self.route == LibraryRoute::Notebook {
+        if self.route() == LibraryRoute::Notebook {
             return self.notebook.as_ref().is_some_and(|page| page.update(cx, |page, cx| page.dismiss(cx)));
         }
         self.current_browse_page().cloned().is_some_and(|page| page.update(cx, |page, cx| page.dismiss(cx)))
     }
 
-    pub(super) fn open_folder(&mut self, directory_id: DirId, title: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(LibraryRoute::Folders, window, cx);
-        let path = if directory_id == ROOT_DIR_ID { Vec::new() } else { vec![BrowsePathSegment { id: BrowseLocation::Folder(directory_id), name: title }] };
-        self.browse_page(BrowseKind::Folder, cx).update(cx, |page, cx| page.open_path(path, cx));
-    }
-
-    pub(super) fn open_subject(&mut self, location: BrowseLocation, label: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(LibraryRoute::Subjects, window, cx);
-        self.browse_page(BrowseKind::Subject, cx).update(cx, |page, cx| page.open_path(vec![BrowsePathSegment { id: location, name: label }], cx));
-    }
-
-    fn open_author(&mut self, author: book_model::AuthorId, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(LibraryRoute::Authors, window, cx);
+    fn open_author(&mut self, author: book_model::AuthorId, name: String, cx: &mut Context<Self>) {
+        cx.emit(LibraryRoute::Authors);
         self.browse_page(BrowseKind::Author, cx).update(cx, |page, cx| page.open_path(vec![BrowsePathSegment { id: BrowseLocation::Author(Some(author)), name: name }], cx));
     }
 
     /// A catalog subject opens on the Catalog page; every other on Subjects.
-    fn open_subject_path(&mut self, path: Vec<BrowsePathSegment>, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_subject_path(&mut self, path: Vec<BrowsePathSegment>, cx: &mut Context<Self>) {
         let (route, kind) = match path.first().map(|segment| segment.id) {
             Some(BrowseLocation::Catalog(_)) => (LibraryRoute::Catalog, BrowseKind::Catalog),
             _ => (LibraryRoute::Subjects, BrowseKind::Subject),
         };
-        self.navigate(route, window, cx);
+        cx.emit(route);
         self.browse_page(kind, cx).update(cx, |page, cx| page.open_path(path, cx));
     }
 
@@ -261,17 +233,30 @@ impl LibrarySession {
         self.current_browse_page()?.read(cx).shown_book_detail(cx)
     }
 
-    pub(super) fn open_book_detail(&mut self, book_id: sync_common::BookId, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(LibraryRoute::Folders, window, cx);
+    /// Cards always open details through the session, retaining a visible
+    /// browse location and artwork rather than delegating navigation to pages.
+    pub(crate) fn show_book_detail(&mut self, book: BookCardRow, cover: Option<LoadedCover>, cx: &mut Context<Self>) {
+        let page = match self.current_browse_page().cloned() {
+            Some(page) => page,
+            None => {
+                cx.emit(LibraryRoute::Folders);
+                self.browse_page(BrowseKind::Folder, cx)
+            }
+        };
+        page.update(cx, |page, cx| page.show_book_detail(book, cover, cx));
+    }
+
+    pub(super) fn open_book_detail(&mut self, book_id: sync_common::BookId, cx: &mut Context<Self>) {
         let backend = self.library.backend().clone();
         let page = self.browse_page(BrowseKind::Folder, cx);
         cx.spawn(async move |session, cx| {
             let result = backend.book_detail(book_id).await;
-            cx.defer_update(session, move |_session, cx| {
-                if let Ok(detail) = result {
-                    page.update(cx, |page, cx| page.open_book_detail(detail.book, detail.path, cx));
+            match result {
+                Ok(detail) => cx.defer_update(session, move |_, cx| page.update(cx, |page, cx| page.open_book_detail(detail.book, detail.path, cx))),
+                Err(error) => {
+                    let _ = session.update_in(cx, |_, window, cx| notify_error("book-detail-open-error", user_facing_error(&error, text!(browse::could_not_load_book_details_please_try_again)), window, cx));
                 }
-            });
+            }
         })
         .detach();
     }
@@ -283,14 +268,10 @@ impl LibrarySession {
         if let Some(dialog) = &self.operation_dialog {
             return Some(dialog.focus.clone());
         }
-        #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        if let Some((dialog, _)) = &self.reader_import {
-            return Some(dialog.read(cx).focus_handle(cx));
-        }
-        match self.route.browse_kind() {
+        match self.route().browse_kind() {
             Some(kind) => self.browse_pages.get(&kind).map(|(page, _)| page.read(cx).focus_handle(cx)),
-            None if self.route == LibraryRoute::Notebook => self.notebook.as_ref().map(|page| page.read(cx).focus_handle(cx)),
-            None if self.route == LibraryRoute::Search => self.text_search.as_ref().map(|page| page.read(cx).focus_handle(cx)),
+            None if self.route() == LibraryRoute::Notebook => self.notebook.as_ref().map(|page| page.read(cx).focus_handle(cx)),
+            None if self.route() == LibraryRoute::Search => self.text_search.as_ref().map(|page| page.read(cx).focus_handle(cx)),
             None => self.trash.as_ref().map(|page| page.read(cx).focus_handle(cx)),
         }
     }
@@ -302,12 +283,12 @@ impl LibrarySession {
             }
             return;
         }
-        if self.route == LibraryRoute::Search {
+        if self.route() == LibraryRoute::Search {
             if let Some(page) = &self.text_search {
                 page.update(cx, |page, cx| page.refresh(cx));
             }
         }
-        if self.route == LibraryRoute::Notebook {
+        if self.route() == LibraryRoute::Notebook {
             self.refresh_notebook(cx);
         }
         if let Some(handle) = self.focus_handle(cx) {
@@ -316,18 +297,22 @@ impl LibrarySession {
     }
 
     pub(super) fn open_root(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.route.browse_kind() {
+        match self.route().browse_kind() {
             Some(kind) => {
                 self.browse_pages.remove(&kind);
             }
-            None if matches!(self.route, LibraryRoute::Notebook | LibraryRoute::Search) => {}
+            None if self.route() == LibraryRoute::Notebook => self.notebook = None,
+            None if self.route() == LibraryRoute::Search => self.text_search = None,
             None => self.trash = None,
         }
-        self.navigate(self.route, window, cx);
+        self.activate_page(window, cx);
     }
 
-    pub(super) fn navigate(&mut self, route: LibraryRoute, window: &mut Window, cx: &mut Context<Self>) {
-        let route = if route == LibraryRoute::Search && !crate::stores::preferences::text_search_enabled(cx) { LibraryRoute::Home } else { route };
+    pub(super) fn activate_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.navigation.library_id.get() != Some(*self.library.backend().id()) {
+            return;
+        }
+        let route = self.route();
         match route.browse_kind() {
             Some(kind) => {
                 self.browse_page(kind, cx);
@@ -342,7 +327,6 @@ impl LibrarySession {
                 self.trash_page(cx);
             }
         }
-        self.route = route;
         self.focus_page(window, cx);
         cx.notify();
     }
@@ -412,30 +396,17 @@ impl Render for LibrarySession {
                 .items_center()
                 .justify_center()
                 .occlude()
-                .child(ui_components::modal_surface(theme).id("library-operation-dialog").role(gpui::Role::Dialog).w(px(dialog.width)).max_w_full().max_h_full().flex().flex_col().child(dialog.view.clone()))
+                .child(ui_components::modal_surface(theme).id("library-operation-dialog").role(gpui::Role::Dialog).w(gpui::rems(dialog.width_rem)).max_w_full().max_h_full().flex().flex_col().child(dialog.view.clone()))
                 .into_any_element();
         }
-        #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        if let Some((dialog, _)) = &self.reader_import {
-            let theme = ui_components::browser_theme(cx);
-            return ui_components::library_section_content()
-                .debug_selector(|| "library-reader-import".into())
-                .bg(theme.overlay_scrim)
-                .p(px(ui_components::SPACE_MD))
-                .items_center()
-                .justify_center()
-                .occlude()
-                .child(ui_components::modal_surface(theme).w(px(420.0)).max_w_full().max_h_full().flex().flex_col().child(dialog.clone()))
-                .into_any_element();
-        }
-        let kind = self.route.browse_kind();
+        let kind = self.route().browse_kind();
         // Keep import destinations and the catalog mounted even when the local
         // library is empty: catalog books do not belong to it yet.
-        let content = if !(matches!(self.route, LibraryRoute::Home | LibraryRoute::Subjects | LibraryRoute::Authors) && !updates.loading() && updates.book_count() == Some(0) && !updates.scanning()) {
+        let content = if !(matches!(self.route(), LibraryRoute::Home | LibraryRoute::Subjects | LibraryRoute::Authors) && !updates.loading() && updates.book_count() == Some(0) && !updates.scanning()) {
             let view = match kind {
                 Some(kind) => self.browse_page(kind, cx).into_any_element(),
-                None if self.route == LibraryRoute::Notebook => self.notebook_page(cx).into_any_element(),
-                None if self.route == LibraryRoute::Search => self.text_search_page(cx).into_any_element(),
+                None if self.route() == LibraryRoute::Notebook => self.notebook_page(cx).into_any_element(),
+                None if self.route() == LibraryRoute::Search => self.text_search_page(cx).into_any_element(),
                 None => self.trash_page(cx).into_any_element(),
             };
             ui_components::library_section_content().debug_selector(|| "library-session-page".into()).child(view).into_any_element()
@@ -456,7 +427,7 @@ impl Render for LibrarySession {
                 }));
             // The browse page's own heading, which an empty view still needs to
             // reach the others, which may not be empty.
-            let heading = ui_components::uses_mobile_navigation(window).then(|| ui_components::topbar(theme).child(super::library_root_heading(self.route, theme)));
+            let heading = ui_components::uses_mobile_navigation(window).then(|| ui_components::topbar(theme).child(super::library_root_heading(self.route(), theme)));
             ui_components::library_section_content()
                 .debug_selector(|| "library-session-empty".into())
                 .children(heading)
@@ -464,9 +435,9 @@ impl Render for LibrarySession {
                 .into_any_element()
         };
         ui_components::library_section_content()
-            .on_action(cx.listener(|session, _: &crate::OpenTrash, window, cx| session.navigate(LibraryRoute::Trash, window, cx)))
-            .on_action(cx.listener(|session, open: &crate::OpenAuthor, window, cx| session.open_author(open.author, open.name.clone(), window, cx)))
-            .on_action(cx.listener(|session, open: &crate::OpenSubject, window, cx| session.open_subject_path(open.path.clone(), window, cx)))
+            .on_action(cx.listener(|_, _: &crate::OpenTrash, _, cx| cx.emit(LibraryRoute::Trash)))
+            .on_action(cx.listener(|session, open: &crate::OpenAuthor, _, cx| session.open_author(open.author, open.name.clone(), cx)))
+            .on_action(cx.listener(|session, open: &crate::OpenSubject, _, cx| session.open_subject_path(open.path.clone(), cx)))
             .child(content)
             .into_any_element()
     }
@@ -488,14 +459,15 @@ mod tests {
             window
                 .update(cx, |_, window, cx| {
                     session.update(cx, |session, cx| {
-                        session.navigate(route, window, cx);
+                        session.navigation.navigate(route.into());
+                        session.activate_page(window, cx);
                         let previous = session.focus_handle(cx).expect("the selected page has a focus handle");
                         assert!(previous.is_focused(window), "navigation to {route:?} must focus its page");
                         session.open_root(window, cx);
                         assert_eq!(previous.is_focused(window), route == LibraryRoute::Notebook, "Notebook refreshes its existing page; other routes reset theirs");
                         assert!(session.focus_handle(cx).is_some_and(|handle| handle.is_focused(window)));
                         assert_eq!(session.route(), route);
-                        assert_eq!(session.saved_pages(cx).len(), usize::from(route.browse_kind().is_some()));
+                        assert_eq!(session.saved_page(cx).is_some(), route.browse_kind().is_some());
                     })
                 })
                 .unwrap();
@@ -509,15 +481,25 @@ mod tests {
         library.backend().create_directory(ROOT_DIR_ID, "Nested".into()).await.unwrap();
         let folder = library.backend().folder_destinations().await.unwrap().into_iter().find(|folder| folder.label == "Nested").unwrap().id;
         let window = cx.add_window(|_, _| gpui::Empty);
-        window.update(cx, |_, window, cx| session.update(cx, |session, cx| session.open_folder(folder, "Nested".into(), window, cx))).unwrap();
+        window
+            .update(cx, |_, window, cx| {
+                session.update(cx, |session, cx| {
+                    session.navigation.navigate(LibraryRoute::Folders.into());
+                    session.restore_page(BrowsePageSession { path: vec![(BrowseLocation::Folder(folder), "Nested".into())], detail: None }, cx);
+                    session.activate_page(window, cx);
+                })
+            })
+            .unwrap();
         let original = session.read_with(cx, |session, _| session.browse_pages[&BrowseKind::Folder].0.clone());
         window
             .update(cx, |_, window, cx| {
                 session.update(cx, |session, cx| {
-                    session.navigate(LibraryRoute::Authors, window, cx);
-                    session.navigate(LibraryRoute::Folders, window, cx);
+                    session.navigation.navigate(LibraryRoute::Authors.into());
+                    session.activate_page(window, cx);
+                    session.navigation.navigate(LibraryRoute::Folders.into());
+                    session.activate_page(window, cx);
                     assert_eq!(session.browse_pages[&BrowseKind::Folder].0, original);
-                    assert_eq!(session.saved_pages(cx)[0].path, [(BrowseLocation::Folder(folder), "Nested".into())]);
+                    assert_eq!(session.saved_page(cx).unwrap().path, [(BrowseLocation::Folder(folder), "Nested".into())]);
                 })
             })
             .unwrap();
@@ -528,7 +510,7 @@ mod tests {
         assert_eq!(received.get(), 1);
         window.update(cx, |_, window, cx| session.update(cx, |session, cx| session.open_root(window, cx))).unwrap();
         let replacement = session.read_with(cx, |session, cx| {
-            assert!(session.saved_pages(cx)[0].path.is_empty());
+            assert!(session.saved_page(cx).unwrap().path.is_empty());
             session.browse_pages[&BrowseKind::Folder].0.clone()
         });
         assert_ne!(replacement, original);
@@ -580,7 +562,12 @@ mod tests {
             (LibraryRoute::Trash, false),
             (LibraryRoute::Notebook, false),
         ] {
-            window.update(&mut visual, |session, window, cx| session.navigate(route, window, cx)).unwrap();
+            window
+                .update(&mut visual, |session, window, cx| {
+                    session.navigation.navigate(route.into());
+                    session.activate_page(window, cx);
+                })
+                .unwrap();
             visual.update(|window, cx| {
                 let _ = window.draw(cx);
             });
@@ -625,7 +612,12 @@ mod tests {
             ready.recv().await.unwrap();
             owner.update(&mut cx, |session, _| session.push_undo(UndoEntry::new("Completed move").with(UndoStep::TrashDirectory { directory: ROOT_DIR_ID }))).unwrap();
         });
-        window.update(cx, |session, window, cx| session.navigate(LibraryRoute::Authors, window, cx)).unwrap();
+        window
+            .update(cx, |session, window, cx| {
+                session.navigation.navigate(LibraryRoute::Authors.into());
+                session.activate_page(window, cx);
+            })
+            .unwrap();
         finish.send(()).await.unwrap();
         task.await;
         assert_eq!(window.update(cx, |session, _, _| session.take_undo().unwrap().label).unwrap(), "Completed move");

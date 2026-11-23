@@ -108,11 +108,7 @@ impl ReadingPosition {
     }
 
     pub fn epub_cfi(value: &str) -> Result<Self, InvalidReadingPosition> {
-        if valid_epub_cfi(value) {
-            Ok(Self::Epub(ReadingEpubCfi(value.to_owned())))
-        } else {
-            Err(InvalidReadingPosition)
-        }
+        if valid_epub_cfi(value) { Ok(Self::Epub(ReadingEpubCfi(value.to_owned()))) } else { Err(InvalidReadingPosition) }
     }
 
     pub const fn pdf_page(page_index: u32) -> Self {
@@ -136,13 +132,7 @@ impl ReadingPosition {
     }
 
     pub fn as_str(&self) -> String {
-        match self {
-            Self::Epub(cfi) => cfi.0.clone(),
-            Self::Pdf(page) => pdf_page_reading_position(*page),
-            Self::PdfAtPoint { page, full_page_position } => pdf_page_position_reading_position(*page, *full_page_position),
-            Self::Audiobook(millis) => audiobook_reading_position(*millis),
-            Self::Cbz { page, full_page_position } => format!("cbzpage({page},{full_page_position})"),
-        }
+        self.to_string()
     }
 
     pub fn epub_cfi_value(&self) -> Option<&str> {
@@ -171,6 +161,18 @@ impl ReadingPosition {
         match self {
             Self::Audiobook(millis) => Some(*millis),
             _ => None,
+        }
+    }
+}
+
+impl fmt::Display for ReadingPosition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Epub(cfi) => f.write_str(&cfi.0),
+            Self::Pdf(page) => write!(f, "pdfpage({page})"),
+            Self::PdfAtPoint { page, full_page_position } => write!(f, "pdfpage({page},{full_page_position})"),
+            Self::Audiobook(millis) => write!(f, "audiopos({millis})"),
+            Self::Cbz { page, full_page_position } => write!(f, "cbzpage({page},{full_page_position})"),
         }
     }
 }
@@ -269,11 +271,7 @@ fn parse_full_page_position(value: &str) -> Option<f32> {
 /// scale that reading positions and annotations both store. A PDF counts the
 /// page being read as reached, so the last page is 100.
 pub fn pdf_page_progress(page_index: usize, page_count: usize) -> f32 {
-    if page_count == 0 {
-        0.0
-    } else {
-        (page_index.saturating_add(1) as f32 / page_count as f32 * 100.0).clamp(0.0, 100.0)
-    }
+    if page_count == 0 { 0.0 } else { (page_index.saturating_add(1) as f32 / page_count as f32 * 100.0).clamp(0.0, 100.0) }
 }
 
 /// The same scale for a reflowed book, whose renderer reports a 0–1 layout
@@ -325,11 +323,7 @@ impl ReadProgress {
     pub const ZERO: Self = Self(0.0);
 
     pub fn new(value: f32) -> Result<Self, InvalidReadProgress> {
-        if value.is_finite() && (0.0..=100.0).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(InvalidReadProgress)
-        }
+        if value.is_finite() && (0.0..=100.0).contains(&value) { Ok(Self(value)) } else { Err(InvalidReadProgress) }
     }
 
     pub fn value(self) -> f32 {
@@ -362,7 +356,7 @@ impl Error for InvalidReadProgress {}
 mod tests {
     #[test]
     fn publication_cfi_storage_version_is_separate_from_the_address() {
-        use super::{ReadingPosition, PUBLICATION_CFI_PREFIX};
+        use super::{PUBLICATION_CFI_PREFIX, ReadingPosition};
         let cfi = "epubcfi(/8[spine]/6[chapter]!/4/2/1:3)";
         let stored = format!("{PUBLICATION_CFI_PREFIX}{cfi}");
         let value = ReadingPosition::parse(&stored).unwrap();

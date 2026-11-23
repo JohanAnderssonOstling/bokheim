@@ -11,7 +11,6 @@ autotests = false
 crate-type = ["rlib"]
 
 [features]
-linux-network-cost = ["client-platform-runtime/linux-network-cost"]
 kobo = ["client-platform-kobo/device", "library-backend/kobo", "library-management/kobo", "app-preferences/kobo"]
 
 [dependencies]

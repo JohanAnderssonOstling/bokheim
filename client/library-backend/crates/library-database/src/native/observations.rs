@@ -15,7 +15,7 @@ pub(crate) enum Revision {
 
 /// Record a verified local file, including an already-existing destination.
 /// Membership and upload scheduling are deliberately separate operations.
-pub(crate) fn record_file(connection: &Connection, directory: &str, hash: &BookId, path: &str, fingerprint: Option<&str>, revision: Revision) -> Result<(), DatabaseError> {
+pub(crate) fn record_file(connection: &Connection, directory: &str, hash: &BookId, path: &str, fingerprint: Option<u64>, revision: Revision) -> Result<(), DatabaseError> {
     #[cfg(not(target_arch = "wasm32"))]
     connection.shared_scanner_publish_projection(hash, directory, path)?;
     #[cfg(target_arch = "wasm32")]
@@ -37,7 +37,7 @@ pub(crate) fn record_file(connection: &Connection, directory: &str, hash: &BookI
         }
         Revision::Retained => {}
     }
-    connection.observations_mark_downloaded(&directory, &(&hash), &fingerprint)?;
+    connection.observations_mark_downloaded(&directory, &(&hash), &fingerprint.map(u64::to_le_bytes))?;
     // Browser placements share one OPFS object; native placements are files.
     #[cfg(target_arch = "wasm32")]
     connection.shared_set_book_hash_downloaded(&hash, 1)?;

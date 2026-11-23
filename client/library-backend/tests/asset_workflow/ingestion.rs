@@ -5,7 +5,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use client_platform_runtime::executor::{BackendExecutor, BoxedBackendFuture};
-use cpu_host::{BackendError, BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse, ThumbnailBytes};
+use cpu_contract::{BackendError, BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse, ThumbnailBytes};
 use library_database::{DatabaseClient, ScanSnapshot};
 use library_files::{asset_store::ImportOptions, AssetStore};
 use sync_common::{BookId, ROOT_DIR_ID};

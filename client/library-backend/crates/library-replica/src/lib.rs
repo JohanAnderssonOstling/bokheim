@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 pub mod filenames;
 mod folder_management;
 mod folder_names;
+pub mod storage;
 pub use folder_names::project_folder_name;
 mod enrichment;
 mod library_state;
@@ -29,7 +30,7 @@ mod directory_projection;
 pub(crate) mod serde_enum;
 pub use directory_projection::{DirectoryIntent, DirectoryProjection, project_directories};
 
-/// The complete, immutable facts admitted when a file is added to a library.
+/// File facts and the latest optional enrichment for one book.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BookAddition {
     pub facts: BookFacts,
@@ -39,12 +40,12 @@ pub struct BookAddition {
     pub navigation: Option<BookTocDocument>,
     pub pdf: Option<PdfReaderMetadata>,
     pub recording: Option<metadata_contract::audible::LookupRequest>,
-    /// Absent only in a device-local draft. Every publication has a definitive answer.
+    /// None means optional enrichment has not completed; file facts are already publishable.
     pub enrichment: Option<EnrichmentResult>,
 }
 
 impl BookAddition {
-    /// Complete the draft before publication.
+    /// Apply optional enrichment to the current record.
     pub fn apply_enrichment(&mut self, record: BookRecord, result: EnrichmentResult) {
         let year = self.record.book.year.or(record.book.year);
         self.record.metadata.book = record.metadata.book;
@@ -53,7 +54,11 @@ impl BookAddition {
         if self.record.description.trim().is_empty() {
             self.record.description = record.description;
         }
-        self.enrichment = Some(result);
+        self.enrichment = Some(match (self.enrichment.take(), result) {
+            (Some(EnrichmentResult::Found { toc: previous_toc, cover_id: previous_cover }), EnrichmentResult::Found { toc, cover_id }) => EnrichmentResult::Found { toc: toc.or(previous_toc), cover_id: cover_id.or(previous_cover) },
+            (Some(previous @ EnrichmentResult::Found { .. }), EnrichmentResult::NoMatch) => previous,
+            (_, result) => result,
+        });
     }
 }
 
@@ -148,18 +153,6 @@ impl LibraryStateEntry {
         }
     }
 
-    /// Book bytes that must be uploaded before this state can be shared.
-    /// Removals must remain possible even when a local import never uploaded.
-    pub fn upload_dependency(&self) -> Option<sync_common::BookId> {
-        match self {
-            Self::DirectoryName { .. } | Self::DirectoryParent { .. } | Self::DirectoryLifecycle { .. } | Self::BookLifecycle { value: BookLifecycleState::Purged, .. } | Self::Placement { present: false, .. } => None,
-            Self::Annotation { value, .. } => (!value.deleted).then_some(value.book_id),
-            Self::BookLifecycle { book_id, .. } | Self::Placement { book_id, .. } | Self::ReadingPosition { book_id, .. } | Self::ChapterReadStatus { book_id, .. } | Self::BookAdd { book_id, .. } | Self::BookContent { book_id, .. } => {
-                Some(*book_id)
-            }
-        }
-    }
-
     /// The wire kind is the variant name provided by this type's Serde schema.
     pub fn kind(&self) -> &'static str {
         to_variant_name(self).expect("state entries must serialize as enum variants")
@@ -227,13 +220,8 @@ impl LibraryStateEntry {
                 value.validate().map_err(|error| invalid(&error.to_string()))?;
             }
             Self::BookAdd { book_id, value } => {
-                let Some(enrichment) = &value.enrichment else {
-                    return Err(invalid("book addition is awaiting enrichment"));
-                };
-                if let EnrichmentResult::Found { toc: Some(entries), .. } = enrichment {
-                    if sync_common::transport::encode(entries)?.len() > 512 * 1024 {
-                        return Err(invalid("enriched navigation exceeds the mutation envelope"));
-                    }
+                if let Some(EnrichmentResult::Found { toc: Some(entries), .. }) = &value.enrichment {
+                    storage::toc_encoded_len(entries)?;
                 }
                 if value.facts.added_at > i64::MAX as u64 {
                     return Err(invalid("book addition timestamp exceeds storage range"));
@@ -278,27 +266,29 @@ impl StatePayload for LibraryStateEntry {
             .contains(&kind)
     }
 
+    fn encode_entry(&self) -> Result<OpaqueStateEntry, sync_common::transport::WireError> {
+        Ok(OpaqueStateEntry { address: self.address(), book: self.book(), bytes: storage::encode(self)? })
+    }
+
     fn serialize_entry<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.validate().map_err(serde::ser::Error::custom)?;
-        let entry = OpaqueStateEntry { address: self.address(), book: self.book(), bytes: sync_common::transport::encode(self).map_err(serde::ser::Error::custom)? };
-        entry.serialize_entry(serializer)
+        self.encode_entry().map_err(serde::ser::Error::custom)?.serialize_entry(serializer)
+    }
+
+    fn decode_entry(entry: &OpaqueStateEntry) -> Result<Self, sync_common::transport::WireError> {
+        use sync_common::transport::WireError;
+        if !Self::recognizes_kind(&entry.address.kind) {
+            return Err(WireError::Decode("unknown state kind".into()));
+        }
+        let value = storage::decode(&entry.bytes)?;
+        if value.address() != entry.address || value.book() != entry.book {
+            return Err(WireError::Decode("state envelope does not match its value".to_owned()));
+        }
+        Ok(value)
     }
 
     fn deserialize_entry<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let entry = OpaqueStateEntry::deserialize_entry(deserializer)?;
-        let decode = || -> Result<Self, sync_common::transport::WireError> {
-            use sync_common::transport::WireError;
-            if !Self::recognizes_kind(&entry.address.kind) {
-                return Err(WireError::Decode("unknown state kind".into()));
-            }
-            let value: Self = sync_common::transport::decode(&entry.bytes, sync_common::transport::MAX_DECODED_REQUEST_BYTES)?;
-            value.validate()?;
-            if value.address() != entry.address || value.book() != entry.book {
-                return Err(WireError::Decode("state envelope does not match its value".to_owned()));
-            }
-            Ok(value)
-        };
-        decode().map_err(serde::de::Error::custom)
+        Self::decode_entry(&entry).map_err(serde::de::Error::custom)
     }
 
     fn validate_version(&self, version: &VersionKey) -> Result<(), sync_common::transport::WireError> {
@@ -329,9 +319,7 @@ fn validate_navigation(value: &BookTocDocument) -> Result<(), sync_common::trans
             return Err(WireError::Decode("invalid audiobook track index".into()));
         }
     }
-    if sync_common::transport::encode(value)?.len() > 512 * 1024 {
-        return Err(WireError::Decode("navigation document exceeds the mutation envelope".into()));
-    }
+    storage::navigation_encoded_len(value)?;
     Ok(())
 }
 
@@ -340,27 +328,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_content_keeps_its_persisted_discriminant() {
+    fn canonical_content_uses_its_current_persisted_discriminant() {
         let value = LibraryStateEntry::BookContent { book_id: BookId::from_bytes([7; 32]), checksum: ContentHash::from_bytes([8; 32]), size_bytes: Some(42), pdf: None };
         let encoded = sync_common::wire::encode(&value).unwrap();
-        assert_eq!(encoded[sync_common::wire::encode(&()).unwrap().len()], 10);
+        assert_eq!(encoded[sync_common::wire::encode(&()).unwrap().len()], 9);
         assert_eq!(sync_common::wire::decode::<LibraryStateEntry>(&encoded, 1024).unwrap(), value);
         let mut removed = sync_common::wire::encode(&()).unwrap();
-        removed.push(9);
+        removed.push(10);
         assert!(sync_common::wire::decode::<LibraryStateEntry>(&removed, 1024).is_err());
     }
 
     #[test]
-    fn history_upgrade_preserves_relay_values_written_with_protocol_28() {
+    fn replicas_require_current_storage_format() {
         let publication = LibraryStateEntry::DirectoryName { dir_id: DirId::from_u128(1), name: "Retained".into() }.publication(ReplicaId::from_u128(2), 3, ReplicaSeq::new(4).unwrap());
         let mut stored: Versioned<OpaqueStateEntry> = sync_common::transport::representation(&publication.state).unwrap();
-        stored.value.bytes[1] = 28;
-        let decoded = sync_common::state_encoding::decode_known::<LibraryStateEntry>(&stored).unwrap().unwrap();
-        assert_eq!(decoded, publication.state);
+        stored.value.bytes[1] = 33;
+        assert!(matches!(sync_common::state_encoding::decode_known::<LibraryStateEntry>(&stored), Err(sync_common::transport::WireError::UnsupportedVersion(33))));
     }
 
     #[test]
-    fn only_completed_additions_can_be_encoded_for_publication() {
+    fn additions_can_be_published_before_and_after_enrichment() {
         assert!(!LibraryStateEntry::recognizes_kind("enrichment"));
         let mut addition = BookAddition {
             facts: BookFacts { added_at: 1, format: book_model::BookFormat::Epub },
@@ -372,7 +359,7 @@ mod tests {
         };
         let publish = |value| LibraryStateEntry::BookAdd { book_id: BookId::new(&"f".repeat(64)), value }.publication(ReplicaId::from_u128(1), 0, ReplicaSeq::new(1).unwrap());
         let draft = publish(addition.clone());
-        assert!(sync_common::transport::representation::<_, sync_common::OpaquePublication>(&draft).is_err());
+        assert!(sync_common::transport::representation::<_, sync_common::OpaquePublication>(&draft).is_ok());
         addition.enrichment = Some(EnrichmentResult::NoMatch);
         let complete = publish(addition);
         assert!(sync_common::transport::representation::<_, sync_common::OpaquePublication>(&complete).is_ok());

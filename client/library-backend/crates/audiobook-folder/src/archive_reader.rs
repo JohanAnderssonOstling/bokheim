@@ -1,8 +1,8 @@
 //! A canonical ZIP backed by its original files instead of a temporary copy.
 //! The normal ZIP writer still computes CRCs and patches its own headers.
 
+use client_platform_runtime::filesystem::{self as fs, File};
 use std::cell::RefCell;
-use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -163,7 +163,7 @@ impl Read for FolderArchive {
             }
             Contents::Source { path, .. } => {
                 if self.source.as_ref().is_none_or(|(active, _, _)| *active != index) {
-                    self.source = Some((index, File::open(path)?, 0));
+                    self.source = Some((index, fs::open(path)?, 0));
                 }
                 let (_, file, position) = self.source.as_mut().unwrap();
                 if *position != offset {

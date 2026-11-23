@@ -1,7 +1,7 @@
 //! Application buttons: layout, colors and interaction belong to the app.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, ClickEvent, Div, ElementId, Interactivity, MouseButton, Refineable, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Window, div, rems, transparent_black};
+use gpui::{AnyElement, App, ClickEvent, Div, ElementId, FocusHandle, Interactivity, MouseButton, Refineable, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Window, div, rems, transparent_black};
 use gpui_component::global_state::GlobalState;
 use gpui_component::menu::DropdownMenu;
 use gpui_component::spinner::Spinner;
@@ -31,8 +31,11 @@ pub struct Button {
     hover_style: StyleRefinement,
     variant: Variant,
     selected: bool,
+    selection_surface: Option<bool>,
     fill: bool,
-    tab_stop: bool,
+    tab_stop: Option<bool>,
+    focus: Option<FocusHandle>,
+    accessible_label: Option<SharedString>,
     disabled: bool,
     loading: bool,
     size: Size,
@@ -53,8 +56,11 @@ impl Button {
             hover_style: StyleRefinement::default(),
             variant: Variant::Default,
             selected: false,
+            selection_surface: None,
             fill: true,
-            tab_stop: true,
+            tab_stop: None,
+            focus: None,
+            accessible_label: None,
             disabled: false,
             loading: false,
             size: Size::Medium,
@@ -81,6 +87,13 @@ impl Button {
         self
     }
 
+    /// Use a composite control's selection color without painting another
+    /// selected background. This button still owns its hover and press feedback.
+    pub fn on_selection_surface(mut self, selected: bool) -> Self {
+        self.selection_surface = Some(selected);
+        self
+    }
+
     /// Keep the background transparent when hovered, pressed or selected,
     /// with a neutral keyboard focus border.
     pub fn no_fill(mut self) -> Self {
@@ -89,7 +102,7 @@ impl Button {
     }
 
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
-        self.tab_stop = tab_stop;
+        self.tab_stop = Some(tab_stop);
         self
     }
 
@@ -166,9 +179,19 @@ impl InteractiveElement for Button {
     fn interactivity(&mut self) -> &mut Interactivity {
         self.base.interactivity()
     }
+
+    fn track_focus(mut self, focus_handle: &FocusHandle) -> Self {
+        self.focus = Some(focus_handle.clone());
+        self
+    }
 }
 
-impl StatefulInteractiveElement for Button {}
+impl StatefulInteractiveElement for Button {
+    fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessible_label = Some(label.into());
+        self
+    }
+}
 
 impl DropdownMenu for Button {}
 
@@ -182,11 +205,15 @@ impl RenderOnce for Button {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = browser_theme(cx);
         let unavailable = self.disabled || self.loading;
-        let focus = window.use_keyed_state(self.id, cx, |_, cx| cx.focus_handle()).read(cx).clone().tab_index(0).tab_stop(self.tab_stop);
+        // Caller-owned handles retain their tab order and roving-focus policy.
+        let focus = self.focus.unwrap_or_else(|| window.use_keyed_state(self.id, cx, |_, cx| cx.focus_handle()).read(cx).clone().tab_index(0).tab_stop(true));
+        let focus = if let Some(tab_stop) = self.tab_stop { focus.tab_stop(tab_stop) } else { focus };
+        let accessible_label = self.accessible_label.or_else(|| self.label.clone()).or_else(|| self.tooltip.clone());
         let focused = !unavailable && focus.is_focused(window);
         let semantic = matches!(self.variant, Variant::Primary | Variant::Danger);
         let filled = self.fill && semantic && !cfg!(feature = "kobo");
         let danger = self.variant == Variant::Danger;
+        let on_accent = self.selection_surface == Some(true) && !cfg!(feature = "kobo");
         let background = if !self.fill {
             transparent_black()
         } else if filled {
@@ -205,7 +232,7 @@ impl RenderOnce for Button {
         };
         let hover = if !self.fill {
             transparent_black()
-        } else if self.selected || (filled && !danger) {
+        } else if on_accent || self.selected || (filled && !danger) {
             theme.accent_hover
         } else if danger {
             if filled { theme.danger.opacity(0.88) } else { theme.danger_surface }
@@ -216,7 +243,7 @@ impl RenderOnce for Button {
             transparent_black()
         } else if self.selected && cfg!(feature = "kobo") {
             theme.hover
-        } else if self.selected || (filled && !danger) {
+        } else if on_accent || self.selected || (filled && !danger) {
             theme.accent_active
         } else if danger {
             if filled { theme.danger.opacity(0.76) } else { theme.danger_surface }
@@ -240,7 +267,7 @@ impl RenderOnce for Button {
             .base
             .role(Role::Button)
             .aria_selected(self.selected)
-            .when_some(self.label.clone(), |button, label| button.aria_label(label))
+            .when_some(accessible_label, |button, label| button.aria_label(label))
             .relative()
             .flex()
             .flex_none()
@@ -258,17 +285,24 @@ impl RenderOnce for Button {
             .when(self.selected && self.fill && !cfg!(feature = "kobo"), |button| button.bg(theme.accent).text_color(theme.accent_text))
             .when(self.selected && self.fill && cfg!(feature = "kobo"), |button| button.bg(theme.page_bg).text_color(theme.text).border_2().border_color(theme.accent))
             .refine_style(&self.style)
+            .when(self.selection_surface.is_some(), |button| button.bg(transparent_black()).text_color(if on_accent { theme.accent_text } else { theme.text }))
             .when(!unavailable, |button| {
                 button
                     .track_focus(&focus)
-                    .hover(move |style| {
-                        let mut style = style.bg(hover);
-                        style.refine(&self.hover_style);
-                        style
+                    .when(!cfg!(feature = "kobo"), |button| {
+                        button.hover(move |style| {
+                            let mut style = style.bg(hover);
+                            style.refine(&self.hover_style);
+                            style
+                        })
                     })
                     .active(move |style| style.bg(active))
             })
-            .when(unavailable, |button| button.cursor_default().when(self.selected, |button| button.opacity(0.5)).when(!self.selected, |button| button.bg(theme.page_bg).text_color(theme.text_muted.opacity(0.5)).border_color(theme.rule)))
+            .when(unavailable, |button| {
+                // Dim the resolved variant and caller styling together, preserving
+                // transparency and the foreground chosen for the surrounding surface.
+                button.cursor_default().opacity(self.style.opacity.unwrap_or(1.0) * 0.5)
+            })
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 if unavailable {
                     cx.stop_propagation();

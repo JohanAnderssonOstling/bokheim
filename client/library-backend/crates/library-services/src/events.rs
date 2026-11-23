@@ -1,6 +1,10 @@
 //! Event delivery owned by one open library.
 
 use async_channel::{Receiver, Sender};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use crate::reading_positions::ReadingPositionPolicy;
 use crate::scheduler::SyncScheduler;
@@ -35,9 +39,13 @@ pub struct LibraryEventRouter {
     notifications: watch::Sender<()>,
     pub reading_positions: watch::Receiver<ReadingPositionPolicy>,
     pub sync: SyncScheduler,
-    pub assets: SyncScheduler,
+    pub uploads: SyncScheduler,
+    pub downloads: SyncScheduler,
     pub files: SyncScheduler,
     pub enrichment: SyncScheduler,
+    pub scan: SyncScheduler,
+    scan_waiting: Arc<AtomicBool>,
+    file_progress: Arc<AtomicU64>,
 }
 
 impl LibraryEventRouter {
@@ -54,12 +62,42 @@ impl LibraryEventRouter {
                 sender,
                 reading_positions,
                 sync: SyncScheduler::default(),
-                assets: SyncScheduler::default(),
+                uploads: SyncScheduler::default(),
+                downloads: SyncScheduler::default(),
                 files: SyncScheduler::default(),
                 enrichment: SyncScheduler::default(),
+                scan: SyncScheduler::default(),
+                scan_waiting: Arc::new(AtomicBool::new(false)),
+                file_progress: Arc::new(AtomicU64::new(0)),
             },
             LibraryEventState { receiver, position_updates, updates, closed: false },
         )
+    }
+
+    pub fn wake_assets(&self) {
+        self.uploads.wake();
+        self.downloads.wake();
+    }
+
+    pub fn refresh_assets(&self) {
+        self.uploads.request_remote_refresh();
+        self.downloads.request_remote_refresh();
+    }
+
+    pub fn set_scan_waiting(&self, waiting: bool) {
+        self.scan_waiting.store(waiting, Ordering::Release);
+    }
+
+    pub fn file_progress_revision(&self) -> u64 {
+        self.file_progress.load(Ordering::Acquire)
+    }
+
+    /// A blocked replay attempt must not keep the scanner awake.
+    pub fn file_work_progressed(&self) {
+        self.file_progress.fetch_add(1, Ordering::AcqRel);
+        if self.scan_waiting.load(Ordering::Acquire) {
+            self.scan.wake();
+        }
     }
 
     /// Wake synchronization after a commit. The owner coalesces content updates
@@ -89,7 +127,7 @@ impl LibraryEventRouter {
         if self.sender.is_closed() {
             return;
         }
-        self.assets.wake();
+        self.uploads.wake();
         self.updates.publish(LibraryUpdate::Covers(vec![book_id]));
     }
 
@@ -99,7 +137,7 @@ impl LibraryEventRouter {
         }
         if state == DownloadState::Downloaded {
             self.thumbnails.send_replace(());
-            self.assets.wake();
+            self.uploads.wake();
             self.files.wake();
         }
         self.text_search.send_replace(());
@@ -113,9 +151,10 @@ impl LibraryEventRouter {
     }
 
     fn contents_changed(&self) {
+        self.enrichment.wake();
         self.thumbnails.send_replace(());
         self.text_search.send_replace(());
-        self.assets.wake();
+        self.wake_assets();
         self.files.wake();
     }
 }
@@ -197,7 +236,7 @@ mod tests {
     fn sync_status_reaches_all_subscribers_without_scheduling_another_pass() {
         let (router, mut state) = LibraryEventRouter::new();
         let sync_requests = router.sync.subscribe();
-        let asset_requests = router.assets.subscribe();
+        let asset_requests = router.uploads.subscribe();
         let file_requests = router.files.subscribe();
         let enrichment_requests = router.enrichment.subscribe();
         let first = state.updates.subscribe();
@@ -219,7 +258,7 @@ mod tests {
     fn download_completion_wakes_durable_workers_and_keeps_the_presentation_identity() {
         let (router, mut state) = LibraryEventRouter::new();
         let sync_requests = router.sync.subscribe();
-        let asset_requests = router.assets.subscribe();
+        let asset_requests = router.uploads.subscribe();
         let file_requests = router.files.subscribe();
         let enrichment_requests = router.enrichment.subscribe();
         let updates = state.updates.subscribe();
@@ -249,6 +288,7 @@ mod tests {
         assert_eq!(state.updates.download_state(&hash), Some(downloading.clone()));
 
         let updates = state.updates.subscribe();
+        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Download(BookDownloadStatus::new(hash, downloading.clone())));
         router.download_status_changed(hash, DownloadState::Downloaded);
         router.download_status_changed(hash, downloading);
         state.drain(&router);

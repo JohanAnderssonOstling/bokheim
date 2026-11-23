@@ -139,7 +139,7 @@ impl LibraryImport<'_> {
             }
             let name = path.file_name().and_then(|name| name.to_str()).ok_or("invalid published filename")?.to_owned();
             let relative = self.storage.database().native_book_path(parent, &name).await?.ok_or("destination folder is missing")?;
-            let published = PublishedStagedBook { name: name.clone(), relative_path: relative.to_string(), published: true, fingerprint: Some(fingerprint(&path)?.to_string()) };
+            let published = PublishedStagedBook { name: name.clone(), relative_path: relative.to_string(), published: true, fingerprint: Some(fingerprint(&path)?) };
             let created = existing.is_none();
             let import = ValidatedImport { file_name: name, ..import };
             if let Some(state) = state {

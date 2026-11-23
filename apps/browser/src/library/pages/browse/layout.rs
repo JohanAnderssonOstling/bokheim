@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{App, Bounds, Div, Entity, MouseButton, Pixels, Point, SharedString, Stateful, Window, div, px, rems};
+use gpui_component::Selectable;
 use gpui_component::menu::OpenContextMenu;
 use library_model::{BrowseHeadingState, BrowsePageState, BrowseRow};
 use sync_common::DirId;
@@ -15,13 +16,13 @@ use ui_components as components;
 
 use super::cards::{CardEvent, CardEvents};
 use super::clipboard::FocusedBookClipboard;
-use super::drag_drop::{BookDrag, DragPreviewItem, drag_payload, folder_drag_source, folder_drop_target};
+use super::drag_drop::{BookDrag, DragSource, drag_payload, folder_drag_source, folder_drop_target, paginator_drag_source};
 use super::listing::{BrowseItem, BrowseItems, BrowseKind, book_id, chip_id, is_author_heading, resolve_items, shows_download_mark};
 use super::page::BrowseSplitSide;
 use super::section_card::SectionCard;
 use crate::library::widgets::{
-    BookCardInteraction, BookCardPresentation, BookCardView, PaginatorChild, PaginatorChildren, PaginatorDragPreview, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorSlots, PaginatorState, PaginatorWidthPolicy,
-    book_card_policy, browse_folder_card_policy, browse_section_card_policy, browse_shelf_card_policy,
+    BookCardInteraction, BookCardPresentation, BookCardView, PaginatorChild, PaginatorChildren, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorSlots, PaginatorState, PaginatorWidthPolicy, book_card_policy,
+    browse_folder_card_policy, browse_section_card_policy, browse_shelf_card_policy,
 };
 use crate::{CopyBooks, CutBooks};
 
@@ -30,22 +31,19 @@ use crate::{CopyBooks, CutBooks};
 pub(super) struct ChildInteraction {
     pub selected: bool,
     pub marquee: bool,
-    pub draggable: bool,
-    pub drag_preview: Option<PaginatorDragPreview>,
+    pub drag: Option<DragSource>,
 }
 
 pub(super) fn child_frame(
-    element: impl IntoElement, row: &BrowseRow, events: CardEvents, library_id: uuid::Uuid, source: Option<DirId>, items: Vec<BrowseItem>, interaction: ChildInteraction, chip_icon: components::NavigationIcon,
-    theme: components::BrowserTheme, cx: &App,
+    element: impl IntoElement, row: &BrowseRow, events: CardEvents, library_id: uuid::Uuid, source: Option<DirId>, items: Vec<BrowseItem>, interaction: ChildInteraction, theme: components::BrowserTheme,
 ) -> Stateful<Div> {
     let frame = div().id(format!("browse-chip-frame-{}", row.id)).w_full().h_full().child(element);
-    child_interactions(frame, row, events, library_id, source, items, interaction, chip_icon, theme, cx)
+    child_interactions(frame, row, events, library_id, source, items, interaction, theme)
 }
 
 /// Attach interactions to the visible entry itself when its cell has padding.
 pub(super) fn child_interactions(
-    frame: Stateful<Div>, row: &BrowseRow, events: CardEvents, library_id: uuid::Uuid, source: Option<DirId>, items: Vec<BrowseItem>, interaction: ChildInteraction, chip_icon: components::NavigationIcon, theme: components::BrowserTheme,
-    cx: &App,
+    frame: Stateful<Div>, row: &BrowseRow, events: CardEvents, library_id: uuid::Uuid, source: Option<DirId>, items: Vec<BrowseItem>, interaction: ChildInteraction, theme: components::BrowserTheme,
 ) -> Stateful<Div> {
     let location = row.id;
     let split_location = location;
@@ -91,15 +89,12 @@ pub(super) fn child_interactions(
                 cx.stop_propagation();
             }
         });
-    if let Some(source) = source {
+    if source.is_some() {
         if let library_model::BrowseLocation::Folder(destination) = row.id {
             frame = folder_drop_target(frame, library_id, destination, row.name.clone().into(), true, events, theme);
         }
-        if interaction.draggable
-            && let Some((targets, preview)) = drag_payload(&items, Some(source), library_id, chip_icon, cx)
-        {
-            let preview = interaction.drag_preview.map_or(preview, |snapshot| vec![DragPreviewItem::Snapshot(snapshot)]);
-            frame = folder_drag_source(frame, targets, preview);
+        if let Some(drag) = interaction.drag {
+            frame = folder_drag_source(frame, drag);
         }
     }
     frame
@@ -178,10 +173,7 @@ pub(super) fn book_child(
                 .child(BookCardView::preview(&rendered, presentation, interaction, window, cx))
                 .into_any_element();
         }
-        let drag_payload = drag.as_ref().and_then(|drag| drag(state, &frame_id, cx)).map(|(targets, preview)| {
-            let preview = state.drag_preview(&frame_id).map_or(preview, |snapshot| vec![DragPreviewItem::Snapshot(snapshot)]);
-            (targets, preview)
-        });
+        let drag_source = drag.as_ref().and_then(|drag| paginator_drag_source(state, frame_id.clone(), drag.clone()));
         let rendered = rendered.clone();
         let frame_id = frame_id.clone();
         let painted_bounds = painted_bounds.clone();
@@ -191,7 +183,7 @@ pub(super) fn book_child(
                 if presentation != BookCardPresentation::Grid {
                     let activate = rendered.clone();
                     let menu = rendered.clone();
-                    frame = keyboard_item(frame, move |window, cx| BookCardView::activate(&activate, window, cx), move |position, window, cx| BookCardView::open_items_menu(std::slice::from_ref(&menu), position, window, cx), cx);
+                    frame = keyboard_item(frame, move |_, cx| BookCardView::activate(&activate, cx), move |position, window, cx| BookCardView::open_items_menu(std::slice::from_ref(&menu), position, window, cx), cx);
                     let copy = rendered.clone();
                     let cut = rendered.clone();
                     frame = frame.on_action(move |_: &CopyBooks, window, cx| dispatch_book_clipboard(&copy, false, window, cx)).on_action(move |_: &CutBooks, window, cx| dispatch_book_clipboard(&cut, true, window, cx));
@@ -199,8 +191,8 @@ pub(super) fn book_child(
                 if presentation == BookCardPresentation::Section && !interaction.selected {
                     frame = frame.on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
                 }
-                if let Some((targets, preview)) = &drag_payload {
-                    frame = folder_drag_source(frame, targets.clone(), preview.clone());
+                if let Some(source) = &drag_source {
+                    frame = folder_drag_source(frame, source.clone());
                 }
                 frame.child(components::measured_bounds(painted_bounds.clone())).into_any_element()
             }));
@@ -211,7 +203,7 @@ pub(super) fn book_child(
     .with_id(item_id)
     .with_hit_bounds(hit_bounds)
     .prevent_selection_start()
-    .with_activate(move |window, cx| BookCardView::activate(&activated, window, cx))
+    .with_activate(move |_, cx| BookCardView::activate(&activated, cx))
     .with_prepare(move |window, cx| BookCardView::prefetch_for_window(&book, window, cx));
     if presentation == BookCardPresentation::Grid { child.with_own_cell() } else { child }
 }
@@ -259,7 +251,8 @@ pub(super) fn paginator_groups(
             if headings.is_some_and(|headings| headings.cards) {
                 return (true, placeholder);
             } else {
-                return (false, placeholder.with_intrinsic_width(components::HierarchyItemWidth { icon: chip_icon, label: text!(browse::loading_authors).into(), count: None, show_download: false }));
+                let content = components::HierarchyItemWidth { icon: chip_icon, label: text!(browse::loading_authors).into(), count: None, show_download: false };
+                return (false, placeholder.with_intrinsic_width(move |window, cx| content.measure(window, cx)));
             }
         };
         let width_label = SharedString::from(chip.name.clone());
@@ -276,43 +269,51 @@ pub(super) fn paginator_groups(
         // nothing to invoke for them. Enter and a click now share one path.
         let activate_events = events.clone();
         let activate_location = chip.id;
+        let resolve_drag: BookDrag = Rc::new(move |state, id, cx| drag_payload(&resolve_items(&state.target_ids(id), &drag_items), source, library_id, chip_icon, cx));
+        let menu_items = items.clone();
         let child = PaginatorChild::new(move |state, _, cx| {
             let focused = state.is_focused(&rendered_id);
             let selected = state.is_selected(&rendered_id);
             let theme = components::browser_theme(cx);
-            let selected_items = resolve_items(&state.target_ids(&rendered_id), &drag_items);
-            let header_drag = (is_card && !state.preview)
-                .then(|| drag_payload(&selected_items, source, library_id, chip_icon, cx))
-                .flatten()
-                .map(|(targets, preview)| (targets, state.drag_preview(&rendered_id).map_or(preview, |snapshot| vec![DragPreviewItem::Snapshot(snapshot)])));
+            let selected_items = resolve_items(&state.target_ids(&rendered_id), &menu_items);
+            let drag = (!state.preview).then(|| paginator_drag_source(state, rendered_id.clone(), resolve_drag.clone())).flatten();
+            let header_drag = is_card.then(|| drag.clone()).flatten();
             let item = match &section_card {
                 None if is_card => div().size_full().p_4().bg(theme.hover).child(chip.name.clone()).into_any_element(),
-                None => components::compact_hierarchy_item(
-                    format!("browse-chip-{}", chip.id),
-                    chip_icon,
-                    chip.name.clone(),
-                    chip.path.clone().map(SharedString::from),
-                    child_count,
-                    download_mark(&chip, events.clone(), theme),
-                    selected,
-                    focused,
-                    state.marquee,
-                    theme,
-                )
-                .debug_selector(|| format!("browse-chip-{}", chip.id))
-                .into_any_element(),
+                None => components::Button::new(format!("browse-chip-{}", chip.id))
+                    .ghost()
+                    .selected(selected)
+                    .size_full()
+                    .max_w_full()
+                    .min_w_0()
+                    .p_0()
+                    .border_0()
+                    .aria_label(chip.name.clone())
+                    .when(!selected, |button| {
+                        let base = if focused { theme.accent_wash } else { theme.page_bg };
+                        let hovered = if focused { theme.accent_wash_hover } else { theme.hover };
+                        button.bg(base).hover(|style| style.bg(if state.marquee { base } else { hovered }))
+                    })
+                    .child(
+                        components::hierarchy_item_content(chip_icon, chip.name.clone(), chip.path.clone().map(SharedString::from), theme)
+                            .children(child_count.map(|count| div().flex_none().text_color(theme.text_muted).child(count.to_string())))
+                            .children(download_mark(&chip, events.clone(), theme).map(|download| div().size(rems(components::DOWNLOAD_ACTION_SIZE_REM)).flex_none().flex().items_center().justify_center().child(download))),
+                    )
+                    .debug_selector(|| format!("browse-chip-{}", chip.id))
+                    .into_any_element(),
                 Some(card) => SectionCard::present(card.clone(), focused, selected, state.marquee, header_drag, state.preview).into_any_element(),
             };
             if shelves || state.preview {
                 return div().relative().size_full().child(item).into_any_element();
             }
-            let interaction = ChildInteraction { selected, marquee: state.marquee, draggable: !is_card, drag_preview: state.drag_preview(&rendered_id) };
-            let frame = child_frame(item, &chip, events.clone(), library_id, source, selected_items, interaction, chip_icon, theme, cx);
+            let interaction = ChildInteraction { selected, marquee: state.marquee, drag: (!is_card).then_some(drag).flatten() };
+            let frame = child_frame(item, &chip, events.clone(), library_id, source, selected_items, interaction, theme);
             let frame = if is_card { frame.relative() } else { frame.h(rems(components::COMPACT_HIERARCHY_ITEM_HEIGHT_REM)) };
             frame.into_any_element()
         })
-        .with_id(item_id)
-        .with_intrinsic_width(components::HierarchyItemWidth { icon: chip_icon, label: width_label, count: child_count, show_download });
+        .with_id(item_id);
+        let content = components::HierarchyItemWidth { icon: chip_icon, label: width_label, count: child_count, show_download };
+        let child = child.with_intrinsic_width(move |window, cx| content.measure(window, cx));
         let child = if shelves { child } else { child.with_activate(move |window, cx| activate_events(CardEvent::OpenChild(activate_location), window, cx)) };
         (is_card, child)
     });
@@ -362,6 +363,7 @@ fn outer_heading_rows(chips: &[BrowseRow], headings: Option<&BrowseHeadingState>
 #[cfg(test)]
 mod heading_tests {
     use super::*;
+    use crate::library::widgets::new_paginator;
     use library_model::BrowseLocation;
 
     #[cfg(all(not(target_arch = "wasm32"), not(feature = "kobo")))]
@@ -382,7 +384,7 @@ mod heading_tests {
         let selected = Rc::new(Cell::new(false));
         let child_selected = selected.clone();
         let child = PaginatorChild::new(move |_, _, cx| {
-            let row = BrowseRow { id: BrowseLocation::Folder(DirId::from_u128(1)), name: "Folder".into(), path: None, book_count: 0, downloaded_book_count: 0 };
+            let row = BrowseRow { id: BrowseLocation::Folder(DirId::from_u128(1)), name: "Folder".into(), path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None };
             child_frame(
                 div().size_full(),
                 &row,
@@ -391,9 +393,7 @@ mod heading_tests {
                 None,
                 vec![BrowseItem::Child { row: row.clone(), parent: None }],
                 ChildInteraction { selected: child_selected.get(), ..Default::default() },
-                BrowseKind::Folder.child_icon(),
                 components::browser_theme(cx),
-                cx,
             )
             .debug_selector(|| "context-folder".into())
             .into_any_element()
@@ -401,7 +401,7 @@ mod heading_tests {
         .with_id("folder");
         let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(200.0)), PaginatorSizing::pixels(px(100.0)), px(0.0)).with_maximum_width(PaginatorWidthPolicy::pixels(px(200.0))).pack_start();
         let recorded = menus.clone();
-        let window = cx.open_window(size(px(1000.0), px(400.0)), |_, _| Paginator::new("folder-context-test", [PaginatorGroup::new(policy, [child])]).selectable().on_context_menu(move |_, _, _, _| recorded.borrow_mut().push("page")));
+        let window = cx.open_window(size(px(1000.0), px(400.0)), |_, _| new_paginator("folder-context-test", [PaginatorGroup::new(policy, [child])]).selectable().on_context_menu(move |_, _, _, _| recorded.borrow_mut().push("page")));
         let flow = window.root(cx).unwrap();
         let visual = &mut VisualTestContext::from_window(window.into(), cx);
         // A nested folder must still claim its press when its enclosing card
@@ -471,6 +471,8 @@ mod heading_tests {
                         download_requested: false,
                         format_category: LibraryFileTypeFilter::Book,
                         audiobook_duration_ms: None,
+                        size_bytes: None,
+                        format: None,
                         added_at: 0,
                         source_directory: None,
                     };
@@ -483,7 +485,7 @@ mod heading_tests {
         row.source = BookSource::Library { book_id: hash };
         let library_book = BookCardView::create_in_grid(row, library.clone(), Rc::new(|_, _, _| {}), false, false, cx);
         let folder_id = DirId::from_u128(778);
-        let folder = BrowseItem::Child { row: BrowseRow { id: BrowseLocation::Folder(folder_id), name: "Folder".into(), path: None, book_count: 0, downloaded_book_count: 0 }, parent: None };
+        let folder = BrowseItem::Child { row: BrowseRow { id: BrowseLocation::Folder(folder_id), name: "Folder".into(), path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None }, parent: None };
         cx.update(|cx| {
             let selection = [folder.clone(), BrowseItem::Book(library_book.clone())];
             let icon = BrowseKind::Folder.child_icon();
@@ -512,7 +514,7 @@ mod heading_tests {
         let flow = cx.new(|cx| {
             let this: gpui::WeakEntity<Paginator> = cx.weak_entity();
             let groups = paginator_groups(Rc::new(|_, _, _| {}), library_id, Rc::new(Vec::new()), BrowseKind::Catalog, books.clone(), None, &HashMap::new(), items.clone(), None, &BTreeMap::new(), &BTreeMap::new(), cx);
-            Paginator::new("catalog-selection", groups).selectable().on_context_menu(move |id, position, window, cx| {
+            new_paginator("catalog-selection", groups).selectable().on_context_menu(move |id, position, window, cx| {
                 let (Some(id), Some(flow)) = (id, this.upgrade()) else { return };
                 let books = resolve_items(&flow.read(cx).target_ids(&id), &items)
                     .into_iter()
@@ -569,8 +571,8 @@ mod heading_tests {
 
     #[test]
     fn sparse_author_headings_preserve_distant_positions_and_leave_other_chips_first() {
-        let row = |id| BrowseRow { id: BrowseLocation::CatalogAuthor(Some(uuid::Uuid::from_u128(id))), name: format!("Writer {id}"), path: None, book_count: 2, downloaded_book_count: 0 };
-        let catalog = BrowseRow { id: BrowseLocation::Catalog(library_model::ROOT_SUBJECT_ROUTE_ID), name: "Catalog".into(), path: None, book_count: 0, downloaded_book_count: 0 };
+        let row = |id| BrowseRow { id: BrowseLocation::CatalogAuthor(Some(uuid::Uuid::from_u128(id))), name: format!("Writer {id}"), path: None, book_count: 2, downloaded_book_count: 0, size_bytes: None };
+        let catalog = BrowseRow { id: BrowseLocation::Catalog(library_model::ROOT_SUBJECT_ROUTE_ID), name: "Catalog".into(), path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None };
         let first = row(1);
         let distant = row(28);
         let loaded = BTreeMap::from([(0, first.clone()), (27, distant.clone())]);

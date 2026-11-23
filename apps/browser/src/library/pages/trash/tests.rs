@@ -74,7 +74,7 @@ async fn reader_entry_preserves_displayed_trash_covers_and_requests(cx: &mut Tes
     let hash = book.book_id;
     let page = cx.new(|cx| {
         let mut page = TrashPage::new(library, cx);
-        page.request.take();
+        page.refresh_pending = false;
         page.contents = Some(LibraryTrashView { books: vec![book], folders: Vec::new() });
         page
     });
@@ -107,7 +107,7 @@ async fn large_trash_only_builds_nearby_rows_and_actions_keep_their_ids_across_f
     let now = now_ms();
     let view = cx.new(|cx| {
         let mut page = TrashPage::new(library, cx);
-        page.request.take();
+        page.refresh_pending = false;
         page.contents = Some(LibraryTrashView { books: (0..10_000).map(|index| book(index, now - index as i64)).collect(), folders: Vec::new() });
         page
     });
@@ -214,7 +214,7 @@ async fn refreshing_a_hidden_trash_page_cancels_its_previous_cover_work(cx: &mut
     // cover queue must be invalidated by completion, without requiring render.
     let page = cx.new(|cx| {
         let mut page = TrashPage::new(library, cx);
-        page.request.take();
+        page.refresh_pending = false;
         page.contents = Some(LibraryTrashView { books: (0..100).map(|index| book(index, now)).collect(), folders: Vec::new() });
         page.request_visible_covers((0..100).map(|index| book(index, now).book_id).collect(), cx);
         assert_eq!(page.cover_requests.len(), MAX_COVER_REQUESTS);

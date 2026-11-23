@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 #[cfg(all(target_os = "android", feature = "android"))]
 mod android;
-#[cfg(any(all(target_os = "android", feature = "android"), test))]
-mod android_fonts;
 #[cfg(all(target_os = "android", feature = "android"))]
 mod android_updates;
 mod blocking_worker;
@@ -13,10 +11,12 @@ pub use reader_links::ReaderActivation;
 pub(crate) use reader_links::forward_reader_links;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 pub mod linux_updates;
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+pub mod macos_updates;
 mod session;
 #[cfg(feature = "desktop")]
 mod single_instance;
-#[cfg(any(all(feature = "desktop", any(target_os = "linux", target_os = "windows")), all(feature = "android", target_os = "android")))]
+#[cfg(any(all(feature = "desktop", any(target_os = "linux", target_os = "windows", target_os = "macos")), all(feature = "android", target_os = "android")))]
 mod update_binding;
 #[cfg(all(feature = "desktop", any(target_os = "linux", target_os = "windows")))]
 pub mod update_entry;
@@ -78,7 +78,7 @@ impl UiLaunchOptions {
 #[cfg(feature = "kobo")]
 fn platform_content<V: gpui::Render + 'static>(content: Entity<V>, cx: &mut App) -> Entity<KoboKeyboardRoot<V>> {
     // The keyboard sits outside gpui-component's Root, so it reads the same UI font Root applies.
-    cx.new(|_| KoboKeyboardRoot::new(content, |cx| gpui_component::Theme::global(cx).font_family.clone()))
+    cx.new(|_| KoboKeyboardRoot::new(content, |cx| gpui_component::Theme::global(cx).font_family.clone()).overlay_keyboard_when(ui_components::kobo::has_open_panel))
 }
 
 #[cfg(all(any(feature = "desktop", feature = "mobile"), not(feature = "kobo")))]
@@ -137,6 +137,8 @@ pub fn open_ui(
     let update_controls = linux_updates::bind(cx);
     #[cfg(all(feature = "desktop", target_os = "windows"))]
     let update_controls = windows_updates::bind(cx);
+    #[cfg(all(feature = "desktop", target_os = "macos"))]
+    let update_controls = macos_updates::bind(cx);
     #[cfg(all(feature = "android", target_os = "android"))]
     let update_controls = android_updates::bind(cx);
     reader_ui::configure_font_cache(backend_context.app_data_dir().join("cache/fonts/v1"));
@@ -168,8 +170,6 @@ pub fn open_ui(
         value
     };
 
-    #[cfg(all(target_os = "android", feature = "android"))]
-    let android_private_library_root = backend_context.app_data_dir().join("libraries");
     let (backend_worker, backend_startup) = match AppClient::start_native(backend_context) {
         Ok(started) => started,
         Err(error) => {
@@ -184,10 +184,6 @@ pub fn open_ui(
 
     let reader_session_saves = session_saves.clone();
     let reader_preferences_store = backend_worker.preferences.clone();
-    #[cfg(all(target_os = "android", feature = "android"))]
-    if cx.global::<browser_ui::AndroidStoragePolicy>().all_files_access_available {
-        android::watch_storage_access(reader_preferences_store.clone(), android_private_library_root, cx);
-    }
     let save_reader_settings: SaveReaderSettings = Rc::new(move |preferences: ReaderPreferences, patches, cx: &mut App| {
         reader_session_saves.update(cx, |owner, cx| {
             owner.session.reader_preferences = preferences;
@@ -266,7 +262,7 @@ pub fn open_ui(
                 let services = AppServices::new(backend_worker, startup, save_kobo_auto_rotate.clone());
                 #[cfg(all(any(feature = "desktop", feature = "mobile"), not(feature = "kobo")))]
                 let services = AppServices::new(backend_worker, startup);
-                #[cfg(any(all(feature = "desktop", any(target_os = "linux", target_os = "windows")), all(feature = "android", target_os = "android")))]
+                #[cfg(any(all(feature = "desktop", any(target_os = "linux", target_os = "windows", target_os = "macos")), all(feature = "android", target_os = "android")))]
                 let services = match update_controls {
                     Some(updates) => services.with_updates(updates),
                     None => services,

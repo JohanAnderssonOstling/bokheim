@@ -2,7 +2,7 @@
 //! Execution and book/image parsing belong to `cpu-host`, not this contract.
 use book_inspection_contract::{CachedPdfReader, InspectedBook};
 use book_model::{BookFormat, BookRecord, BookTextIndex, BookTextLocation, BookTextMatch};
-use client_platform_runtime::executor::{spawn_detached, BackendSend, BoxedBackendFuture};
+use client_platform_runtime::executor::{BackendSend, BoxedBackendFuture, spawn_detached};
 pub use client_protocol::BackendError;
 use content_address::BookId;
 use serde::{Deserialize, Serialize};

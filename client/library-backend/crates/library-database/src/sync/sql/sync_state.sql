@@ -7,10 +7,7 @@
 -- param: kind: &str
 -- param: key: &StateKey
 -- param: subkey: &str
-SELECT state_kind,state_key,state_subkey FROM (
-    SELECT state_kind,state_key,state_subkey FROM sync_state_version
-    UNION ALL SELECT state_kind,content_hash,'' FROM sync_book_record
-) WHERE (state_kind,state_key,state_subkey)>(:kind,:key,:subkey)
+SELECT state_kind,state_key,state_subkey FROM sync_state_version WHERE (state_kind,state_key,state_subkey)>(:kind,:key,:subkey)
 ORDER BY state_kind,state_key,state_subkey LIMIT 256;
 
 -- name: sync_cursor_recovery_pending ->
@@ -23,7 +20,7 @@ UPDATE sync_metadata SET pull_generation = NULL, last_pull_lifecycle_seq = NULL,
 UPDATE sync_metadata SET cursor_recovery_pending = NULL WHERE singleton = 1;
 
 -- name: sync_pull_cursor?
-SELECT pull_generation, CAST(last_pull_lifecycle_seq AS TEXT), CAST(last_pull_field_seq AS TEXT) FROM sync_metadata WHERE singleton = 1;
+SELECT pull_generation, last_pull_lifecycle_seq, last_pull_field_seq FROM sync_metadata WHERE singleton = 1;
 
 -- name: sync_write_pull_cursor!
 -- param: generation: Option<&str>
@@ -44,9 +41,3 @@ INSERT INTO sync_metadata(singleton, last_pull_field_seq) VALUES (1, :revision) 
 
 -- name: cursor_field_clear!
 UPDATE sync_metadata SET last_pull_field_seq = NULL WHERE singleton = 1;
-
--- name: syncmeta_cursor_recovery_pending?
-SELECT CAST(cursor_recovery_pending AS TEXT) FROM sync_metadata WHERE singleton = 1;
-
--- name: syncmeta_cloud_storage_enabled?
-SELECT CAST(cloud_storage_enabled AS TEXT) FROM sync_metadata WHERE singleton = 1;

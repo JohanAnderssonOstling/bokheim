@@ -9,8 +9,8 @@ GitHub is optional build/artifact storage.
 
 1. Build optimized application packages for each supported target. Perform platform package signing and compatibility verification.
    Release publication does not run tests or require test-status gates. Schema migrations ship in the application.
-2. If publishing taxonomy, prepare and validate the snapshot with its final
-   release ID. Include the compatible application/schema/format requirements.
+2. If publishing taxonomy, compile and validate the runtime image with its final
+   release ID using `compile-taxonomy` (see [taxonomy publication](../taxonomy/README.md#runtime-publication)). Include the compatible application/schema/format requirements.
 3. Prepare a manifest using the types in `shared/update-protocol/src/lib.rs`.
    Set each artifact's exact bytes and SHA-256, immutable HTTPS URL, and a new,
    monotonically increasing publication sequence. Use a bounded expiry.
@@ -22,8 +22,8 @@ GitHub is optional build/artifact storage.
    sequence, length and digest; copies and flushes immutable artifacts; archives
    the envelope; then atomically replaces `/v1/stable` **last**.
 6. Verify the public feed and artifact URLs. Clients discover the new offer on
-   their next successful check. They still need explicit Update consent; activation
-   waits for a later launch (Android APK installation uses its system installer).
+   their next successful check. Application packages still need explicit Update consent. Compatible taxonomy-only
+   offers stage automatically; activation waits for a later launch (Android APK installation uses its system installer).
 
 Application and taxonomy releases can be published separately. A manifest is the
 complete current offer: retain the unchanged component when publishing the other.
@@ -55,8 +55,8 @@ external directories are rejected; the client protocol remains provider independ
 
 The manifest's optional `catalog` entry names the public-domain catalog
 snapshot on `https://catalogs.bokheim.se` (directory `catalog`). Clients fetch it
-quietly, without the approval and restart an application or taxonomy update
-takes. `catalog DIR publish OUT_DIR N` (servers/catalog) writes the tree that
+quietly. Compatible catalogs activate without a restart; taxonomy selection waits
+for the next launch. `catalog DIR publish OUT_DIR N --taxonomy RUNTIME.sqlite3` (servers/catalog) writes the tree that
 origin serves, `releases/N/catalog.sqlite3`, `books/` and `covers/`, and prints
 the entry to put in the manifest. Publication also writes `catalog.sqlite3.gz`
 with gzip level 9 and `catalog.sqlite3.zst` with Zstandard level 19. Copy these
@@ -64,11 +64,9 @@ alongside the SQLite file: Caddy negotiates the precompressed representation,
 and clients verify and store the decoded SQLite bytes. The manifest still names
 the ordinary `.sqlite3` URL, size, and SHA-256. Existing snapshots can gain these
 representations with `catalog compress-snapshot INPUT`, preserving their bytes.
-Catalog format 12 uses 8 KiB SQLite pages, 32-byte binary book hashes, complete
+Catalog format 13 uses 8 KiB SQLite pages, 32-byte binary book hashes, complete
 UTF-8 descriptions, and integer taxonomy concept assignments. Publication shares
 only byte-identical complete descriptions. There are no per-line references.
-Earlier format-11 snapshots can expose the same `description(row_id,text)`
-interface through a view over shared lines; existing clients read both layouts.
 Source observations use numeric IDs and retain source credits. Native entry IDs
 and audit page URLs remain in server curation. Book entry URLs and download
 URLs stay in the client catalog for acquisition.
@@ -79,7 +77,9 @@ catalog from curation with that taxonomy and publish both offers in the same
 signed feed. A taxonomy-only update cannot discover new assignments from codes
 that clients no longer carry. Existing concept identities survive taxonomy
 renaming and reparenting, including after importing a catalog book.
-The app reads the current catalog format (11). Publish catalog and taxonomy
+Clients accept only catalog format 13, including its minimum taxonomy release.
+Rebuild and republish older catalog snapshots in the current format. A catalog
+whose dependency has not activated remains pending. Publish catalog and taxonomy
 updates through the signed feed; installation and recovery remain automatic.
 Public releases remain immutable: publish a new release ID for a format change.
 Copy OUT_DIR to
@@ -166,7 +166,7 @@ pass the preparation gate.
 python3 servers/updates/prepare-github-release.py \
   --source-repository JohanAnderssonOstling/bokheim-release \
   --release-repository JohanAnderssonOstling/bokheim-release \
-  --source-commit FULL_SOURCE_SHA --tag v1.2.0 --sequence 1 \
+  --tag v1.2.0 --sequence 1 \
   --android-cert-sha256 "$BOKHEIM_ANDROID_CERT_SHA256" \
   --config /secure/bokheim-updates.json --initial --output /tmp/update-bundle
 ```
@@ -310,8 +310,8 @@ scripts and health checks. Publishing a client update does not restart those
 services. Deploy compatible API additions first; publish clients second; remove
 old API behavior only after the supported-client policy allows it.
 
-The existing taxonomy deployment helper stamps a new release ID during deployment.
-Archive and hash the **final deployed snapshot**, not the unstamped source file.
+The taxonomy compiler stamps the release ID before finalizing the immutable runtime image.
+Archive and hash the **final compiled runtime**, not its authoring source.
 Publishing validates bytes and signatures; semantic taxonomy checks and migration
 tests are release gates that must run before signing. This tool does not run SQL
 from a manifest or modify users' libraries.
@@ -325,8 +325,10 @@ Packaged rollout trials and the first updater-enabled distribution remain pendin
 Linux and Android packages are built and verified locally using
 `scripts/ci/local-release.py`; Windows alone uses the desktop release workflow.
 All packages and their `build-receipt-*.json` files are uploaded to the same draft
-in `bokheim-release`. Prepare with `--source-commit FULL_SOURCE_SHA`; preparation
-and publication check these per-platform receipts and the successful Windows
-run. `--run-id` is retained for older combined Actions builds. See
+in `bokheim-release`. Preparation and publication check each package's actual
+source commit, hashes and compatibility, plus the successful Windows run.
+Packages can come from different commits; verified executables do not need to
+be rebuilt when release tooling changes. `--source-commit` is an optional release
+reference and does not constrain the package build sources. `--run-id` is retained for older combined Actions builds. See
 `scripts/ci/README.md` for commands. Web builds deploy directly to the server and
 do not need GitHub release assets.

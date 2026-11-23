@@ -3,7 +3,7 @@
 use crate::query_methods::{blob_column, optional_blob_column, query_rows};
 pub(crate) use crate::sync::SyncOutboxSql;
 use crate::sync::apply::registers::publication_snapshot;
-use crate::sync::storage_i64;
+use crate::sync::{MutationIssuesSql, storage_i64};
 use crate::transactions::WriteOutcome::Commit;
 pub(crate) use crate::{Database, DatabaseError};
 use content_address::BookId;
@@ -54,56 +54,54 @@ pub(crate) fn decode_outbox_row(row: OutboxRow<'_>) -> Result<StatePublication, 
     Ok(sync_common::Publication { publisher_seq, state: sync_common::Versioned { value: body, version } })
 }
 
-/// All book state waits for its draft to complete. Non-removal state also
-/// waits for the book bytes when cloud storage is enabled.
-#[derive(Clone)]
-struct PublicationDependencies {
-    drafts: HashSet<BookId>,
-    uploads: HashSet<BookId>,
-    reading_positions: HashSet<BookId>,
-}
-
-/// Prepared queue bounds and dependencies. Contains no connection or transaction.
-/// The unique outbox identity already coalesces each value before this scan.
+/// Prepared queue bounds and reading-position exclusions. No database lease.
 #[derive(Clone)]
 pub struct OutboxScan {
     through: i64,
     after: i64,
     lifecycles: bool,
     finished: bool,
-    pending: PublicationDependencies,
+    reading_positions: HashSet<BookId>,
 }
 
-fn book_ready(mutation: &StatePublication, pending: &PublicationDependencies) -> bool {
-    mutation.state.value.book().is_none_or(|hash| !pending.drafts.contains(&hash)) && mutation.state.value.upload_dependency().is_none_or(|hash| !pending.uploads.contains(&hash))
-}
-
-/// Content hashes whose exact local book version is still uploading. Pending
-/// state stays durable until completion releases it.
-fn outbox_pending_uploads(connection: &Connection) -> Result<PublicationDependencies, DatabaseError> {
-    let cloud_storage_enabled = connection.sync_cloud_storage_enabled(|row| row.get::<_, Option<i64>>(0))?;
-    let mut pending = PublicationDependencies { drafts: HashSet::new(), uploads: HashSet::new(), reading_positions: HashSet::new() };
-    connection.sync_pending_book_drafts(|row| {
-        pending.drafts.insert(row.get::<_, BookId>(0)?);
-        Ok(())
-    })?;
-    if cloud_storage_enabled == Some(0) {
-        return Ok(pending);
-    }
-    connection.sync_pending_uploads(|row| {
-        pending.uploads.insert(row.get::<_, BookId>(0)?);
-        Ok(())
-    })?;
-    Ok(pending)
+fn record_corrupt_publication(connection: &Connection, sequence: i64, error: &DatabaseError) -> Result<(), DatabaseError> {
+    let sequence_id = ReplicaSeq::new(u64::try_from(sequence).map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?;
+    let issue = sync_common::wire::encode(&sync_common::MutationIssue::Untransmittable(sequence_id)).map_err(DatabaseError::operation)?;
+    connection.sync_issue_record(sequence, 2, &issue)?;
+    log::error!("sync publication {sequence} was isolated without deleting it: {error}");
+    Ok(())
 }
 
 impl Database {
     /// Freeze and select a publication snapshot under one writer reservation.
     pub(crate) fn with_publications<T>(&self, read: impl FnOnce(&Connection) -> Result<T, DatabaseError>) -> Result<T, DatabaseError> {
         self.with_write_transaction(|tx| {
-            let pending = query_rows(|callback| tx.outbox_pending_snapshots(callback), |r| Ok((r.get::<_, String>(0)?, r.get::<_, StateKey>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)))?;
-            for (kind, key, subkey, seq) in pending {
-                let Some((bytes, current)) = publication_snapshot(tx, &kind, &key, &subkey)? else { continue };
+            let pending = query_rows(
+                |callback| tx.outbox_pending_snapshots(callback),
+                |r| {
+                    let fields = (|| -> rusqlite::Result<_> { Ok((r.get::<_, String>(0)?, r.get::<_, StateKey>(1)?, r.get::<_, String>(2)?)) })();
+                    Ok((r.get::<_, i64>(3)?, fields))
+                },
+            )?;
+            for (seq, fields) in pending {
+                let (kind, key, subkey) = match fields {
+                    Ok(value) => value,
+                    Err(error) => {
+                        record_corrupt_publication(tx, seq, &DatabaseError::from(error))?;
+                        continue;
+                    }
+                };
+                let snapshot = match publication_snapshot(tx, &kind, &key, &subkey) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        record_corrupt_publication(tx, seq, &error)?;
+                        continue;
+                    }
+                };
+                let Some((bytes, current)) = snapshot else {
+                    record_corrupt_publication(tx, seq, &DatabaseError::message("queued publication has no canonical value"))?;
+                    continue;
+                };
                 let version = sync_common::wire::encode(&current).map_err(DatabaseError::operation)?;
                 // Recovery forwards the exact retained version, never a newer edit.
                 tx.outbox_freeze_snapshot(&bytes, &(storage_i64(current.changed_at, "publication timestamp")?), &version, &seq)?;
@@ -123,17 +121,16 @@ impl Database {
     pub fn sync_prepare_outbox_excluding_positions(&self, waiting: HashSet<BookId>) -> Result<OutboxScan, DatabaseError> {
         self.with_publications(|connection| {
             let through = connection.sync_outbox_watermark(|row| row.get(0))?;
-            let mut pending = outbox_pending_uploads(connection)?;
-            pending.reading_positions = waiting;
-            Ok(OutboxScan { through, after: i64::MIN, lifecycles: true, finished: false, pending })
+            Ok(OutboxScan { through, after: i64::MIN, lifecycles: true, finished: false, reading_positions: waiting })
         })
     }
 
-    /// Short read-only pages: no repeated freezing, projection, or dependency scan.
+    /// Short read pages: no repeated freezing, projection, or dependency scan.
+    /// Corrupt publications receive diagnostics after releasing the reader.
     /// Lifecycles precede fields across the entire watermark, not just each page.
     pub fn sync_next_outbox_page(&self, scan: &mut OutboxScan) -> Result<Vec<StatePublication>, DatabaseError> {
         while !scan.finished {
-            let (page, after, done) = self.read_publication_page(&self.connection, &scan.pending, scan.after, scan.through, scan.lifecycles)?;
+            let (page, after, done) = self.read_publication_page(&self.connection, &scan.reading_positions, scan.after, scan.through, scan.lifecycles)?;
             scan.after = after;
             if done {
                 if scan.lifecycles {
@@ -152,41 +149,67 @@ impl Database {
 
     // Stream each SQL page, stop at
     // the publication budget, and continue scanning past deferred rows.
-    fn read_publication_page(&self, connection: &Connection, pending: &PublicationDependencies, after: i64, through: i64, lifecycles: bool) -> Result<(Vec<StatePublication>, i64, bool), DatabaseError> {
-        let mut statement = connection.prepare_cached(include_str!("sql/outbox_page.sql"))?;
-        let mut mutations = Vec::new();
-        let mut bytes = 0usize;
-        let mut scanned_through = after;
-        loop {
-            let mut rows = statement.query(named_params! { ":after": scanned_through, ":through": through, ":limit": OUTBOX_PAGE_ROWS as i64, ":lifecycles": lifecycles })?;
-            let mut scanned = 0;
-            while let Some(row) = rows.next()? {
-                let stored = read_outbox_row(row)?;
-                let body_bytes = stored.body.len();
-                if !mutations.is_empty() && body_bytes > OUTBOX_PAGE_BYTES.saturating_sub(bytes) {
-                    // Do not decode or advance past the next page's first row.
-                    return Ok((mutations, scanned_through, false));
+    fn read_publication_page(&self, connection: &Connection, reading_positions: &HashSet<BookId>, after: i64, through: i64, lifecycles: bool) -> Result<(Vec<StatePublication>, i64, bool), DatabaseError> {
+        let mut corrupt = Vec::new();
+        let result = (|| -> Result<_, DatabaseError> {
+            let mut statement = connection.prepare_cached(include_str!("sql/outbox_page.sql"))?;
+            let mut mutations = Vec::new();
+            let mut bytes = 0usize;
+            let mut scanned_through = after;
+            loop {
+                let mut rows = statement.query(named_params! { ":after": scanned_through, ":through": through, ":limit": OUTBOX_PAGE_ROWS as i64, ":lifecycles": lifecycles })?;
+                let mut scanned = 0;
+                while let Some(row) = rows.next()? {
+                    let sequence: i64 = row.get(4)?;
+                    let decoded = (|| {
+                        let stored = read_outbox_row(row)?;
+                        let body_bytes = stored.body.len();
+                        Ok::<_, DatabaseError>((decode_outbox_row(stored)?, body_bytes))
+                    })();
+                    let (mutation, body_bytes) = match decoded {
+                        Ok(value) => value,
+                        Err(error) => {
+                            corrupt.push((sequence, error));
+                            scanned_through = sequence;
+                            scanned += 1;
+                            continue;
+                        }
+                    };
+                    if !mutations.is_empty() && body_bytes > OUTBOX_PAGE_BYTES.saturating_sub(bytes) {
+                        // Leave this row for the next bounded page.
+                        return Ok((mutations, scanned_through, false));
+                    }
+                    scanned_through = sequence;
+                    scanned += 1;
+                    let position_ready = match &mutation.state.value {
+                        LibraryStateEntry::ReadingPosition { book_id, .. } => !reading_positions.contains(book_id),
+                        _ => true,
+                    };
+                    if !position_ready {
+                        continue;
+                    }
+                    bytes += body_bytes;
+                    mutations.push(mutation);
+                    if bytes >= OUTBOX_PAGE_BYTES || mutations.len() >= OUTBOX_PAGE_ROWS {
+                        return Ok((mutations, scanned_through, false));
+                    }
                 }
-                scanned_through = stored.replica_seq;
-                scanned += 1;
-                let mutation = decode_outbox_row(stored)?;
-                let position_ready = match &mutation.state.value {
-                    LibraryStateEntry::ReadingPosition { book_id, .. } => !pending.reading_positions.contains(book_id),
-                    _ => true,
-                };
-                if !book_ready(&mutation, pending) || !position_ready {
-                    continue;
-                }
-                bytes += body_bytes;
-                mutations.push(mutation);
-                if bytes >= OUTBOX_PAGE_BYTES || mutations.len() >= OUTBOX_PAGE_ROWS {
-                    return Ok((mutations, scanned_through, false));
+                if scanned < OUTBOX_PAGE_ROWS {
+                    return Ok((mutations, scanned_through, true));
                 }
             }
-            if scanned < OUTBOX_PAGE_ROWS {
-                return Ok((mutations, scanned_through, true));
-            }
+        })()?;
+        // Finish the read before writing durable per-entry diagnostics. Leave
+        // corrupt rows intact, excluded until a newer edit supersedes them.
+        if !corrupt.is_empty() {
+            self.write(|tx| {
+                for (sequence, error) in &corrupt {
+                    record_corrupt_publication(tx, *sequence, error)?;
+                }
+                Ok(())
+            })?;
         }
+        Ok(result)
     }
 
     /// Acknowledges exactly these publisher sequences in one transaction. Callers

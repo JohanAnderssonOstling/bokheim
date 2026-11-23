@@ -8,6 +8,7 @@ use book_model::BookFormat;
 use client_platform_runtime::executor;
 use client_platform_runtime::profiling::{ProfileIo, ProfileSpan};
 use content_address::{hash_reader_with_size, ContentHash};
+use cpu_contract::{as_cpu_reader, submit_book, CpuHost, Inspect, InspectEpubMetadata};
 use library_files::asset_store::CopiedBook;
 use sync_common::BookId;
 
@@ -32,38 +33,38 @@ pub struct IngestedFile {
 }
 
 /// Hash and inspect the same file bytes, rejecting concurrent changes.
-pub async fn ingest_file(path: PathBuf, name: String, host: &dyn cpu_host::CpuHost) -> io::Result<IngestedFile> {
+pub async fn ingest_file(path: PathBuf, name: String, host: &dyn CpuHost) -> io::Result<IngestedFile> {
     ingest_file_with_cached_inspection(path, name, host, async |_| Ok(None)).await
 }
 
 /// Reinspect bibliographic evidence while reusing byte-matched reader facts.
-pub async fn ingest_file_with_pdf_reader(path: PathBuf, name: String, host: &dyn cpu_host::CpuHost, cached_pdf: Option<CachedPdfReader>) -> io::Result<IngestedFile> {
+pub async fn ingest_file_with_pdf_reader(path: PathBuf, name: String, host: &dyn CpuHost, cached_pdf: Option<CachedPdfReader>) -> io::Result<IngestedFile> {
     ingest_file_inner(path, name, host, None, false, async move |_| Ok(cached_pdf), async |_| Ok(None)).await
 }
 
-pub async fn ingest_copied_file_with_pdf_reader(copied: &CopiedBook, name: String, host: &dyn cpu_host::CpuHost, cached_pdf: Option<CachedPdfReader>) -> io::Result<IngestedFile> {
+pub async fn ingest_copied_file_with_pdf_reader(copied: &CopiedBook, name: String, host: &dyn CpuHost, cached_pdf: Option<CachedPdfReader>) -> io::Result<IngestedFile> {
     ingest_file_inner(copied.path().to_owned(), name, host, copied.copied_digest(), false, async move |_| Ok(cached_pdf), async |_| Ok(None)).await
 }
 
 /// Inspect unchanged staged bytes using the checksum computed during copying.
-pub async fn ingest_copied_file(copied: &CopiedBook, name: String, host: &dyn cpu_host::CpuHost) -> io::Result<IngestedFile> {
+pub async fn ingest_copied_file(copied: &CopiedBook, name: String, host: &dyn CpuHost) -> io::Result<IngestedFile> {
     ingest_file_inner(copied.path().to_owned(), name, host, copied.copied_digest(), false, async |_| Ok(None), async |_| Ok(None)).await
 }
 
 /// A copied checksum or a previously committed file revision can reuse the
 /// same ingestion checks and inspection cache without re-reading all bytes.
-pub async fn ingest_verified_file(path: PathBuf, name: String, host: &dyn cpu_host::CpuHost, digest: (ContentHash, u64, u64), cached: impl AsyncFnOnce(BookId) -> io::Result<Option<InspectedBook>>) -> io::Result<IngestedFile> {
+pub async fn ingest_verified_file(path: PathBuf, name: String, host: &dyn CpuHost, digest: (ContentHash, u64, u64), cached: impl AsyncFnOnce(BookId) -> io::Result<Option<InspectedBook>>) -> io::Result<IngestedFile> {
     ingest_file_inner(path, name, host, Some(digest), false, async |_| Ok(None), cached).await
 }
 
 /// Reuse a current inspection only after hashing the actual source bytes.
-pub async fn ingest_file_with_cached_inspection(path: PathBuf, name: String, host: &dyn cpu_host::CpuHost, cached: impl AsyncFnOnce(BookId) -> io::Result<Option<InspectedBook>>) -> io::Result<IngestedFile> {
+pub async fn ingest_file_with_cached_inspection(path: PathBuf, name: String, host: &dyn CpuHost, cached: impl AsyncFnOnce(BookId) -> io::Result<Option<InspectedBook>>) -> io::Result<IngestedFile> {
     ingest_file_inner(path, name, host, None, false, async |_| Ok(None), cached).await
 }
 
 /// Reuse independently versioned reader facts after hashing the source bytes.
 pub async fn ingest_file_with_inspection_caches(
-    path: PathBuf, name: String, host: &dyn cpu_host::CpuHost, cached_pdf: impl AsyncFnOnce(BookId) -> io::Result<Option<CachedPdfReader>>, cached: impl AsyncFnOnce(BookId) -> io::Result<Option<InspectedBook>>,
+    path: PathBuf, name: String, host: &dyn CpuHost, cached_pdf: impl AsyncFnOnce(BookId) -> io::Result<Option<CachedPdfReader>>, cached: impl AsyncFnOnce(BookId) -> io::Result<Option<InspectedBook>>,
 ) -> io::Result<IngestedFile> {
     ingest_file_inner(path, name, host, None, false, cached_pdf, cached).await
 }
@@ -71,13 +72,13 @@ pub async fn ingest_file_with_inspection_caches(
 /// Reader imports retain external bibliographic facts and only require EPUB
 /// package/navigation parsing. All byte and file-revision checks are shared.
 pub async fn ingest_reader_file_with_cached_inspection(
-    path: PathBuf, name: String, host: &dyn cpu_host::CpuHost, verified: Option<(ContentHash, u64, u64)>, cached: impl AsyncFnOnce(BookId) -> io::Result<Option<InspectedBook>>,
+    path: PathBuf, name: String, host: &dyn CpuHost, verified: Option<(ContentHash, u64, u64)>, cached: impl AsyncFnOnce(BookId) -> io::Result<Option<InspectedBook>>,
 ) -> io::Result<IngestedFile> {
     ingest_file_inner(path, name, host, verified, true, async |_| Ok(None), cached).await
 }
 
 async fn ingest_file_inner(
-    path: PathBuf, name: String, host: &dyn cpu_host::CpuHost, copied: Option<(ContentHash, u64, u64)>, reader_metadata: bool, cached_pdf: impl AsyncFnOnce(BookId) -> io::Result<Option<CachedPdfReader>>,
+    path: PathBuf, name: String, host: &dyn CpuHost, copied: Option<(ContentHash, u64, u64)>, reader_metadata: bool, cached_pdf: impl AsyncFnOnce(BookId) -> io::Result<Option<CachedPdfReader>>,
     cached: impl AsyncFnOnce(BookId) -> io::Result<Option<InspectedBook>>,
 ) -> io::Result<IngestedFile> {
     let format = BookFormat::from_file_name(&name).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unsupported book format"))?;
@@ -165,8 +166,8 @@ async fn ingest_file_inner(
     let validation_name = name.clone();
     let inspection = match cached_inspection {
         Some(inspection) => inspection,
-        None if reader_metadata && format == BookFormat::Epub => cpu_host::submit_book(host, cpu_host::InspectEpubMetadata { source_name: name }, cpu_host::as_cpu_reader(reader)).await.map_err(io::Error::other)?,
-        None => cpu_host::submit_book(host, cpu_host::Inspect { source_name: name, format, book_id: Some(book_id), cached_pdf: cached_pdf(book_id).await?, declared_pdf }, cpu_host::as_cpu_reader(reader)).await.map_err(io::Error::other)?,
+        None if reader_metadata && format == BookFormat::Epub => submit_book(host, InspectEpubMetadata { source_name: name }, as_cpu_reader(reader)).await.map_err(io::Error::other)?,
+        None => submit_book(host, Inspect { source_name: name, format, book_id: Some(book_id), cached_pdf: cached_pdf(book_id).await?, declared_pdf }, as_cpu_reader(reader)).await.map_err(io::Error::other)?,
     };
     // A file edited during inspection must be retried rather than committed
     // with a content_hash and metadata from different revisions.

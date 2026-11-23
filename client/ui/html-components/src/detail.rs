@@ -10,17 +10,20 @@ use html_parse::plain_text_from_fragment;
 use ui_components::book_detail_text;
 use ui_components::{BOOK_DETAIL_DESCRIPTION_LINE_HEIGHT_EM, BOOK_DETAIL_DESCRIPTION_SIZE, BrowserTheme, InteractionHighlights};
 
-/// The blurb as a continuous HTML fragment, justified with the engine's
-/// Knuth–Plass line breaking and sized to its enclosing scroll column.
-///
-/// `None` where the markup carries no words, so a page is not given a heading
-/// over nothing.
-pub fn book_detail_description(description: &str, theme: BrowserTheme, cx: &mut App) -> Option<Div> {
-    if plain_text_from_fragment(description).is_empty() {
-        return None;
+/// A description whose text presence is checked once when its source changes.
+pub struct BookDescription(SharedString);
+
+impl BookDescription {
+    /// Markup carrying no words has no description section.
+    pub fn new(source: String) -> Option<Self> {
+        (!plain_text_from_fragment(&source).is_empty()).then(|| Self(source.into()))
     }
-    let selection_color = rgba(u32::from_be_bytes(InteractionHighlights::from_theme(theme).selection)).into();
-    Some(div().w_full().min_w_0().flex_none().child(html_fragment("book-detail-description-html", description.to_owned(), theme, cx).justify().selectable(selection_color)))
+
+    /// The blurb as continuous HTML, sized to its enclosing scroll column.
+    pub fn render(&self, theme: BrowserTheme, cx: &mut App) -> Div {
+        let selection_color = rgba(u32::from_be_bytes(InteractionHighlights::from_theme(theme).selection)).into();
+        div().w_full().min_w_0().flex_none().child(html_fragment("book-detail-description-html", self.0.clone(), theme, cx).justify().selectable(selection_color))
+    }
 }
 
 /// Continuous HTML using the resolved interface font and theme.
@@ -122,7 +125,7 @@ mod tests {
                         .flex()
                         .flex_col()
                         .child(div().h(px(40.)).child(book_detail_text("literal-title", TITLE)))
-                        .child(book_detail_description(&format!("<p>{}</p>", DESCRIPTION.replace('&', "&amp;")), BrowserTheme::default(), cx).unwrap())
+                        .child(BookDescription::new(format!("<p>{}</p>", DESCRIPTION.replace('&', "&amp;"))).unwrap().render(BrowserTheme::default(), cx))
                         .overflow_y_scrollbar()
                         .into_any_element();
                     body.prepaint_as_root(bounds.origin, bounds.size.map(AvailableSpace::Definite), window, cx);

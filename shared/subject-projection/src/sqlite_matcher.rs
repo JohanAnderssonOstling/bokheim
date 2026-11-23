@@ -1,9 +1,9 @@
 //! On-demand matching against the selected taxonomy, with a bounded SQLite page cache.
-use crate::runtime::{reviewed_concept_reference, MatchSource};
-use crate::{matcher_storage, UnifiedConceptDefinition, UnifiedConceptRoute, ROOT_SUBJECT_PATH};
-use rusqlite::{params, Connection, Params, Row};
-use std::collections::BTreeSet;
-use subject_taxonomy::runtime_index::{build_runtime, LccSelector};
+use crate::runtime::{MatchSource, UnifiedTaxonomyNavigation};
+use crate::{ROOT_SUBJECT_PATH, UnifiedConceptDefinition, UnifiedConceptRoute, installed, matcher_storage, runtime_format};
+use rusqlite::{Connection, OptionalExtension, Params, Row, params};
+use std::collections::{BTreeMap, BTreeSet};
+use subject_taxonomy::runtime_index::{LccSelector, build_runtime};
 
 pub(super) struct SqliteTaxonomy {
     db: Connection,
@@ -12,21 +12,16 @@ pub(super) struct SqliteTaxonomy {
 
 impl SqliteTaxonomy {
     pub fn from_connection(db: Connection) -> Result<Self, String> {
-        db.pragma_update(None, "cache_size", -crate::installed::PAGE_CACHE_KIB).map_err(|e| e.to_string())?;
-        db.pragma_update(Some("temp"), "cache_size", -crate::installed::PAGE_CACHE_KIB).map_err(|e| e.to_string())?;
+        db.pragma_update(None, "cache_size", -installed::PAGE_CACHE_KIB).map_err(|e| e.to_string())?;
+        db.pragma_update(Some("temp"), "cache_size", -installed::PAGE_CACHE_KIB).map_err(|e| e.to_string())?;
         db.set_prepared_statement_cache_capacity(16);
-        let prepared: bool = db
-            .query_row(
-                "SELECT (SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN ('taxonomy_match_exact','taxonomy_match_prefix','taxonomy_match_subclass','taxonomy_match_order','taxonomy_match_range','taxonomy_match_interval','taxonomy_match_route'))=7 AND EXISTS(SELECT 1 FROM taxonomy_meta WHERE key='client_matcher_version' AND value=?1)",
-                [crate::UNIFIED_MATCHER_VERSION.to_string()],
-                |r| r.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        if !prepared {
-            return Err(format!("taxonomy must be prepared for matcher version {}", crate::UNIFIED_MATCHER_VERSION));
-        }
+        Self::validate(&db)?;
         let revision_id = db.query_row("SELECT value FROM taxonomy_meta WHERE key='client_revision'", [], |r| r.get(0)).map_err(|e| e.to_string())?;
         Ok(Self { db, revision_id })
+    }
+
+    pub(super) fn validate(db: &Connection) -> Result<(), String> {
+        runtime_format::validate(db)
     }
 
     pub fn from_concepts(concepts: Vec<UnifiedConceptDefinition>) -> Result<Self, String> {
@@ -34,12 +29,24 @@ impl SqliteTaxonomy {
         let db = Connection::open_in_memory().map_err(|e| e.to_string())?;
         db.execute_batch(
             "CREATE TABLE taxonomy_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-             INSERT INTO taxonomy_meta VALUES('format_version','1');
              CREATE TABLE concept(concept_id INTEGER PRIMARY KEY,preferred_label TEXT NOT NULL);
              CREATE TABLE concept_parent(concept_id INTEGER,parent_concept_id INTEGER,ordinal INTEGER,PRIMARY KEY(concept_id,parent_concept_id)) WITHOUT ROWID;
              CREATE TABLE lcc_selector(concept_id INTEGER,selector TEXT);
              CREATE TABLE bisac_selector(concept_id INTEGER,selector TEXT);
              CREATE TABLE ddc_selector(concept_id INTEGER,selector TEXT);",
+        )
+        .map_err(|e| e.to_string())?;
+        db.execute("INSERT INTO taxonomy_meta VALUES('format_version',?1),('minimum_projection_version',?2)", params![runtime_format::FORMAT_VERSION.to_string(), runtime_format::PROJECTION_VERSION.to_string()])
+            .map_err(|e| e.to_string())?;
+        // Owned authoring matchers use the selected runtime's reviewed policy data too.
+        let policy = installed::read_only_uri(&installed::path().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        db.execute("ATTACH ?1 AS runtime_policy", [policy]).map_err(|e| e.to_string())?;
+        db.execute_batch(
+            "CREATE TABLE taxonomy_path_alias(path TEXT PRIMARY KEY,concept_id INTEGER NOT NULL) WITHOUT ROWID;
+             INSERT INTO taxonomy_path_alias SELECT path,concept_id FROM runtime_policy.taxonomy_path_alias;
+             CREATE TABLE taxonomy_policy(key TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;
+             INSERT INTO taxonomy_policy SELECT key,value FROM runtime_policy.taxonomy_policy;
+             DETACH runtime_policy;",
         )
         .map_err(|e| e.to_string())?;
         db.execute_batch(include_str!("range_storage.sql")).map_err(|e| e.to_string())?;
@@ -96,7 +103,83 @@ impl SqliteTaxonomy {
                 return Some(id);
             }
         }
-        reviewed_concept_reference(path, |identity| !self.rows("SELECT concept_id FROM taxonomy_match_route WHERE concept_id=?1 LIMIT 1", [identity], |r| r.get::<_, i64>(0)).is_empty())
+        if let Some(id) = path.strip_prefix("concept:").and_then(|id| id.parse::<i64>().ok()).filter(|id| self.contains_concept(*id)) {
+            return Some(id);
+        }
+        self.reference_identity(path).filter(|id| self.contains_concept(*id))
+    }
+
+    pub fn reference_identity(&self, path: &str) -> Option<i64> {
+        let exists = |id| self.db.prepare_cached("SELECT EXISTS(SELECT 1 FROM concept WHERE concept_id=?1)").expect("prepare taxonomy definition").query_row([id], |r| r.get(0)).expect("read taxonomy definition");
+        if let Some(id) = path.strip_prefix("concept:").and_then(|id| id.parse::<i64>().ok()).filter(|id| exists(*id)) {
+            return Some(id);
+        }
+        self.db.prepare_cached("SELECT concept_id FROM taxonomy_path_alias WHERE path=?1").expect("prepare taxonomy redirect").query_row([path], |r| r.get::<_, i64>(0)).optional().expect("read taxonomy redirect").filter(|id| exists(*id))
+    }
+
+    pub fn policy(&self, key: &str) -> String {
+        self.db.prepare_cached("SELECT value FROM taxonomy_policy WHERE key=?1").expect("prepare taxonomy policy").query_row([key], |r| r.get(0)).expect("read taxonomy policy")
+    }
+
+    pub fn contains_concept(&self, concept_id: i64) -> bool {
+        self.db.prepare_cached("SELECT EXISTS(SELECT 1 FROM taxonomy_match_route WHERE concept_id=?1)").expect("prepare taxonomy identity lookup").query_row([concept_id], |row| row.get(0)).expect("query taxonomy identity")
+    }
+
+    pub fn contains_usable_concept(&self, concept_id: i64) -> bool {
+        self.db
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM taxonomy_match_route r JOIN concept c USING(concept_id) WHERE r.concept_id=?1 AND (r.parent_route_id IS NOT NULL OR c.preferred_label!=?2))")
+            .expect("prepare usable taxonomy identity lookup")
+            .query_row(params![concept_id, ROOT_SUBJECT_PATH], |row| row.get(0))
+            .expect("query usable taxonomy identity")
+    }
+
+    pub fn concept_routes(&self, concepts: &BTreeSet<i64>) -> Vec<Vec<i64>> {
+        if concepts.is_empty() {
+            return Vec::new();
+        }
+        let mut statement = self
+            .db
+            .prepare_cached(
+                "WITH RECURSIVE ancestors(origin,concept_id,parent_route_id,distance) AS (
+                SELECT r.route_id,r.concept_id,r.parent_route_id,0
+                FROM json_each(?1) ids JOIN taxonomy_match_route r ON r.concept_id=ids.value
+                UNION ALL
+                SELECT a.origin,r.concept_id,r.parent_route_id,a.distance+1
+                FROM ancestors a JOIN taxonomy_match_route r ON r.route_id=a.parent_route_id
+             ) SELECT origin,concept_id FROM ancestors ORDER BY origin,distance DESC",
+            )
+            .expect("prepare taxonomy route identities");
+        let rows = statement.query_map([serde_json::to_string(concepts).expect("serialize taxonomy IDs")], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))).expect("query taxonomy route identities");
+        let mut routes: Vec<Vec<i64>> = Vec::new();
+        let mut previous = None;
+        for row in rows {
+            let (origin, concept_id) = row.expect("read taxonomy route identities");
+            if previous != Some(origin) {
+                routes.push(Vec::new());
+                previous = Some(origin);
+            }
+            routes.last_mut().expect("route identity group").push(concept_id);
+        }
+        routes
+    }
+
+    pub fn navigation(&self) -> UnifiedTaxonomyNavigation {
+        let rows = self.rows(
+            "SELECT DISTINCT child.concept_id,parent.concept_id
+             FROM taxonomy_match_route child LEFT JOIN taxonomy_match_route parent ON parent.route_id=child.parent_route_id",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+        );
+        let mut graph = UnifiedTaxonomyNavigation { revision_id: self.revision_id.clone(), parents: BTreeMap::new(), roots: BTreeSet::new() };
+        for (child, parent) in rows {
+            let parents = graph.parents.entry(child).or_default();
+            if let Some(parent) = parent {
+                parents.insert(parent);
+            } else {
+                graph.roots.insert(child);
+            }
+        }
+        graph
     }
 
     pub fn paths_for_concept(&self, concept: i64) -> Vec<String> {

@@ -2,10 +2,10 @@
 use crate::{ClassificationScheme, ClassificationSource, EditionIdentityMatch, EditionIdentityQuery};
 use metadata_contract::classification_consensus_notation;
 use std::collections::{BTreeMap, BTreeSet};
-use subject_projection::{unified_subject_paths, LCC_SYSTEM_ID};
+use subject_projection::{LCC_SYSTEM_ID, unified_subject_routes};
 
-fn paths(code: &str) -> BTreeSet<String> {
-    unified_subject_paths(LCC_SYSTEM_ID, code).into_iter().filter(|path| path.contains(" / ")).collect()
+fn routes(code: &str) -> BTreeSet<Vec<i64>> {
+    unified_subject_routes(LCC_SYSTEM_ID, code).into_iter().filter(|route| route.len() > 1).collect()
 }
 
 #[cfg(test)]
@@ -78,8 +78,8 @@ pub(super) fn corroborate(query: &EditionIdentityQuery, matches: &mut Vec<(usize
         return;
     }
     let mut editions = BTreeSet::new();
-    let mut support = BTreeMap::<String, BTreeSet<String>>::new();
-    let mut path_support = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut support = BTreeMap::<i64, BTreeSet<String>>::new();
+    let mut route_support = BTreeMap::<Vec<i64>, BTreeSet<String>>::new();
     for (_, author_count, _, matched) in matches.iter() {
         if *author_count == 0 {
             continue;
@@ -89,26 +89,26 @@ pub(super) fn corroborate(query: &EditionIdentityQuery, matches: &mut Vec<(usize
                 continue;
             }
             editions.insert(matched.open_library_edition_id.clone());
-            for path in paths(&code.notation) {
-                let root = path.split_once(" / ").expect("numeric subject path").0.to_owned();
+            for route in routes(&code.notation) {
+                let root = route[0];
                 support.entry(root).or_default().insert(matched.open_library_edition_id.clone());
-                path_support.entry(path).or_default().insert(matched.open_library_edition_id.clone());
+                route_support.entry(route).or_default().insert(matched.open_library_edition_id.clone());
             }
         }
     }
     if support.is_empty() {
         // With no mapped edition evidence, a work union spanning unrelated
         // routes cannot establish which subjects describe this edition.
-        let inherited_paths = matches
+        let inherited_routes = matches
             .iter()
             .flat_map(|(_, _, _, matched)| &matched.classifications)
             .filter(|code| code.scheme == ClassificationScheme::LibraryOfCongress && code.source != ClassificationSource::ExactEdition)
-            .flat_map(|code| paths(&code.notation))
+            .flat_map(|code| routes(&code.notation))
             .collect::<BTreeSet<_>>();
-        let leaves = inherited_paths.iter().filter(|path| !inherited_paths.iter().any(|other| other.starts_with(&format!("{path} / ")))).count();
+        let leaves = inherited_routes.iter().filter(|route| !inherited_routes.iter().any(|other| other.len() > route.len() && other.starts_with(route.as_slice()))).count();
         if leaves > 1 {
             for (_, _, _, matched) in matches.iter_mut() {
-                matched.classifications.retain(|code| code.scheme != ClassificationScheme::LibraryOfCongress || code.source == ClassificationSource::ExactEdition || paths(&code.notation).is_empty());
+                matched.classifications.retain(|code| code.scheme != ClassificationScheme::LibraryOfCongress || code.source == ClassificationSource::ExactEdition || routes(&code.notation).is_empty());
             }
         }
         return;
@@ -116,30 +116,29 @@ pub(super) fn corroborate(query: &EditionIdentityQuery, matches: &mut Vec<(usize
     // Sparse records cannot establish a majority. Keep exact classifications;
     // inherited subjects must agree with the available edition evidence.
     if editions.len() < 10 {
-        let supported_paths = path_support.keys().cloned().collect::<BTreeSet<_>>();
+        let supported_routes = route_support.keys().cloned().collect::<BTreeSet<_>>();
         for (_, _, _, matched) in matches.iter_mut() {
             matched.classifications.retain(|code| {
                 if code.scheme != ClassificationScheme::LibraryOfCongress || code.source == ClassificationSource::ExactEdition {
                     return true;
                 }
-                let code_paths = paths(&code.notation);
-                code_paths.is_empty() || !code_paths.is_disjoint(&supported_paths)
+                let code_routes = routes(&code.notation);
+                code_routes.is_empty() || !code_routes.is_disjoint(&supported_routes)
             });
         }
         return;
     }
-    let dominant = support.iter().find_map(|(root, records)| (records.len() * 10 >= editions.len() * 9 && support.iter().all(|(other, votes)| other == root || votes.len() * 10 <= editions.len())).then_some(root.clone()));
-    let accepted_roots = if let Some(root) = dominant { BTreeSet::from([root]) } else { support.iter().filter_map(|(root, records)| (records.len() >= 2).then_some(root.clone())).collect() };
-    let mut accepted_paths = BTreeSet::new();
+    let dominant = support.iter().find_map(|(root, records)| (records.len() * 10 >= editions.len() * 9 && support.iter().all(|(other, votes)| other == root || votes.len() * 10 <= editions.len())).then_some(*root));
+    let accepted_roots = if let Some(root) = dominant { BTreeSet::from([root]) } else { support.iter().filter_map(|(root, records)| (records.len() >= 2).then_some(*root)).collect() };
+    let mut accepted_routes = BTreeSet::new();
     for root in accepted_roots {
         let records = &support[&root];
-        let prefix = format!("{root} / ");
-        let branches = path_support.iter().filter(|(path, _)| path.starts_with(&prefix)).collect::<Vec<_>>();
-        let dominant = branches.iter().find_map(|(path, votes)| (votes.len() * 10 >= records.len() * 9 && branches.iter().all(|(other, votes)| other == path || votes.len() * 10 <= records.len())).then_some((*path).clone()));
-        if let Some(path) = dominant {
-            accepted_paths.insert(path);
+        let branches = route_support.iter().filter(|(route, _)| route.first() == Some(&root)).collect::<Vec<_>>();
+        let dominant = branches.iter().find_map(|(route, votes)| (votes.len() * 10 >= records.len() * 9 && branches.iter().all(|(other, votes)| other == route || votes.len() * 10 <= records.len())).then_some((*route).clone()));
+        if let Some(route) = dominant {
+            accepted_routes.insert(route);
         } else {
-            accepted_paths.extend(branches.into_iter().filter_map(|(path, votes)| (votes.len() >= 2).then_some(path.clone())));
+            accepted_routes.extend(branches.into_iter().filter_map(|(route, votes)| (votes.len() >= 2).then_some(route.clone())));
         }
     }
     for (_, _, _, matched) in matches.iter_mut() {
@@ -147,8 +146,8 @@ pub(super) fn corroborate(query: &EditionIdentityQuery, matches: &mut Vec<(usize
             if code.scheme != ClassificationScheme::LibraryOfCongress {
                 return true;
             }
-            let code_paths = paths(&code.notation);
-            code_paths.is_empty() || !code_paths.is_disjoint(&accepted_paths)
+            let code_routes = routes(&code.notation);
+            code_routes.is_empty() || !code_routes.is_disjoint(&accepted_routes)
         });
     }
     matches.retain(|(_, _, _, matched)| matched.classifications.iter().any(|code| code.scheme == ClassificationScheme::LibraryOfCongress && classification_consensus_notation(code.scheme, &code.notation).is_some()));

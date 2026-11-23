@@ -127,6 +127,8 @@ final class AccountDialog extends Dialog {
         }
         super.dismiss();
     }
+    void startPasswordReset(String address) { render("request-reset", address, ""); }
+
     @Override public void show() {
         super.show();
         getWindow().setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);

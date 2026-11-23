@@ -112,7 +112,7 @@ impl LibraryImport<'_> {
                 };
                 let before = fingerprint(&path)?;
 
-                if (known_revision.as_deref() != Some(&before.to_string()) && hash_file(&mut File::open(&path)?)? != checksum) || fingerprint(&path)? != before {
+                if (known_revision != Some(before) && hash_file(&mut File::open(&path)?)? != checksum) || fingerprint(&path)? != before {
                     return Ok(None);
                 }
                 Ok(Some((before, metadata.len())))
@@ -128,7 +128,7 @@ impl LibraryImport<'_> {
         }
         let content = ImportContent { book_id: identity, byte_checksum: Some(checksum), audiobook_content_hash: None, size_bytes, source_identity: None };
         let import = ValidatedImport { parent_id: import.parent_id, file_name: name.clone(), format: state.addition.facts.format };
-        let published = PublishedStagedBook { name, relative_path: relative.to_string(), published: true, fingerprint: Some(revision.to_string()) };
+        let published = PublishedStagedBook { name, relative_path: relative.to_string(), published: true, fingerprint: Some(revision) };
         let version = reader_inspection_version(import.format);
         let commit = self.prepare_import_commit(import, content, published, None, version).await?;
         let state = state.clone().retarget(identity)?;

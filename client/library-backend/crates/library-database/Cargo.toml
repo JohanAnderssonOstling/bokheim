@@ -18,7 +18,7 @@ book-model = { path = "../../../../shared/book-model" }
 client-platform-runtime = { path = "../../../platforms/runtime" }
 device-sqlite = { path = "../../../platforms/sqlite" }
 library-model = { path = "../../../library-model", default-features = false }
-library-replica = { path = "../library-replica", default-features = false }
+library-replica = { path = "../library-replica" }
 sync-common = { path = "../../../../shared/sync-common", default-features = false, features = ["sqlite"] }
 subject-projection = { path = "../../../../shared/subject-projection" }
 metadata-contract = { path = "../../../../shared/metadata-contract" }
@@ -36,9 +36,6 @@ tokio = { version = "1", features = ["sync"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 client-platform-web = { path = "../../../platforms/web" }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-client-platform-native = { path = "../../../platforms/native" }
 
 [dev-dependencies]
 rusqlite = { version = "0.40.0", features = ["hooks"] }

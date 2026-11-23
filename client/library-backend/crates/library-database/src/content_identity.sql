@@ -36,6 +36,6 @@ CREATE TABLE IF NOT EXISTS local_content_origin(
 -- Device-local evidence for unchanged external files. Never synchronized.
 CREATE TABLE IF NOT EXISTS local_import_source(
     path TEXT PRIMARY KEY,
-    fingerprint TEXT NOT NULL,
+    fingerprint BLOB CHECK(fingerprint IS NULL OR length(fingerprint)=8),
     byte_hash BLOB NOT NULL CHECK(length(byte_hash)=32)
 ) STRICT, WITHOUT ROWID;

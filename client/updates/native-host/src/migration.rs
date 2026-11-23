@@ -1,9 +1,9 @@
 //! Isolated database preparation and journal assembly shared by every host.
-use update_client::UpdateError;
 use super::*;
 use std::process::Command;
 use std::time::Duration;
 use update_client::Manifest;
+use update_client::UpdateError;
 
 pub(crate) enum CandidatePolicy {
     /// A desktop candidate must exactly match the approved release.
@@ -79,7 +79,12 @@ impl Migration {
 
     pub fn finish(&mut self, prepared: &Prepared) -> Result<(), UpdateError> {
         let next = self.work.join("active-taxonomy.json");
-        activation::write_json(&next, &prepared.taxonomy)?;
+        let selected = prepared
+            .taxonomy
+            .as_ref()
+            .map(|taxonomy| super::next_selection(&self.root, taxonomy, self.manifest.taxonomy.as_ref().filter(|release| release.release_id == taxonomy.release).map(|release| release.artifact.clone())))
+            .transpose()?;
+        activation::write_json(&next, &selected)?;
         self.add_file(self.root.join("active-taxonomy.json"), next, self.work.join("prior-taxonomy.json"))
     }
 

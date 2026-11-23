@@ -13,7 +13,6 @@ pub use outbox::OutboxScan;
 mod issues;
 pub(crate) mod reading_positions;
 pub(crate) mod state;
-pub use state::CURSOR_RECOVERY_PENDING_KEY;
 
 pub(crate) use crate::DatabaseError;
 pub(crate) use include_sqlite_sql::include_sql;
@@ -39,20 +38,12 @@ pub(crate) fn toc_entry_count(entries: &[library_model::BookTocEntry]) -> usize 
     entries.iter().map(|entry| 1 + toc_entry_count(&entry.children)).sum()
 }
 
-pub(crate) fn parse_revision(value: Option<String>) -> Result<Option<LibraryRevision>, DatabaseError> {
-    value
-        .map(|value| {
-            let raw = value.parse::<u64>().map_err(|error| DatabaseError::message(format!("stored revision is not readable: {error}")))?;
-            LibraryRevision::new(raw).map_err(|error| DatabaseError::message(format!("stored revision is not readable: {error}")))
-        })
-        .transpose()
-}
-
 /// Reads the generation and both revisions from the same SQLite statement.
 pub(crate) fn read_pull_cursor(conn: &rusqlite::Connection) -> Result<SyncCursor, DatabaseError> {
-    let raw = query_last(|read| conn.sync_pull_cursor(read), |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?)))?;
+    let raw = query_last(|read| conn.sync_pull_cursor(read), |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, Option<i64>>(2)?)))?;
     let (generation, lifecycle, field) = raw.ok_or_else(|| DatabaseError::message("sync metadata row is missing"))?;
-    Ok(SyncCursor { generation: generation.map(|value| SyncGeneration::parse_str(&value).map_err(DatabaseError::operation)).transpose()?, lifecycle_revision: parse_revision(lifecycle)?, field_revision: parse_revision(field)? })
+    let revision = |value: Option<i64>| value.map(|value| LibraryRevision::new(nonnegative_u64(value, 0, "stored revision")?).map_err(DatabaseError::operation)).transpose();
+    Ok(SyncCursor { generation: generation.map(|value| SyncGeneration::parse_str(&value).map_err(DatabaseError::operation)).transpose()?, lifecycle_revision: revision(lifecycle)?, field_revision: revision(field)? })
 }
 
 /// One statement, run within the same transaction as the applied page.

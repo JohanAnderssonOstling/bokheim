@@ -12,10 +12,9 @@ impl super::AssetExecutor {
         Fut: Future<Output = Result<T, TransferError>>,
     {
         let credentials = self.credentials().await?;
-        let Some(account) = self.authentication.account() else { return operation().await };
         authenticated_request(
-            account,
-            RefreshPolicy::OnRejection,
+            &self.account,
+            RefreshPolicy::BeforeRequest,
             |_| {
                 let check = self.check_transfer_account(&credentials);
                 let pending = operation();

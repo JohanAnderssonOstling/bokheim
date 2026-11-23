@@ -18,6 +18,7 @@ final class UiText {
     static final String ACCOUNT_ENTER_YOUR_PASSWORD = "Enter your password";
     static final String ACCOUNT_FORGOT_PASSWORD = "Forgot password?";
     static final String ACCOUNT_HIDE_PASSWORD = "Hide password";
+    static final String ACCOUNT_LIBRARY_LOCATION = "Library location";
     static final String ACCOUNT_NEW_PASSWORD = "New password";
     static final String ACCOUNT_PASSWORD_UPDATED_SIGN_IN_WITH_YOUR_NEW_PASSWORD = "Password updated. Sign in with your new password.";
     static final String ACCOUNT_PLEASE_WAIT = "Please wait";
@@ -39,6 +40,8 @@ final class UiText {
     static final String ANDROID_ALLOW_UNINTERRUPTED_BACKGROUND_PLAYBACK = "Allow uninterrupted background playback";
     static final String ANDROID_BATTERY_SETTINGS_ARE_UNAVAILABLE_ON_THIS_DEVICE_PLAYBACK_CAN_STILL_CONTINUE = "Battery settings are unavailable on this device. Playback can still continue.";
     static final String ANDROID_BOOK_DOWNLOAD = "Book download";
+    static final String ANDROID_CHOOSE_DOCUMENTS_BOKHEIM = "Create or select Documents/Bokheim for your libraries.";
+    static final String ANDROID_CHOOSE_FOLDER = "Choose folder";
     static final String ANDROID_COULD_NOT_DOWNLOAD_THE_BOOK = "Couldn’t download this book.";
     static final String ANDROID_COULD_NOT_FINISH_SAVING_THE_DOWNLOADED_BOOK = "Could not finish saving the downloaded book";
     static final String ANDROID_DOWNLOAD_CANCELLED = "Download cancelled";

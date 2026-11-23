@@ -1,0 +1,718 @@
+{
+  "scope": "Further offline analysis of saved eight-transition caller capture; Kobo SSH timed out on this follow-up. No application edits, builds, tests, deployment or new device timing measurements.",
+  "capture": "kobo-memory-callers-20261118.json",
+  "binary_sha256": "849c0513baa0790853107fd7e384b1c9d82ca8e8a3f74c7e93082db5835b76d3",
+  "white_backgrounds": {
+    "method": "Exact installed ARM disassembly: fill_clipped_gray frame size is 128 bytes. At the memset call, r9 holds gray. Saved caller r4/r6/r7/r10 at snapshot SP+92/+100/+104/+116 hold original y0/y1/x0/x1. Saved caller r5 at SP+96 points to the current 40-byte PrimitiveStamp; renderer SP+0xdc holds the stamp-array base. Primitive ordinal is (saved r5 - array base)/40. Dimension consistency was checked against the earlier recovered row width and y1 for every sample. Renderer candidates are emitted in primitive order.",
+    "background_primitives": [
+      {
+        "primitive_index": 0,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255,
+        "forward_cpu_ms": 2.0,
+        "backward_cpu_ms": 1.5
+      },
+      {
+        "primitive_index": 1,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255,
+        "forward_cpu_ms": 1.5,
+        "backward_cpu_ms": 1.0
+      },
+      {
+        "primitive_index": 2,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255,
+        "forward_cpu_ms": 2.0,
+        "backward_cpu_ms": 2.0
+      },
+      {
+        "primitive_index": 3,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255,
+        "forward_cpu_ms": 2.0,
+        "backward_cpu_ms": 2.0
+      },
+      {
+        "primitive_index": 4,
+        "x0": 4,
+        "y0": 32,
+        "x1": 1676,
+        "y1": 1232,
+        "gray": 255,
+        "forward_cpu_ms": 2.0,
+        "backward_cpu_ms": 1.0
+      },
+      {
+        "primitive_index": 5,
+        "x0": 4,
+        "y0": 32,
+        "x1": 1676,
+        "y1": 1232,
+        "gray": 255,
+        "forward_cpu_ms": 0.5,
+        "backward_cpu_ms": 2.0
+      }
+    ],
+    "bytes_for_these_six_rectangles": 12506880,
+    "samples": [
+      {
+        "timestamp_ns": 25050492678592,
+        "button": "PreviousPage",
+        "primitive_index": 0,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25050495866925,
+        "button": "PreviousPage",
+        "primitive_index": 1,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25050498975592,
+        "button": "PreviousPage",
+        "primitive_index": 2,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25050501826925,
+        "button": "PreviousPage",
+        "primitive_index": 3,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25050504699258,
+        "button": "PreviousPage",
+        "primitive_index": 5,
+        "x0": 4,
+        "y0": 32,
+        "x1": 1676,
+        "y1": 1232,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25053180191593,
+        "button": "NextPage",
+        "primitive_index": 0,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25053183102926,
+        "button": "NextPage",
+        "primitive_index": 1,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25053186527926,
+        "button": "NextPage",
+        "primitive_index": 2,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25053189736593,
+        "button": "NextPage",
+        "primitive_index": 3,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25053192806593,
+        "button": "NextPage",
+        "primitive_index": 4,
+        "x0": 4,
+        "y0": 32,
+        "x1": 1676,
+        "y1": 1232,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25056926243595,
+        "button": "PreviousPage",
+        "primitive_index": 0,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25056929050261,
+        "button": "PreviousPage",
+        "primitive_index": 2,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25056932471261,
+        "button": "PreviousPage",
+        "primitive_index": 3,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25056938746928,
+        "button": "PreviousPage",
+        "primitive_index": 5,
+        "x0": 4,
+        "y0": 32,
+        "x1": 1676,
+        "y1": 1232,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25059653034263,
+        "button": "NextPage",
+        "primitive_index": 0,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25059655980929,
+        "button": "NextPage",
+        "primitive_index": 2,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25059659122596,
+        "button": "NextPage",
+        "primitive_index": 3,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25059662604263,
+        "button": "NextPage",
+        "primitive_index": 4,
+        "x0": 4,
+        "y0": 32,
+        "x1": 1676,
+        "y1": 1232,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25059666290929,
+        "button": "NextPage",
+        "primitive_index": 5,
+        "x0": 4,
+        "y0": 32,
+        "x1": 1676,
+        "y1": 1232,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25063428736931,
+        "button": "PreviousPage",
+        "primitive_index": 0,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25063431611265,
+        "button": "PreviousPage",
+        "primitive_index": 2,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25063434872598,
+        "button": "PreviousPage",
+        "primitive_index": 3,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25063437698598,
+        "button": "PreviousPage",
+        "primitive_index": 4,
+        "x0": 4,
+        "y0": 32,
+        "x1": 1676,
+        "y1": 1232,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25063441238598,
+        "button": "PreviousPage",
+        "primitive_index": 5,
+        "x0": 4,
+        "y0": 32,
+        "x1": 1676,
+        "y1": 1232,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25066152663266,
+        "button": "NextPage",
+        "primitive_index": 0,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25066155498599,
+        "button": "NextPage",
+        "primitive_index": 1,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25066158831933,
+        "button": "NextPage",
+        "primitive_index": 2,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25066161722933,
+        "button": "NextPage",
+        "primitive_index": 3,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25066165075933,
+        "button": "NextPage",
+        "primitive_index": 4,
+        "x0": 4,
+        "y0": 32,
+        "x1": 1676,
+        "y1": 1232,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25069906838934,
+        "button": "PreviousPage",
+        "primitive_index": 1,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25069910051601,
+        "button": "PreviousPage",
+        "primitive_index": 2,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25069913412268,
+        "button": "PreviousPage",
+        "primitive_index": 3,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25069916315268,
+        "button": "PreviousPage",
+        "primitive_index": 4,
+        "x0": 4,
+        "y0": 32,
+        "x1": 1676,
+        "y1": 1232,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25069919228934,
+        "button": "PreviousPage",
+        "primitive_index": 5,
+        "x0": 4,
+        "y0": 32,
+        "x1": 1676,
+        "y1": 1232,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25072642578936,
+        "button": "NextPage",
+        "primitive_index": 0,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25072645803269,
+        "button": "NextPage",
+        "primitive_index": 1,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25072648705269,
+        "button": "NextPage",
+        "primitive_index": 2,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25072651497269,
+        "button": "NextPage",
+        "primitive_index": 3,
+        "x0": 0,
+        "y0": 0,
+        "x1": 1680,
+        "y1": 1264,
+        "gray": 255
+      },
+      {
+        "timestamp_ns": 25072654750936,
+        "button": "NextPage",
+        "primitive_index": 4,
+        "x0": 4,
+        "y0": 32,
+        "x1": 1676,
+        "y1": 1232,
+        "gray": 255
+      }
+    ],
+    "candidate": "Skip white background fills while a freshly cleared repaint region is still known to be white. Keep border drawing and end this fast path after any potentially nonwhite primitive or border. This needs only a local state flag, not a retained cache or coverage map.",
+    "limits": "The first background is redundant after clear. All six backgrounds are white and leading, but saved snapshots do not contain their full border data; do not treat their entire sampled cost as proven savings."
+  },
+  "lookup_text": {
+    "method": "Disassembly at runtime 0x55ae3c30 calls malloc with r0 copied from r4. Recovered callee-saved r4 through exact allocator prologues gives request length. The cache-hit ShapeRunKey destructor text free is runtime 0x55ad7c60; feature-vector free is 0x55ad7cb4. The following memcpy for lookup text is 0x55ae3c48.",
+    "allocation_size_samples": {
+      "samples_by_requested_bytes": {
+        "5": 1,
+        "2": 3,
+        "10": 1,
+        "1": 12,
+        "3": 5,
+        "7": 1,
+        "6": 1,
+        "8": 1
+      },
+      "per_direction": {
+        "PreviousPage": [
+          5,
+          2,
+          10,
+          1,
+          2,
+          3,
+          7,
+          1,
+          1,
+          3,
+          8,
+          1,
+          2,
+          1,
+          1,
+          1,
+          3
+        ],
+        "NextPage": [
+          6,
+          1,
+          3,
+          1,
+          1,
+          3,
+          1,
+          1
+        ]
+      }
+    },
+    "costs": {
+      "lookup_text_malloc": {
+        "forward_cpu_ms": 4.0,
+        "backward_cpu_ms": 8.5
+      },
+      "lookup_text_free": {
+        "forward_cpu_ms": 2.5,
+        "backward_cpu_ms": 4.5
+      },
+      "lookup_feature_vec_free": {
+        "forward_cpu_ms": 2.0,
+        "backward_cpu_ms": 3.5
+      },
+      "lookup_text_memcpy": {
+        "forward_cpu_ms": 1.5,
+        "backward_cpu_ms": 2.5
+      }
+    },
+    "candidate": "Use the already-depended-on smol_str::SmolStr for ShapeRunKey.text and construct directly from the run slice. Locked smol_str 0.3.6 stores up to 23 bytes inline; every recovered request here is 1-10 bytes. Larger strings continue to use the heap. This keeps owned key and equality semantics and does not require a new cache or borrowed-lookup interface.",
+    "tradeoff": "SmolStr is 24 bytes versus a 12-byte String on ARM32, increasing the key inline footprint while removing short-string heap blocks. Costs shown are sampled current costs, not measured savings."
+  },
+  "lookup_features": {
+    "method": "The cache-hit destructor has Shaping::run callsite 0x55ae4574. The owned key is at that frame SP+168. In this binary, default-attribute features Vec capacity/pointer/length are at key+80/+84/+88, and text String is at key+136/+140/+144. Lengths were checked against capacities.",
+    "temporary_key_samples": [
+      {
+        "timestamp_ns": 25049540398925,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 4,
+        "text_capacity": 4
+      },
+      {
+        "timestamp_ns": 25049717137925,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25049733197591,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25049771576258,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25049780768925,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25052576854926,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 3,
+        "text_capacity": 3
+      },
+      {
+        "timestamp_ns": 25052795228259,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 4,
+        "text_capacity": 4
+      },
+      {
+        "timestamp_ns": 25052807938593,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 3,
+        "text_capacity": 3
+      },
+      {
+        "timestamp_ns": 25052935004593,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25056114870928,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 2,
+        "text_capacity": 2
+      },
+      {
+        "timestamp_ns": 25059036975596,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25059128882263,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25062471303264,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25062555363931,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25062717864264,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 2,
+        "text_capacity": 2
+      },
+      {
+        "timestamp_ns": 25062759269264,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25062765174931,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25065658970599,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25065814340599,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25065866515266,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 3,
+        "text_capacity": 3
+      },
+      {
+        "timestamp_ns": 25068834540600,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25068872489267,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25068897504267,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      },
+      {
+        "timestamp_ns": 25069002899267,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 4,
+        "text_capacity": 4
+      },
+      {
+        "timestamp_ns": 25069437325601,
+        "feature_len": 25,
+        "feature_capacity": 25,
+        "text_len": 1,
+        "text_capacity": 1
+      }
+    ],
+    "observed_feature_counts": [
+      25
+    ],
+    "bytes_per_cloned_feature_payload": 200,
+    "source": "HtmlEngine/adapters/html-gpui/src/text.rs encodes all 25 named feature flags; cosmic_text AttrsOwned::new clones the Vec before cache lookup.",
+    "finding": "The second per-lookup heap allocation is a 25-element/200-byte feature list, not a missing inline string optimization. SmolStr alone cannot remove it. Borrowed lookup or immutable shared feature storage can avoid copying it, but both are broader changes.",
+    "semantic_limit": "Do not simply remove feature settings equal to generic defaults. Harfrust enables some features automatically or by script, including automatic fractions; explicit zero values can suppress real behavior."
+  }
+}

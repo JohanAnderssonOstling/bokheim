@@ -620,10 +620,6 @@ impl ApplicationPane {
         cx.set_volume_button_capture(true);
         cx.set_keep_screen_awake(false);
         cx.set_system_bars_visible(true);
-        #[cfg(feature = "kobo")]
-        if let Err(error) = gpui_kobo::request_experience_mode(gpui_kobo::KoboExperienceMode::LibraryFast) {
-            log::error!("failed to return to Kobo library fast mode: {error}");
-        }
         window.set_window_title(&self.application_title);
         self.browser.update(cx, |browser, cx| browser.focus_active_page(window, cx));
         cx.notify();
@@ -777,7 +773,7 @@ impl Render for ApplicationPane {
             self.audiobook_footer.update(cx, |footer, cx| footer.set(dock, pending, cx));
             visible.then(|| AnyView::from(self.audiobook_footer.clone()))
         };
-        let embedded_reader = self.split_enabled && browser_ui::native_windows_available() && !ui_components::uses_mobile_navigation(window);
+        let embedded_reader = self.split_enabled && browser_ui::independent_panes_available() && !ui_components::uses_mobile_navigation(window);
         self.browser.update(cx, |browser, cx| browser.set_content_footer(footer.clone().filter(|_| self.reader.is_none() || embedded_reader), cx));
         let reader_surface = self.reader.as_ref().filter(|_| embedded_reader).map(|reader| AnyView::from(reader.view.clone()));
         self.browser.update(cx, |browser, cx| browser.set_reader_surface(reader_surface, cx));
@@ -1199,7 +1195,7 @@ mod navigation_tests {
         cx.update_window(window.into(), |_, window, cx| root.update(cx, |root, cx| root.browser.update(cx, |browser, cx| browser.open_folder(library_id, folder, "Folder".into(), window, cx)))).unwrap();
         cx.run_until_parked();
         let before = root.read_with(cx, |root, cx| root.browser.read(cx).navigation_session(cx));
-        assert_eq!(before.pages[0].path.len(), 1);
+        assert_eq!(before.page.as_ref().unwrap().path.len(), 1);
         let canceled = Rc::new(Cell::new(0));
         let cancel_count = canceled.clone();
         cx.update_window(window.into(), |_, window, cx| {
@@ -1257,7 +1253,7 @@ mod navigation_tests {
         root.read_with(cx, |root, cx| assert_eq!(root.browser.read(cx).navigation_session(cx), before, "Back must close the switcher before navigating underneath it"));
         assert!(press_native_back(window.into(), cx));
         cx.run_until_parked();
-        root.read_with(cx, |root, cx| assert!(root.browser.read(cx).navigation_session(cx).pages[0].path.is_empty()));
+        root.read_with(cx, |root, cx| assert!(root.browser.read(cx).navigation_session(cx).page.as_ref().unwrap().path.is_empty()));
     }
 
     #[gpui::test]
@@ -1324,8 +1320,8 @@ mod navigation_tests {
         });
         // Back must follow the nested trail even before its asynchronous
         // listing has replaced the initial root listing.
-        let pages = vec![BrowsePageSession { path: vec![(BrowseLocation::Folder(parent), "Parent".into()), (BrowseLocation::Folder(child), "Child".into())], detail: None }];
-        let session = WindowSession { initial: NavigationSession { library_id: Some(*library.library_id()), route: Route::Library(LibraryRoute::Folders), pages, reader: None, ..Default::default() }, ..Default::default() };
+        let page = Some(BrowsePageSession { path: vec![(BrowseLocation::Folder(parent), "Parent".into()), (BrowseLocation::Folder(child), "Child".into())], detail: None });
+        let session = WindowSession { initial: NavigationSession { library_id: Some(*library.library_id()), route: Route::Library(LibraryRoute::Folders), page, reader: None, ..Default::default() }, ..Default::default() };
         let window = cx.add_window(|window, cx| {
             let root = cx.new(|cx| ApplicationRoot::new(services, session, backend, "Test", None, window, cx));
             gpui_component::Root::new(root, window, cx)
@@ -1348,7 +1344,7 @@ mod navigation_tests {
             root.read_with(cx, |root, cx| {
                 let saved = root.browser.read(cx).navigation_session(cx);
                 assert_eq!(saved.route, Route::Library(LibraryRoute::Folders));
-                assert_eq!(saved.pages[0].path.len(), remaining);
+                assert_eq!(saved.page.as_ref().unwrap().path.len(), remaining);
             });
         }
         let handled = press_native_back(window.into(), cx);

@@ -112,7 +112,7 @@ try:
         root = Path(folder).resolve()
         title = f'Bokheim browser responsiveness {os.getpid()}'
         request = {'url': base + '/hang', 'title': title,
-                   'data_directory': str(root / 'profile'), 'downloads': str(root / 'downloads'), 'history_file': str(root / 'history.json'), 'preferences': {'keyboard_shortcuts': {}, 'allow_metered_transfers': False, 'text_search': True, 'animations': True, 'custom_ui_font_enabled': False, 'generated_covers_only': False, 'catalog_grouping': 'subject', 'keyboard_layouts': ['SV'], 'ui_font_family': 'serif', 'theme': 'cool', 'ui_font_size_px': 16, 'cover_text': 'always'}}
+                   'data_directory': str(root / 'profile'), 'downloads': str(root / 'downloads'), 'history_file': str(root / 'history.json'), 'preferences': {'keyboard_shortcuts': {}, 'text_search': True, 'animations': True, 'custom_ui_font_enabled': False, 'generated_covers_only': False, 'catalog_grouping': 'subject', 'keyboard_layouts': ['SV'], 'ui_font_family': 'serif', 'theme': 'cool', 'ui_font_size_px': 16, 'cover_text': 'always'}}
         with (root / 'helper.log').open('w') as log:
             try:
                 child = subprocess.Popen([args.helper, 'browser'], stdin=subprocess.PIPE,

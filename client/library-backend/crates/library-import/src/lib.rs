@@ -7,6 +7,7 @@
 //! notifications until the admitted import completes.
 
 use std::sync::Arc;
+use cpu_contract::CpuHost;
 
 use library_placement::LibraryState;
 use library_services::events::LibraryEventRouter;
@@ -46,7 +47,7 @@ pub use client_platform_web::transport::import_io::{ImportReader as DirectoryImp
 
 pub struct LibraryImport<'a> {
     storage: &'a LibraryState,
-    cpu: Arc<dyn cpu_host::CpuHost>,
+    cpu: Arc<dyn CpuHost>,
     events: LibraryEventRouter,
     /// The library folder dropped files are placed into.
     #[cfg(not(target_arch = "wasm32"))]
@@ -55,7 +56,7 @@ pub struct LibraryImport<'a> {
 
 impl<'a> LibraryImport<'a> {
     /// Borrow the caller's storage handles for the duration of the import.
-    pub fn new(storage: &'a LibraryState, cpu: Arc<dyn cpu_host::CpuHost>) -> Self {
+    pub fn new(storage: &'a LibraryState, cpu: Arc<dyn CpuHost>) -> Self {
         Self {
             storage,
             events: storage.events().clone(),

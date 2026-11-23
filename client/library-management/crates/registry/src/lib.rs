@@ -3,6 +3,8 @@
 //! Registry and key/value behavior is identical on every target. Native code
 //! supplies real directory roots; the browser supplies SQLite VFS filenames.
 
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem as fs;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -30,6 +32,12 @@ const SCHEMA: &str = r#"
         library_id TEXT PRIMARY KEY NOT NULL,
         storage_path TEXT NOT NULL
     ) STRICT;
+    CREATE TABLE IF NOT EXISTS app_value_member (
+        group_key TEXT NOT NULL,
+        member_key TEXT NOT NULL,
+        value BLOB NOT NULL,
+        PRIMARY KEY(group_key,member_key)
+    ) STRICT, WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS app_value (
         key TEXT PRIMARY KEY NOT NULL,
         value BLOB NOT NULL
@@ -150,7 +158,7 @@ impl LocalRegistry {
             None => platform::allocate_library_location(library_root, &generated_id, requested_name)?,
         };
         #[cfg(not(target_arch = "wasm32"))]
-        let pending_locator = std::path::Path::new(&requested_locator).canonicalize().unwrap_or_else(|_| std::path::PathBuf::from(&requested_locator)).to_string_lossy().into_owned();
+        let pending_locator = fs::canonicalize(std::path::Path::new(&requested_locator)).unwrap_or_else(|_| std::path::PathBuf::from(&requested_locator)).to_string_lossy().into_owned();
         #[cfg(target_arch = "wasm32")]
         let pending_locator = requested_locator.clone();
         let pending: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM pending_local_purge WHERE storage_path=?1)", [&pending_locator], |row| row.get(0))?;
@@ -244,7 +252,7 @@ impl LocalRegistry {
             platform::remove_library_state(library_id, &locator)?;
             let database = self.library_database_locator(library_id, &locator);
             for suffix in ["", "-wal", "-shm"] {
-                match std::fs::remove_file(format!("{database}{suffix}")) {
+                match fs::remove_file(format!("{database}{suffix}")) {
                     Ok(()) => {}
                     Err(error) if error.kind() == ErrorKind::NotFound => {}
                     Err(error) => return Err(error.into()),
@@ -276,6 +284,19 @@ impl LocalRegistry {
         self.complete_local_purge(library_id)
     }
 
+    pub fn read_value_members(&mut self, group: &str) -> RegistryResult<Vec<Vec<u8>>> {
+        Ok(self.connection.prepare_cached("SELECT value FROM app_value_member WHERE group_key=?1 ORDER BY member_key")?.query_map([group], |row| row.get(0))?.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn write_value_member(&mut self, group: &str, member: &str, value: &[u8]) -> RegistryResult<()> {
+        self.connection.execute(
+            "INSERT INTO app_value_member(group_key,member_key,value) VALUES(?1,?2,?3)
+            ON CONFLICT(group_key,member_key) DO UPDATE SET value=excluded.value",
+            params![group, member, value],
+        )?;
+        Ok(())
+    }
+
     pub fn read_value(&mut self, key: &str) -> RegistryResult<Option<Vec<u8>>> {
         Ok(self.connection.query_row("SELECT value FROM app_value WHERE key=?1", [key], |row| row.get(0)).optional()?)
     }
@@ -286,7 +307,10 @@ impl LocalRegistry {
     }
 
     pub fn remove_value(&mut self, key: &str) -> RegistryResult<()> {
-        self.connection.execute("DELETE FROM app_value WHERE key=?1", [key])?;
+        let tx = self.connection.transaction()?;
+        tx.execute("DELETE FROM app_value_member WHERE group_key=?1", [key])?;
+        tx.execute("DELETE FROM app_value WHERE key=?1", [key])?;
+        tx.commit()?;
         Ok(())
     }
 }
@@ -315,8 +339,8 @@ pub use platform::LIBRARY_MANIFEST_FILENAME;
 #[cfg(not(target_arch = "wasm32"))]
 mod platform {
     use super::*;
+    use client_platform_runtime::filesystem::{self as fs, OpenOptions};
     use serde::Deserialize;
-    use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use uuid::Uuid;
@@ -366,8 +390,8 @@ mod platform {
     }
 
     fn canonical_library_path(path: &Path) -> RegistryResult<PathBuf> {
-        let canonical = path.canonicalize()?;
-        if !canonical.is_dir() {
+        let canonical = fs::canonicalize(&path)?;
+        if !fs::is_dir(&canonical) {
             return Err(format!("library root is not a directory: {}", path.display()).into());
         }
         Ok(canonical)

@@ -1,6 +1,7 @@
 //! Serialized Kobo Wi-Fi operations. Hardware and supplicant work never runs on GPUI.
 
 use crate::bluetooth::SleepGuard as BluetoothSleepGuard;
+use crate::{bluetooth, process::kill_group, radio};
 use std::ffi::OsStr;
 mod control;
 mod events;
@@ -184,12 +185,19 @@ fn worker() -> Result<&'static Sender> {
                 .spawn(move || {
                     let mut controller = Controller::new();
                     events.observe(controller.socket_path.as_deref());
-                    if let Err(error) = controller.refresh() {
-                        controller.snapshot.error = Some(error);
+                    {
+                        let _radio = radio::lock();
+                        if let Err(error) = controller.refresh() {
+                            controller.snapshot.error = Some(error);
+                        }
                     }
                     publish(&controller.snapshot);
                     loop {
                         let job = events.receive(&receive, &controller);
+                        // Never hold the lock during the blocking event wait.
+                        // Bluetooth startup and every Wi-Fi operation use the
+                        // same lock, including complete sleep/wake transitions.
+                        let _radio = radio::lock();
                         match job {
                             Ok(Wake::Job(Job::Request(request, reply))) => {
                                 let result = controller.execute(request);
@@ -197,9 +205,11 @@ fn worker() -> Result<&'static Sender> {
                                 let _ = reply.send_blocking(result);
                             }
                             Ok(Wake::Job(Job::Refresh)) => {
-                                if !controller.sleeping
-                                    && let Err(error) = controller.refresh()
-                                {
+                                let reconnect = controller.radio_enabled;
+                                controller.service_lost();
+                                controller.address_requested = reconnect;
+                                controller.reconnect_started = reconnect.then(Instant::now);
+                                if let Err(error) = controller.refresh() {
                                     controller.snapshot.error = Some(error);
                                 }
                             }
@@ -242,6 +252,8 @@ fn worker() -> Result<&'static Sender> {
                         }
                         publish(&controller.snapshot);
                     }
+                    let _radio = radio::lock();
+                    drop(controller);
                 })
                 .map_err(|_| "Could not start Wi-Fi worker".to_owned())?;
             Ok(send)
@@ -263,6 +275,7 @@ pub(crate) struct SleepGuard;
 
 pub(crate) fn prepare_sleep() -> Result<SleepGuard> {
     let timeout = Duration::from_secs(20);
+    let _pending = radio::SleepRequest::new();
     let (reply, response) = mpsc::sync_channel(0);
     worker()?.send(Job::PrepareSleep { reply, deadline: Instant::now() + timeout }).map_err(|_| "Wi-Fi worker stopped")?;
     wait_for_sleep(response, timeout)?;
@@ -290,6 +303,7 @@ fn run_bounded(command: &mut Command, timeout: Duration, operation: &str) -> Res
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                kill_group(&mut child);
                 let mut diagnostic = String::new();
                 if let Some(mut stderr) = child.stderr.take() {
                     let _ = stderr.read_to_string(&mut diagnostic);
@@ -305,10 +319,7 @@ fn run_bounded(command: &mut Command, timeout: Duration, operation: &str) -> Res
             }
             Ok(None) if started.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
             result => {
-                unsafe {
-                    libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
-                }
-                let _ = child.wait();
+                kill_group(&mut child);
                 let mut diagnostic = String::new();
                 if let Some(mut stderr) = child.stderr.take() {
                     let _ = stderr.read_to_string(&mut diagnostic);
@@ -509,7 +520,11 @@ impl Controller {
             Err(error) => {
                 self.service_lost();
                 if let Some(interface) = &self.interface
-                    && !PathBuf::from("/sys/class/net").join(interface).exists()
+                    && (!PathBuf::from("/sys/class/net").join(interface).exists()
+                        || fs::read_to_string(PathBuf::from("/sys/class/net").join(interface).join("flags"))
+                            .ok()
+                            .and_then(|flags| u32::from_str_radix(flags.trim().trim_start_matches("0x"), 16).ok())
+                            .is_some_and(|flags| flags & libc::IFF_UP as u32 == 0))
                 {
                     self.radio_enabled = false;
                     return Ok(());
@@ -585,7 +600,25 @@ impl Controller {
         if let Some(requested) = &self.attempt {
             let current_id = data.get("id").and_then(|id| id.parse::<u32>().ok());
             if self.snapshot.phase == Phase::Connected && current_id == Some(requested.id) {
-                self.attempt = None;
+                let completed = self.attempt.take().unwrap();
+                if completed.temporary {
+                    // SELECT_NETWORK disables the other profiles in memory.
+                    // Restore their original enabled flags before saving so
+                    // adding a network does not disable existing saved ones.
+                    let saved = (|| {
+                        for id in completed.previous {
+                            control.ok(&format!("SET_NETWORK {id} disabled 0"))?;
+                        }
+                        control.ok("SET update_config 1")?;
+                        control.ok("SAVE_CONFIG")
+                    })();
+                    if saved.is_err() {
+                        // Keep the verified connection usable and report the
+                        // persistence failure; never disconnect or silently
+                        // claim that the new credentials have been saved.
+                        return Err("Connected to Wi-Fi, but could not save the network for reconnecting or use in Nickel".into());
+                    }
+                }
             } else if requested.started.elapsed() > Duration::from_secs(45) {
                 self.cancel_attempt(&control)?;
                 return Err(WifiError::new(WifiFailure::ConnectTimedOut, "connection attempt timed out"));
@@ -629,7 +662,14 @@ impl Controller {
             self.reconnect_started = None;
             self.address_started = None;
         }
-        run_bounded(Command::new("/bin/sh").env("INTERFACE", self.interface.as_deref().ok_or("Wi-Fi interface is missing")?).arg(helper).arg(if enabled { "on" } else { "off" }), timeout, "Wi-Fi power control")?;
+        let action = if enabled {
+            "on"
+        } else if bluetooth::powered().map_err(|error| format!("Could not check shared Bluetooth radio: {error}"))? {
+            "off-wifi"
+        } else {
+            "off"
+        };
+        run_bounded(Command::new("/bin/sh").env("INTERFACE", self.interface.as_deref().ok_or("Wi-Fi interface is missing")?).arg(helper).arg(action), timeout, "Wi-Fi power control")?;
         self.radio_enabled = enabled;
         self.monitor = None;
         self.scan_started = None;
@@ -655,6 +695,12 @@ impl Controller {
         self.ensure_monitor()?;
         if cfg!(target_arch = "arm") {
             let interface = self.interface.as_ref().ok_or("Wi-Fi interface is unknown")?;
+            if PathBuf::from("/sbin/dhcpcd").is_file() {
+                // No running lease is also a valid starting state. Release a
+                // previous lease before selecting a different network so the
+                // firmware client cannot reapply the old network's address.
+                let _ = run_bounded(Command::new("/sbin/dhcpcd").env_remove("LD_LIBRARY_PATH").args(["-k", interface]), Duration::from_secs(5), "Releasing the previous network lease");
+            }
             // Drop the old lease before changing networks so it cannot count as the new connection.
             run_bounded(Command::new("ifconfig").args([interface.as_str(), "0.0.0.0"]), Duration::from_secs(5), "Resetting the previous network address")?;
         }
@@ -731,9 +777,21 @@ impl Controller {
             return Err("IP configuration is only available on Kobo hardware".into());
         }
         let interface = self.interface.as_ref().ok_or("Wi-Fi interface is unknown")?;
+        // Reuse the firmware daemon (or start it after a radio cycle), rather
+        // than run a competing udhcpc. Keep supplicant under our control:
+        // dhcpcd -n can reload it and discard a newly joined temporary network.
+        let mut command = if PathBuf::from("/sbin/dhcpcd").is_file() {
+            let mut command = Command::new("/sbin/dhcpcd");
+            command.args(["-C", "wpa_supplicant", interface]);
+            command
+        } else {
+            let mut command = Command::new("udhcpc");
+            command.args(["-f", "-n", "-q", "-t", "5", "-T", "3", "-i", interface, "-s", "/etc/udhcpc.d/default.script"]);
+            command
+        };
         self.dhcp = Some(
-            Command::new("udhcpc")
-                .args(["-f", "-n", "-q", "-t", "5", "-T", "3", "-i", interface, "-s", "/etc/udhcpc.d/default.script"])
+            command
+                .process_group(0)
                 .env_remove("LD_LIBRARY_PATH")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -745,8 +803,7 @@ impl Controller {
     }
     fn stop_dhcp(&mut self) {
         if let Some(mut child) = self.dhcp.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_group(&mut child);
         }
     }
 }

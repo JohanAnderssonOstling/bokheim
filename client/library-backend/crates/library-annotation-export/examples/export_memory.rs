@@ -86,7 +86,7 @@ mod linux {
                 size_bytes: bytes.len() as u64,
                 inspection_version: 1,
                 inspection: Some(InspectedBook { metadata: BookRecord { metadata: BookDetails { title: format!("Book {index:05}"), ..Default::default() }, description: String::new() }, pdf: None, audiobook: None, toc: vec![] }),
-                published: PublishedStagedBook { name: file_name.clone(), relative_path: format!("/{file_name}"), published: true, fingerprint: Some("fixture".into()) },
+                published: PublishedStagedBook { name: file_name.clone(), relative_path: format!("/{file_name}"), published: true, fingerprint: Some(1) },
                 request_thumbnail: false,
                 restore_paths: vec![],
             })

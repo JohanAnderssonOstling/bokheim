@@ -25,7 +25,7 @@ struct ActiveCatalog {
     generation: u64,
 }
 static ACTIVE: OnceLock<Mutex<ActiveCatalog>> = OnceLock::new();
-const PROJECTION_VERSION: i64 = 20;
+const PROJECTION_VERSION: i64 = 22;
 const SCHEMA: &str = include_str!("schema.sql");
 const COMPACT_SCHEMA: &str = include_str!("compact.sql");
 // An inactive catalog exposes empty browse tables without allocating source records.
@@ -66,26 +66,17 @@ fn read_metadata(db: &Connection, source_id: i64, year: Option<i32>) -> Result<B
         .query_map([&source_id], |row| row.get::<_, String>(0))?
         .map(|language| LanguageTag::parse(language?).map_err(DatabaseError::operation))
         .collect::<Result<Vec<_>, DatabaseError>>()?;
-    if release(db)?.1 >= 9 {
-        let mut subjects = db.prepare_cached(
-            "SELECT assignment.concept_id,concept.preferred_label FROM book_concept assignment
-             LEFT JOIN curated.concept ON concept.concept_id=assignment.concept_id
-             WHERE assignment.book_row_id=?1 ORDER BY assignment.concept_id",
-        )?;
-        metadata.subjects = subjects
-            .query_map([source_id], |row| {
-                let concept = row.get::<_, i64>(0)?;
-                let code = format!("concept:{concept}");
-                let label = row.get::<_, Option<String>>(1)?.unwrap_or_else(|| code.clone());
-                BookSubject::new(None, label, CATALOG_CONCEPT_SOURCE, Some(UNIFIED_SYSTEM_ID.into()), Some(code)).map_err(|error| SqlError::FromSqlConversionFailure(0, Type::Integer, Box::new(error)))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        return Ok(metadata);
-    }
-    metadata.subjects = db
-        .prepare_cached("SELECT subject.id,subject.name,sort_name,source.name,authority.name,code FROM book_subject JOIN subject USING(subject_id) JOIN subject_source source ON source.id=subject.source_id LEFT JOIN subject_authority authority ON authority.id=subject.authority_id WHERE book_row_id=?1 ORDER BY subject_id")?
-        .query_map([&source_id], |row| {
-            BookSubject::with_details(row.get(0)?, row.get::<_, String>(1)?, row.get(2)?, row.get::<_, String>(3)?, row.get(4)?, row.get(5)?).map_err(|error| SqlError::FromSqlConversionFailure(1, Type::Text, Box::new(error)))
+    let mut subjects = db.prepare_cached(
+        "SELECT assignment.concept_id,concept.preferred_label FROM book_concept assignment
+         LEFT JOIN curated.concept ON concept.concept_id=assignment.concept_id
+         WHERE assignment.book_row_id=?1 ORDER BY assignment.concept_id",
+    )?;
+    metadata.subjects = subjects
+        .query_map([source_id], |row| {
+            let concept = row.get::<_, i64>(0)?;
+            let code = format!("concept:{concept}");
+            let label = row.get::<_, Option<String>>(1)?.unwrap_or_else(|| code.clone());
+            BookSubject::new(None, label, CATALOG_CONCEPT_SOURCE, Some(UNIFIED_SYSTEM_ID.into()), Some(code)).map_err(|error| SqlError::FromSqlConversionFailure(0, Type::Integer, Box::new(error)))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(metadata)
@@ -153,7 +144,22 @@ pub fn activate_path(path: &Path) -> Result<Option<u64>, DatabaseError> {
     if ACTIVE.get().is_some() {
         return Err(DatabaseError::message("the catalog can only be activated once per process"));
     }
-    let Some((release, connection)) = prepare_path(path)? else { return Ok(None) };
+    let prepared = prepare_path(path).unwrap_or_else(|error| {
+        log::warn!("catalog selection requires recovery: {error}");
+        None
+    });
+    let prepared = if prepared.is_none() {
+        if let Some(previous) = open_existing_catalog(&path.with_extension("previous.sqlite3"))? {
+            if matches!(release(&previous), Ok((_, FORMAT_VERSION))) && compatible(&previous)? {
+                let mut destination = Connection::open(path)?;
+                publish_snapshot(&previous, &mut destination)?;
+            }
+        }
+        prepare_path(path)?
+    } else {
+        prepared
+    };
+    let Some((release, connection)) = prepared else { return Ok(None) };
     activate_connection(connection, Some(path.to_owned()))?;
     Ok(Some(release))
 }
@@ -161,7 +167,10 @@ pub fn activate_path(path: &Path) -> Result<Option<u64>, DatabaseError> {
 fn prepare_path(path: &Path) -> Result<Option<(u64, Connection)>, DatabaseError> {
     let Some(mut connection) = open_existing_catalog(path)? else { return Ok(None) };
     let Ok((release_id, format)) = release(&connection) else { return Ok(None) };
-    if !matches!(format, 11 | FORMAT_VERSION) {
+    if format != FORMAT_VERSION {
+        return Ok(None);
+    }
+    if !compatible(&connection)? {
         return Ok(None);
     }
     connection.pragma_update(None, "cache_size", -2048)?;
@@ -216,12 +225,12 @@ struct StableIds {
 }
 
 fn previous_ids(db: &Connection) -> Result<StableIds, DatabaseError> {
-    let has_projection: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='catalog_browse_book')", [], |row| row.get(0))?;
-    if !has_projection {
+    let has_search: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='catalog_browse_search')", [], |row| row.get(0))?;
+    if !has_search {
         return Ok(StableIds::default());
     }
     let mut ids = StableIds::default();
-    let mut rows = db.prepare("SELECT key,row_id FROM catalog_browse_book")?;
+    let mut rows = db.prepare("SELECT book.key,browse.row_id FROM catalog_browse_search browse JOIN book ON book.row_id=browse.book_row_id")?;
     for row in rows.query_map([], |row| Ok((CardKey::from(row.get::<_, BookId>(0)?), row.get::<_, i64>(1)?)))? {
         let (key, id) = row?;
         ids.books.insert(key, id);
@@ -305,6 +314,9 @@ fn quote_identifier(name: &str) -> String {
 /// Replacing source rows and derived rows is one SQLite transaction. Readers
 /// cannot observe a new snapshot with missing or stale browse tables.
 fn install_snapshot(destination: &mut Connection, source: &Connection, ids: StableIds) -> Result<(), DatabaseError> {
+    if !compatible(source)? {
+        return Err(DatabaseError::message("catalog requires a newer selected taxonomy"));
+    }
     let page_size: u32 = source.pragma_query_value(None, "page_size", |row| row.get(0))?;
     destination.pragma_update(None, "page_size", page_size)?;
     let revision = taxonomy_update::revision(destination)?;
@@ -365,7 +377,7 @@ pub fn activate(image: Vec<u8>) -> Result<(), DatabaseError> {
     let mut source = Connection::open_in_memory()?;
     source.deserialize_read_exact("main", image.as_slice(), image.len(), false)?;
     drop(image);
-    if !matches!(release(&source)?.1, 11 | FORMAT_VERSION) {
+    if release(&source)?.1 != FORMAT_VERSION {
         return Err(DatabaseError::message("unsupported catalog snapshot format"));
     }
     let ids = previous_ids(&source)?;
@@ -389,6 +401,88 @@ fn source_view(db: &Connection) -> Result<(), DatabaseError> {
     Ok(())
 }
 
+/// Catalog requirements refer to the runtime release selected for this process.
+fn compatible(source: &Connection) -> Result<bool, DatabaseError> {
+    let format = release(source)?.1;
+    if format != FORMAT_VERSION {
+        return Err(DatabaseError::message("unsupported catalog snapshot format"));
+    }
+    let required: i64 = source.query_row("SELECT minimum_release FROM taxonomy_requirement WHERE singleton=1", [], |r| r.get(0))?;
+    if required <= 0 {
+        return Err(DatabaseError::message("invalid catalog taxonomy requirement"));
+    }
+    let selected = subject_projection::installed::selected_release().map_err(DatabaseError::operation)?;
+    if required as u64 > selected {
+        return Ok(false);
+    }
+    let mut ids = source.prepare("SELECT DISTINCT concept_id FROM book_concept")?;
+    for id in ids.query_map([], |r| r.get::<_, i64>(0))? {
+        let id = id?;
+        if subject_projection::resolve_concept_identity(id).is_none() {
+            return Err(DatabaseError::message(format!("catalog concept {id} is absent from the selected taxonomy")));
+        }
+    }
+    Ok(true)
+}
+
+fn copy_snapshot(source: &Connection, path: &Path) -> Result<(), DatabaseError> {
+    let mut destination = Connection::open(path)?;
+    publish_snapshot(source, &mut destination)
+}
+
+pub(super) fn stage_snapshot(source: &Connection, path: &Path) -> Result<(), DatabaseError> {
+    let integrity: String = source.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+    if integrity != "ok" {
+        return Err(DatabaseError::message("catalog integrity check failed"));
+    }
+    // Probe the dependency even if it cannot activate yet; malformed requirements never replace a pending image.
+    let _ = compatible(source)?;
+    let incoming_release = release(source)?.0;
+    let pending = path.with_extension("pending.sqlite3");
+    if let Some(existing) = open_existing_catalog(&pending)? {
+        if release(&existing).ok().is_some_and(|(release_id, _)| release_id > incoming_release) {
+            return Ok(());
+        }
+    }
+    copy_snapshot(source, &pending)
+}
+
+fn remove_pending(path: &Path) -> Result<(), DatabaseError> {
+    let pending = path.with_extension("pending.sqlite3");
+    #[cfg(not(target_arch = "wasm32"))]
+    if pending.exists() {
+        std::fs::remove_file(&pending).map_err(DatabaseError::operation)?;
+    }
+    #[cfg(target_arch = "wasm32")]
+    client_platform_web::web_storage::remove_reference_database(pending.to_str().ok_or_else(|| DatabaseError::message("catalog locator is not UTF-8"))?).map_err(DatabaseError::operation)?;
+    Ok(())
+}
+
+pub(super) fn apply_pending(path: &Path) -> Result<bool, DatabaseError> {
+    let Some(source) = open_existing_catalog(&path.with_extension("pending.sqlite3"))? else {
+        return Ok(false);
+    };
+    if !compatible(&source)? {
+        return Ok(false);
+    }
+    if let Some(current) = open_existing_catalog(path)? {
+        if release(&current)?.0 >= release(&source)?.0 {
+            drop(source);
+            if let Err(error) = remove_pending(path) {
+                log::warn!("completed catalog cache cleanup will retry: {error}");
+            }
+            return Ok(false);
+        }
+        copy_snapshot(&current, &path.with_extension("previous.sqlite3"))?;
+    }
+    store_snapshot(&source, path)?;
+    drop(source);
+    if let Err(error) = remove_pending(path) {
+        log::warn!("completed catalog cache cleanup will retry: {error}");
+    }
+    Ok(true)
+}
+
 pub(super) fn build_projection(db: &mut Connection, taxonomy_revision: &str) -> Result<(), DatabaseError> {
     let ids = previous_ids(db)?;
     let tx = db.transaction()?;
@@ -399,10 +493,13 @@ pub(super) fn build_projection(db: &mut Connection, taxonomy_revision: &str) -> 
 
 fn published_concepts(db: &Connection) -> Result<HashMap<CardKey, Vec<i64>>, DatabaseError> {
     let mut concepts = HashMap::<CardKey, Vec<i64>>::new();
+    let mut resolved = HashMap::<i64, Option<i64>>::new();
     let mut statement = db.prepare("SELECT b.key,c.concept_id FROM book_concept c JOIN book b ON b.row_id=c.book_row_id ORDER BY b.row_id,c.concept_id")?;
-    for row in statement.query_map([], |row| Ok((CardKey::from(row.get::<_, BookId>(0)?), row.get(1)?)))? {
+    for row in statement.query_map([], |row| Ok((CardKey::from(row.get::<_, BookId>(0)?), row.get::<_, i64>(1)?)))? {
         let (key, concept) = row?;
-        concepts.entry(key).or_default().push(concept);
+        if let Some(concept) = *resolved.entry(concept).or_insert_with(|| subject_projection::resolve_concept_identity(concept)) {
+            concepts.entry(key).or_default().push(concept);
+        }
     }
     Ok(concepts)
 }
@@ -415,7 +512,7 @@ mod published_concept_tests {
     fn compact_assignments_retain_identities_across_taxonomy_revisions() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
-            "CREATE TABLE snapshot(singleton INTEGER PRIMARY KEY,format_version INTEGER,release_id INTEGER); INSERT INTO snapshot VALUES(1,11,1);
+            "CREATE TABLE snapshot(singleton INTEGER PRIMARY KEY,format_version INTEGER,release_id INTEGER); INSERT INTO snapshot VALUES(1,13,1);
              CREATE TABLE book(row_id INTEGER PRIMARY KEY,key BLOB); CREATE TABLE book_concept(book_row_id INTEGER,concept_id INTEGER);
              INSERT INTO book VALUES(1,zeroblob(32)),(2,randomblob(32)); INSERT INTO book_concept VALUES(1,3915);",
         )
@@ -425,7 +522,7 @@ mod published_concept_tests {
 }
 
 fn build_projection_in(db: &Connection, taxonomy_revision: &str, ids: StableIds) -> Result<(), DatabaseError> {
-    if !matches!(release(db)?.1, 11 | FORMAT_VERSION) {
+    if release(db)?.1 != FORMAT_VERSION {
         return Err(DatabaseError::message("unsupported catalog snapshot format"));
     }
     source_view(db)?;
@@ -608,16 +705,12 @@ mod record_tests {
     use uuid::Uuid;
 
     fn fixture() -> Connection {
-        fixture_with_schema(include_str!("../../tests/sql/catalog_pagination.sql"))
-    }
-
-    fn fixture_with_schema(schema: &str) -> Connection {
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(schema).unwrap();
+        db.execute_batch(include_str!("../../tests/sql/catalog_pagination.sql")).unwrap();
         db.execute_batch(SCHEMA).unwrap();
         source_view(&db).unwrap();
         attach_taxonomy(&db).unwrap();
-        db.execute_batch("INSERT INTO snapshot VALUES(1,11,1); INSERT INTO source VALUES(1,'example.org'); INSERT INTO description VALUES(1,'Shared description');").unwrap();
+        db.execute_batch("INSERT INTO snapshot VALUES(1,13,1); INSERT INTO source VALUES(1,'example.org'); INSERT INTO description VALUES(1,'Shared description');").unwrap();
         for index in 1..=2 {
             let key = CardKey([index as u8; 32]);
             let external = index == 2;
@@ -642,19 +735,6 @@ mod record_tests {
             db.execute("INSERT INTO book_concept VALUES(?1,3915)", [index]).unwrap();
         }
         db
-    }
-
-    #[test]
-    fn shared_line_catalog_records_remain_readable() {
-        let db = fixture_with_schema(include_str!("../../tests/sql/catalog_shared_lines.sql"));
-        let text = "雪\r\nShared line\n\nEmbedded\0NUL\n";
-        db.execute("INSERT INTO description VALUES(2,?1)", [text]).unwrap();
-        db.execute("UPDATE book SET description_id=2", []).unwrap();
-        for index in 1..=2 {
-            let book = load_entry(&db, CardKey([index; 32])).unwrap().unwrap();
-            assert_eq!(book.record.description.as_bytes(), text.as_bytes());
-            assert_eq!(book.record.book.subjects[0].code(), Some("concept:3915"));
-        }
     }
 
     #[test]

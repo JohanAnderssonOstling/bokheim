@@ -1,10 +1,10 @@
 use crate::http::{authenticated_request, decode_response, with_body};
-use crate::session::{validate_email, validate_identity, AuthError, Session};
-use account_contract::{AccountEntitlementsResponse, AccountSnapshotResponse, BookStorageUsage, MeResponse, OtherSessionsRevocationResponse, SessionRevocationResponse, SessionSummary, MAX_ACCOUNT_STORAGE_BOOKS};
+use crate::session::{AuthError, Session, validate_email, validate_identity};
+use account_contract::{AccountEntitlementsResponse, AccountSnapshotResponse, BookStorageUsage, MAX_ACCOUNT_STORAGE_BOOKS, MeResponse, OtherSessionsRevocationResponse, SessionRevocationResponse, SessionSummary};
 use reqwest::Method;
+use sync_common::LibraryId;
 use sync_common::api::libraries::{CloudStorageChange, DeleteLibraryResponse, LibraryCloudStorage, LibraryNameRequest, LibrarySummary};
 use sync_common::storage::LibraryStorage;
-use sync_common::LibraryId;
 
 pub async fn current_account(session: &Session) -> Result<MeResponse, AuthError> {
     let account: MeResponse = decode_response(authenticated_request(session, Method::GET, "api/auth/me")?).await?;
@@ -89,7 +89,7 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode, header};
     use axum::response::IntoResponse;
     use axum::routing::{delete, get, post};
-    use sync_common::transport as wire;
+    use sync_common::http as wire;
 
     const TEST_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const LIBRARY_ID: &str = "00000000-0000-4000-8000-000000000001";

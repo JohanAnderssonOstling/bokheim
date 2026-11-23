@@ -1,0 +1,97 @@
+{
+  "date": "2026-11-12",
+  "scanner": {
+    "test": "library::workers::tests::scan_retry_deadlines_back_off_and_reset_after_recovery_and_progress",
+    "passed": 1,
+    "failed": 0,
+    "incomplete_deadlines_seconds": [
+      30,
+      60,
+      120,
+      240,
+      300,
+      300
+    ],
+    "deferred_deadlines_seconds": [
+      30,
+      60,
+      120,
+      240,
+      300,
+      300
+    ],
+    "recovery_reset": true,
+    "file_progress_wake_and_reset": true,
+    "scope": "Real filesystem/database scans and requested scheduler deadlines; no full wall-clock retry cycle."
+  },
+  "browser_scenarios": [
+    {
+      "name": "standard",
+      "requests": 2,
+      "documents": [
+        "chapter.xhtml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "unusual",
+      "requests": 3,
+      "documents": [
+        "chapter.xml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "comment",
+      "requests": 4,
+      "documents": [
+        "chapter.xhtml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "legacy",
+      "requests": 4,
+      "documents": [
+        "chapter.xhtml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "cbz",
+      "requests": 2,
+      "cached_reread": true,
+      "pages": 3,
+      "resumed_page": 1
+    },
+    {
+      "name": "cbz-deleted",
+      "requests": 3,
+      "cached_reread": true,
+      "pages": 2,
+      "resumed_page": 1
+    },
+    {
+      "name": "cbz-legacy",
+      "requests": 6,
+      "cached_reread": true,
+      "pages": 3,
+      "resumed_page": 1
+    },
+    {
+      "failure_cleanup": true,
+      "final_reader_cleanup": true,
+      "name": "opfs-repack",
+      "payload_bytes": 4194304,
+      "repack_ms": 171.6,
+      "source_pin": true,
+      "tracks": 2,
+      "unpublished": true
+    }
+  ],
+  "limits": [
+    "OPFS case exercises production storage and repacking APIs, not the catalog lookup/download/import pipeline.",
+    "Single 4 MiB repack timing excludes network, source writes, and cleanup; no before/after performance comparison.",
+    "Network cancellation and worker termination during repacking are not covered."
+  ]
+}

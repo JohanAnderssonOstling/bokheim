@@ -1,8 +1,9 @@
 //! Recover folder identity before reopening device-owned library resources.
 
 use super::{LibraryEntry, LocalRegistry, RegistryResult, platform};
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem as fs;
 use std::collections::HashSet;
-use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use sync_common::LibraryId;
@@ -63,7 +64,7 @@ impl LocalRegistry {
             let repaired = platform::prepare_attached_library(*id, entry.library_name(), entry.storage_locator().to_owned())?;
             return Ok(if self.read_value(&pending_key(id))?.is_some() { LibraryRootRecovery::Recovered(repaired) } else { LibraryRootRecovery::Unchanged(repaired) });
         }
-        let intact = manifest.as_ref().is_some_and(|(found, _)| found == id) && root.join(".bokheim/library.json").is_file() && (previous.is_none() || identity.is_some());
+        let intact = manifest.as_ref().is_some_and(|(found, _)| found == id) && fs::is_file(&root.join(".bokheim/library.json")) && (previous.is_none() || identity.is_some());
         if intact {
             let changed = self.read_value(&pending_key(id))?.is_some() || (previous.is_some() && previous != identity);
             if changed {
@@ -97,7 +98,7 @@ impl LocalRegistry {
                     continue;
                 }
                 if platform::read_manifest(&path).ok().flatten().is_some_and(|(found, _)| found == *id) && !self.library_root_retired(id, &path)? {
-                    found.insert(path.canonicalize()?);
+                    found.insert(fs::canonicalize(&path)?);
                 }
             }
         }

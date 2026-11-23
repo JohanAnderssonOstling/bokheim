@@ -1,6 +1,8 @@
 use std::io::ErrorKind;
+use std::future::{ready, Future};
+use std::mem::take;
 use std::time::Instant;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -179,9 +181,9 @@ impl StagedAsset {
         let Self { temp, final_path, kind, total, checksum, _permit, catalog_pin } = self;
         let parent = final_path.parent().expect("staged asset has a parent");
         if kind == AssetKind::Book {
-            // Catalog adoption is serialized against publication by the
-            // caller's database lock. Older clients may still send bytes;
-            // verify them during staging, then keep the retained catalog inode.
+            // Collection is excluded by the caller's shared publication lock.
+            // Catalog adoption can concurrently install a verified pin, but
+            // never unlinks this upload's private path. Keep an existing pin.
             if let Some(pin) = catalog_pin {
                 match tokio::fs::symlink_metadata(pin).await {
                     Ok(metadata) if metadata.is_file() && metadata.len() == total => {
@@ -282,16 +284,27 @@ impl FsAssetStore {
     }
 
     /// Enumerates published books only; active temporary uploads are excluded.
-    pub async fn book_hashes(&self) -> Result<Vec<BookId>, AssetError> {
+    pub async fn visit_book_batches<F, Fut>(&self, mut visit: F) -> Result<(), AssetError>
+    where
+        F: FnMut(Vec<BookId>) -> Fut,
+        Fut: Future<Output = Result<(), AssetError>>,
+    {
         let mut hashes = Vec::new();
         let mut shards = tokio::fs::read_dir(&self.books_root).await.map_err(storage_error)?;
         while let Some(shard) = shards.next_entry().await.map_err(storage_error)? {
-            if !shard.file_type().await.map_err(storage_error)?.is_dir() { continue; }
+            if !shard.file_type().await.map_err(storage_error)?.is_dir() {
+                continue;
+            }
             let mut files = tokio::fs::read_dir(shard.path()).await.map_err(storage_error)?;
             while let Some(file) = files.next_entry().await.map_err(storage_error)? {
-                let Some(hash) = file.file_name().to_str().and_then(|name| name.parse::<BookId>().ok()) else { continue; };
+                let Some(hash) = file.file_name().to_str().and_then(|name| name.parse::<BookId>().ok()) else {
+                    continue;
+                };
                 if file.path() == self.path("", AssetKind::Book, &hash)? && file.file_type().await.map_err(storage_error)?.is_file() {
                     hashes.push(hash);
+                    if hashes.len() == 256 {
+                        visit(take(&mut hashes)).await?;
+                    }
                 }
             }
         }
@@ -303,36 +316,77 @@ impl FsAssetStore {
                 };
                 if pin.file_type().await.map_err(storage_error)?.is_file() {
                     hashes.push(hash);
+                    if hashes.len() == 256 {
+                        visit(take(&mut hashes)).await?;
+                    }
                 }
             }
         }
+        if !hashes.is_empty() {
+            visit(hashes).await?;
+        }
+        Ok(())
+    }
+
+    /// Enumerates account-scoped covers, including both legacy variants.
+    pub async fn visit_thumbnail_batches<F, Fut>(&self, mut visit: F) -> Result<(), AssetError>
+    where
+        F: FnMut(Vec<(String, BookId)>) -> Fut,
+        Fut: Future<Output = Result<(), AssetError>>,
+    {
+        let mut objects = Vec::new();
+        let mut users = match tokio::fs::read_dir(self.thumbnails_root.join("users")).await {
+            Ok(users) => users,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(storage_error(error)),
+        };
+        while let Some(user) = users.next_entry().await.map_err(storage_error)? {
+            let scope = user.file_name().to_string_lossy().into_owned();
+            if scope.len() != 64 || !scope.bytes().all(|byte| byte.is_ascii_hexdigit()) || !user.file_type().await.map_err(storage_error)?.is_dir() {
+                continue;
+            }
+            let mut files = tokio::fs::read_dir(user.path()).await.map_err(storage_error)?;
+            while let Some(file) = files.next_entry().await.map_err(storage_error)? {
+                let name = file.file_name();
+                let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(".pair").or_else(|| name.strip_suffix(".jpg"))) else {
+                    continue;
+                };
+                let stem = stem.strip_suffix("-300").unwrap_or(stem);
+                if let Ok(hash) = stem.parse::<BookId>() {
+                    objects.push((scope.clone(), hash));
+                    if objects.len() == 256 {
+                        visit(take(&mut objects)).await?;
+                    }
+                }
+            }
+        }
+        if !objects.is_empty() {
+            visit(objects).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn book_hashes(&self) -> Result<Vec<BookId>, AssetError> {
+        let mut hashes = Vec::new();
+        self.visit_book_batches(|batch| {
+            hashes.extend(batch);
+            ready(Ok(()))
+        })
+        .await?;
         hashes.sort_unstable();
         hashes.dedup();
         Ok(hashes)
     }
 
-    /// Enumerates account-scoped covers, including both legacy variants.
     pub async fn thumbnail_objects(&self) -> Result<Vec<(String, BookId)>, AssetError> {
         let mut objects = Vec::new();
-        let mut users = match tokio::fs::read_dir(self.thumbnails_root.join("users")).await {
-            Ok(users) => users,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(objects),
-            Err(error) => return Err(storage_error(error)),
-        };
-        while let Some(user) = users.next_entry().await.map_err(storage_error)? {
-            let scope = user.file_name().to_string_lossy().into_owned();
-            if scope.len() != 64 || !scope.bytes().all(|byte| byte.is_ascii_hexdigit()) || !user.file_type().await.map_err(storage_error)?.is_dir() { continue; }
-            let mut seen = HashSet::new();
-            let mut files = tokio::fs::read_dir(user.path()).await.map_err(storage_error)?;
-            while let Some(file) = files.next_entry().await.map_err(storage_error)? {
-                let name = file.file_name();
-                let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(".pair").or_else(|| name.strip_suffix(".jpg"))) else { continue; };
-                let stem = stem.strip_suffix("-300").unwrap_or(stem);
-                if let Ok(hash) = stem.parse::<BookId>() {
-                    if seen.insert(hash) { objects.push((scope.clone(), hash)); }
-                }
-            }
-        }
+        self.visit_thumbnail_batches(|batch| {
+            objects.extend(batch);
+            ready(Ok(()))
+        })
+        .await?;
+        objects.sort_unstable();
+        objects.dedup();
         Ok(objects)
     }
 
@@ -382,6 +436,12 @@ impl FsAssetStore {
         Ok(true)
     }
 
+    /// Checks the private alias only; a retained catalog pin is not an orphan
+    /// alias and must never trigger repair of the upload path.
+    pub async fn private_book_exists(&self, book: &BookId) -> Result<bool, AssetError> {
+        tokio::fs::try_exists(self.path("", AssetKind::Book, book)?).await.map_err(storage_error)
+    }
+
     /// Only the application may call this after confirming that no committed
     /// database binding exists. Failed database commits can leave such aliases.
     pub fn discard_unbound_book_alias(&self, book: &BookId) -> Result<(), AssetError> {
@@ -394,15 +454,20 @@ impl FsAssetStore {
         Ok(())
     }
 
-    pub fn remove_scoped_thumbnail(&self, scope: &str, hash: &BookId) -> Result<(), AssetError> {
+    pub fn remove_scoped_thumbnail(&self, scope: &str, hash: &BookId) -> Result<bool, AssetError> {
         if scope.len() != 64 || !scope.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(AssetError::InvalidInput("invalid thumbnail account scope".into()));
         }
         let root = self.thumbnails_root.join("users").join(scope);
+        let mut removed = false;
         for name in [format!("{hash}.pair"), format!("{hash}.jpg"), format!("{hash}-300.jpg")] {
-            remove_if_present(&root.join(name))?;
+            match std::fs::remove_file(root.join(name)) {
+                Ok(()) => removed = true,
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(storage_error(error)),
+            }
         }
-        Ok(())
+        Ok(removed)
     }
 
     fn path(&self, user_id: &str, kind: AssetKind, hash: &BookId) -> Result<PathBuf, AssetError> {

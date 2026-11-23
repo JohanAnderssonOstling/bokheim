@@ -10,8 +10,8 @@ content-address = { path = "../../../../shared/content-address" }
 book-access = { path = "../book-access" }
 book-model = { path = "../../../../shared/book-model" }
 client-protocol = { path = "../../../client-protocol", features = ["http"] }
-cpu-host = { path = "../cpu-host" }
-thumbnail = { path = "../thumbnail" }
+cpu-contract = { path = "../../../cpu-contract" }
+thumbnail-contract = { path = "../../../../shared/thumbnail-contract" }
 library-files = { path = "../library-files" }
 library-database = { path = "../library-database" }
 library-services = { path = "../library-services" }

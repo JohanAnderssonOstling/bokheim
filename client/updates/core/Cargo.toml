@@ -10,9 +10,9 @@ blocking = ["reqwest/blocking", "http-response/blocking"]
 native-state = ["blocking", "dep:rusqlite", "dep:fs2", "dep:zip"]
 
 [dependencies]
+subject-projection = { path = "../../../shared/subject-projection" }
 operation-failure = { path = "../../client-protocol/crates/operation-failure", features = ["http", "sqlite"] }
 http-response = { workspace = true }
-client-platform-runtime = { path = "../../platforms/runtime" }
 ring = "0.17"
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }

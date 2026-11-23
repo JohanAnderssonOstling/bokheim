@@ -336,6 +336,11 @@ fn stored_layout(entries: &[ContentEntry], formats: &[EntryFormat]) -> io::Resul
 /// Folders are flattened; NFO and CUE sidecars are retained. CUE file paths
 /// follow the flattened tracks. Other files are left out.
 pub fn repack_zip<R: Read + Seek>(reader: R, cover: Option<&[u8]>) -> io::Result<Vec<u8>> {
+    Ok(repack_zip_into(reader, Cursor::new(Vec::new()), cover)?.into_inner())
+}
+
+/// Repack without retaining either complete archive in memory.
+pub fn repack_zip_into<R: Read + Seek, W: Write + Seek>(reader: R, writer: W, cover: Option<&[u8]>) -> io::Result<W> {
     if cover.is_some_and(|bytes| bytes.len() as u64 > MAX_COVER_BYTES || !bytes.starts_with(&[0xff, 0xd8])) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "the replacement cover must be a bounded JPEG"));
     }
@@ -366,7 +371,7 @@ pub fn repack_zip<R: Read + Seek>(reader: R, cover: Option<&[u8]>) -> io::Result
     if tracks.is_empty() || tracks.len() > MAX_TRACKS {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "the download has no MP3 tracks, or too many"));
     }
-    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+    let mut zip = ZipWriter::new(writer);
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     let mut names = HashSet::new();
     for (name, index) in tracks {
@@ -405,7 +410,7 @@ pub fn repack_zip<R: Read + Seek>(reader: R, cover: Option<&[u8]>) -> io::Result
         zip.start_file("cover.jpg", options).map_err(io::Error::other)?;
         zip.write_all(cover)?;
     }
-    Ok(zip.finish().map_err(io::Error::other)?.into_inner())
+    zip.finish().map_err(io::Error::other)
 }
 
 /// Change only FILE paths, retaining the original encoding and cue timings.

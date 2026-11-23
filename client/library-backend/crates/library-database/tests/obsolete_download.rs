@@ -17,7 +17,7 @@ fn late_download_requeues_removal_after_purge_work_has_finished() {
             format: book_model::BookFormat::Epub,
             audiobook_track_titles: Vec::new(),
         },
-        publication: library_model::PublishedStagedBook { name: "book (1).epub".into(), relative_path: "/book (1).epub".into(), published: false, fingerprint: Some("verified".into()) },
+        publication: library_model::PublishedStagedBook { name: "book (1).epub".into(), relative_path: "/book (1).epub".into(), published: false, fingerprint: Some(1) },
         size_bytes: 123,
     };
     assert_eq!(db.complete_downloaded_book_with_content(completion.clone(), hash.content_hash().unwrap(), true).unwrap(), NativeBookAcknowledgement::Obsolete);

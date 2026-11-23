@@ -45,6 +45,8 @@ async fn notebook_uses_book_card_geometry_and_opens_overlay_immediately(cx: &mut
         download_requested: false,
         format_category: LibraryFileTypeFilter::Book,
         audiobook_duration_ms: None,
+        size_bytes: None,
+        format: None,
         added_at: 0,
         source_directory: None,
     };

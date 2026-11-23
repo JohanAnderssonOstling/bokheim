@@ -3,6 +3,7 @@
 use super::transport::{cpu_client, range::Server};
 use client_platform_runtime::executor::BoxedBackendFuture;
 use cpu_contract::{Artifact, BackendError, BookOperation, BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse};
+use operation_failure::OperationError;
 use std::cell::RefCell;
 use std::io::{Read, Seek, SeekFrom};
 use wasm_bindgen::JsValue;
@@ -48,9 +49,9 @@ impl CpuHost for WebHost {
 }
 
 /// Dropping the range server releases the request's worker-side stream.
-pub fn serve_reader<R: Read + Seek + Send + 'static>(mut reader: R) -> Result<Server, operation_failure::OperationError> {
-    let length = reader.seek(SeekFrom::End(0)).map_err(operation_failure::OperationError::from)?;
-    Server::sync(length, move |offset, length| crate::reader::read_range(&mut reader, offset, length.min(256 * 1024)).map_err(operation_failure::OperationError::from))
+pub fn serve_reader<R: Read + Seek + Send + 'static>(mut reader: R) -> Result<Server, OperationError> {
+    let length = reader.seek(SeekFrom::End(0)).map_err(OperationError::from)?;
+    Server::sync(length, move |offset, length| crate::reader::read_range(&mut reader, offset, length.min(256 * 1024)).map_err(OperationError::from))
 }
 
 pub async fn run_book_operation_with_source<C: BookOperation>(operation: C, source: JsValue) -> Result<C::Reply, BackendError> {

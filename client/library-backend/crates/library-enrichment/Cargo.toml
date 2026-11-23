@@ -10,10 +10,9 @@ workspace = true
 [dependencies]
 library-placement = { path = "../library-placement" }
 http-response = { path = "../../../../shared/http-response" }
-asset-transfer = { path = "../asset-transfer" }
-book-inspection = { path = "../book-inspection" }
+book-normalization = { path = "../../../../shared/book-normalization" }
 book-model = { path = "../../../../shared/book-model" }
-cpu-host = { path = "../cpu-host" }
+cpu-contract = { path = "../../../cpu-contract" }
 client-platform-runtime = { path = "../../../platforms/runtime" }
 library-database = { path = "../library-database" }
 library-files = { path = "../library-files" }
@@ -23,7 +22,6 @@ log = "0.4"
 sync-common = { path = "../../../../shared/sync-common" }
 web-time = "1"
 serde_json = "1"
-futures-util = "0.3"
 metadata-contract = { path = "../../../../shared/metadata-contract" }
 reqwest = { workspace = true, features = ["stream"] }
 tokio = { version = "1", features = ["sync"] }
@@ -32,6 +30,9 @@ thiserror = "2"
 image = { workspace = true, features = ["jpeg", "png", "webp"] }
 
 [dev-dependencies]
+book-inspection = { path = "../book-inspection" }
+cpu-host = { path = "../cpu-host" }
+futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt", "net", "test-util"] }
 axum = "0.7"
 tempfile = "3"

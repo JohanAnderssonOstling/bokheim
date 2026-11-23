@@ -13,11 +13,36 @@ impl SettingsPage {
 
     pub(super) fn settings_container(&self, content: impl IntoElement, desktop: bool, cx: &Context<Self>) -> Div {
         let theme = components::browser_theme(cx);
-        let tabs = components::row(0.0).w_full().max_w(px(640.0))
+        let tabs = components::row(0.0)
+            .w_full()
+            .max_w(px(if self.keyboard_tab { 640.0 } else { 1080.0 }))
             .key_context("BrowserSettingsHeader")
-            .child(components::base_button("settings-general-tab").label(text!(common::general)).ghost().no_fill().flex_1().border_b_2().border_color(if !self.keyboard_tab { theme.accent } else { theme.rule }).on_click(cx.listener(|page, _, _, cx| page.select_settings_tab(false, cx))))
-            .child(components::base_button("settings-keyboard-tab").label(text!(common::keyboard)).ghost().no_fill().flex_1().border_b_2().border_color(if self.keyboard_tab { theme.accent } else { theme.rule }).on_click(cx.listener(|page, _, _, cx| page.select_settings_tab(true, cx))));
-        div().size_full().min_h_0().min_w_0().flex().flex_col()
+            .child(
+                components::base_button("settings-general-tab")
+                    .label(text!(common::general))
+                    .ghost()
+                    .no_fill()
+                    .flex_1()
+                    .border_b_2()
+                    .border_color(if !self.keyboard_tab { theme.accent } else { theme.rule })
+                    .on_click(cx.listener(|page, _, _, cx| page.select_settings_tab(false, cx))),
+            )
+            .child(
+                components::base_button("settings-keyboard-tab")
+                    .label(text!(common::keyboard))
+                    .ghost()
+                    .no_fill()
+                    .flex_1()
+                    .border_b_2()
+                    .border_color(if self.keyboard_tab { theme.accent } else { theme.rule })
+                    .on_click(cx.listener(|page, _, _, cx| page.select_settings_tab(true, cx))),
+            );
+        div()
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .flex()
+            .flex_col()
             .key_context(SETTINGS_KEY_CONTEXT)
             .track_focus(&self.focus)
             .tab_group()

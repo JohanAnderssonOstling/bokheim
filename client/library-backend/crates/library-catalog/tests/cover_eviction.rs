@@ -10,7 +10,7 @@ async fn eviction_rejects_an_old_response_and_allows_fresh_covers_after_reading(
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         std::env::set_var("BOKHEIM_CATALOG_ORIGIN", format!("http://{}", listener.local_addr().unwrap()));
         let key = CardKey([93 + index as u8; 32]);
-        let suffix = width.map(thumbnail::card_thumbnail_suffix).unwrap_or_else(|| "card".into());
+        let suffix = width.map(thumbnail_contract::card_thumbnail_suffix).unwrap_or_else(|| "card".into());
         let (started, received) = oneshot::channel();
         let (resume, wait) = mpsc::channel();
         let server = thread::spawn(move || {

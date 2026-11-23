@@ -7,7 +7,6 @@ use dictionary::{Client, DictionaryDownloads, DictionaryImport, DictionaryInfo, 
 use dictionary_catalog::{CuratedDictionary, find};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, FileDialogFilter, FocusHandle, IntoElement, MouseButton, PathPromptOptions, Render, SharedString, Task, WeakEntity, Window, div, px, rems};
-use gpui_component::checkbox::Checkbox;
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_component::{Disableable, IconName, IndexPath};
 use ui_components as components;
@@ -193,13 +192,13 @@ impl DictionarySettings {
         cx.notify();
     }
 
-    fn configure(&mut self, id: String, enabled: bool, direction: i8, cx: &mut Context<Self>) {
+    fn reorder(&mut self, id: String, direction: i8, cx: &mut Context<Self>) {
         if self.operation == Some(Operation::Import) || !self.pending.insert(id.clone()) {
             return;
         }
         let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let result = backend.configure(id.clone(), enabled, direction).await.map(|_| ());
+            let result = backend.reorder(id.clone(), direction).await.map(|_| ());
             let _ = this.update(cx, |this, cx| {
                 this.pending.remove(&id);
                 this.finish(result, cx);
@@ -416,16 +415,33 @@ impl ListDelegate for DictionaryList {
 impl Render for DictionarySettings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
-        let import = components::outlined_text_button("import-stardict", text!(dictionary::import)).debug_selector(|| "import-stardict".into()).disabled(self.operation.is_some()).on_click(cx.listener(|this, _, _, cx| this.import(cx)));
-        let download = components::outlined_text_button("download-dictionary", text!(dictionary::download_dictionary))
+        let import = components::outlined_text_button("import-stardict", text!(dictionary::import))
+            .h(rems(components::settings_control_size_rem()))
+            .debug_selector(|| "import-stardict".into())
+            .disabled(self.operation.is_some())
+            .on_click(cx.listener(|this, _, _, cx| this.import(cx)));
+        let download = components::outlined_text_button("download-dictionary", text!(common::download))
+            .h(rems(components::settings_control_size_rem()))
             .debug_selector(|| "download-dictionary".into())
             .disabled(self.operation == Some(Operation::Import) || self.downloads.is_none())
             .on_click(cx.listener(|this, _, window, cx| this.open_picker(window, cx)));
-        let header = div().w_full().min_w_0().flex().items_center().gap(px(components::SPACE_SM))
-            .child(components::back_text_button("dictionary-settings-back", text!(common::back)).on_click(cx.listener(|_, _, _, cx| cx.emit(Closed))))
-            .child(div().flex_1().min_w_0().child(text!(dictionary::dictionaries)));
-        let actions = div().flex().flex_wrap().items_center().gap(px(8.0)).py(px(12.0)).child(import).child(download);
-        let mut group = if self.closable { components::browser_settings_group().child(header) } else { components::browser_settings_fieldset(text!(dictionary::dictionaries), theme) }.child(actions);
+        let actions = div().min_w_0().flex().flex_wrap().items_center().gap(px(8.0)).child(import).child(download);
+        let mut group = if self.closable {
+            let header = div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(components::SPACE_SM))
+                .pb(px(components::SPACE_SM))
+                .child(components::back_text_button("dictionary-settings-back", text!(common::back)).on_click(cx.listener(|_, _, _, cx| cx.emit(Closed))))
+                .child(div().flex_1().min_w_0().font_features(components::small_caps()).child(text!(dictionary::dictionaries)))
+                .child(actions);
+            components::browser_settings_group().child(header)
+        } else {
+            components::browser_settings_fieldset_with_actions(text!(dictionary::dictionaries), actions, theme)
+        };
         if let Some(downloads) = &self.downloads {
             if let Some(active) = downloads.active.as_deref().and_then(|id| downloads.available.iter().find(|spec| spec.id == id)) {
                 group = group.child(div().p(px(12.0)).child(format!(text!(dictionary::downloading_dictionary), active.name)));
@@ -438,19 +454,12 @@ impl Render for DictionarySettings {
         }
         for (index, dictionary) in self.dictionaries.iter().enumerate() {
             let id = dictionary.id.clone();
-            let enabled = dictionary.enabled;
             let busy = self.operation == Some(Operation::Import) || self.pending.contains(&id);
-            let toggle = Checkbox::new(SharedString::from(format!("dictionary-toggle-{id}")))
-                .tooltip(text!(dictionary::enabled))
-                .checked(enabled)
-                .disabled(busy)
-                .on_click(cx.listener(move |this, checked, _, cx| this.configure(id.clone(), *checked, 0, cx)));
-            let id = dictionary.id.clone();
             let info = components::outlined_icon_button(format!("dictionary-details-{id}"), text!(dictionary::dictionary_details), IconName::Info).no_fill().on_click(cx.listener(move |this, _, _, cx| {
                 this.details = if this.details.as_ref() == Some(&id) { None } else { Some(id.clone()) };
                 cx.notify();
             }));
-            let mut controls = div().flex().items_center().flex_wrap().gap(px(4.0)).child(toggle).child(info);
+            let mut controls = div().flex().items_center().flex_wrap().gap(px(4.0)).child(info);
             let id = dictionary.id.clone();
             controls = controls.child(
                 components::outlined_icon_button(format!("dictionary-remove-{id}"), text!(dictionary::remove_dictionary), components::navigation_icon(components::NavigationIcon::Trash2))
@@ -462,15 +471,25 @@ impl Render for DictionarySettings {
             for (direction, label, icon, disabled) in [(-1, text!(dictionary::move_up), IconName::ArrowUp, index == 0), (1, text!(dictionary::move_down), IconName::ArrowDown, index + 1 == self.dictionaries.len())] {
                 let id = dictionary.id.clone();
                 controls = controls.child(
-                    components::outlined_icon_button(format!("dictionary-move-{id}-{direction}"), label, icon)
-                        .no_fill()
-                        .disabled(busy || disabled)
-                        .on_click(cx.listener(move |this, _, _, cx| this.configure(id.clone(), enabled, direction, cx))),
+                    components::outlined_icon_button(format!("dictionary-move-{id}-{direction}"), label, icon).no_fill().disabled(busy || disabled).on_click(cx.listener(move |this, _, _, cx| this.reorder(id.clone(), direction, cx))),
                 );
             }
-            let details = format!(text!(dictionary::words_mib), dictionary.metadata.word_count, dictionary.size_bytes as f64 / (1024.0 * 1024.0));
             let label = dictionary.curated_id.as_deref().and_then(find).map_or_else(|| dictionary.metadata.name.clone(), |spec| spec.name.clone());
-            group = group.child(components::browser_settings_row(label, details, controls, theme));
+            group = group.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .min_h(rems(components::settings_control_size_rem()))
+                    .py(px(4.0))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.0))
+                    .border_t_1()
+                    .border_color(theme.rule)
+                    .child(div().flex_1().min_w(rems(6.0)).child(label))
+                    .child(controls.flex_none()),
+            );
             if self.details.as_deref() == Some(dictionary.id.as_str()) {
                 group = group.child(div().p(px(12.0)).child(format!("{}\n\n{}", dictionary.metadata.name, dictionary.metadata.description)));
             }

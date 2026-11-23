@@ -292,31 +292,6 @@ public class BookBrowserTest {
         assertEquals("a complete epub", new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8));
     }
 
-    @Test public void explicitDownloadsProceedOnMeteredNetworks() throws Exception {
-        java.util.concurrent.atomic.AtomicInteger networkCost = new java.util.concurrent.atomic.AtomicInteger();
-        NetworkCostMonitor monitor = new NetworkCostMonitor(networkCost::set);
-        android.net.Network mobile = org.robolectric.shadows.ShadowNetwork.newInstance(2);
-        android.net.NetworkCapabilities metered = new android.net.NetworkCapabilities();
-        Shadows.shadowOf(metered).removeCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
-        monitor.onAvailable(mobile);
-        monitor.onCapabilitiesChanged(mobile, metered);
-        assertEquals(2, networkCost.get());
-        byte[] body = new byte[512 * 1024];
-        java.util.Arrays.fill(body, (byte) 42);
-        server.serve("/metered.epub", request -> request.respond(200, "Content-Type: application/epub+zip\r\n", body, body.length));
-        server.start();
-        List<JSONObject> events = new ArrayList<>();
-        browser = new BookBrowserSurface(activity, 31, new JSONObject().put("url", "about:blank").put("downloads", directory.getAbsolutePath()), anchor, (id, message) -> {
-            try { events.add(new JSONObject(message)); } catch (Exception error) { throw new AssertionError(error); }
-        });
-        browser.startDownload(url("/metered.epub"), null, null, null);
-        JSONObject downloaded = awaitEvent(events, "downloaded");
-        assertArrayEquals(body, Files.readAllBytes(new File(downloaded.getString("path")).toPath()));
-        assertFalse(awaitEvent(events, "download_finished").has("error"));
-        assertFalse(events.stream().anyMatch(event -> event.optString("kind").equals("download_waiting")));
-        assertEquals(1, directory.list().length);
-    }
-
     @Test public void cancellingBeforeADownloadStartsDoesNotFetchOrPublishIt() throws Exception {
         BookDownload.Cancellation cancellation = new BookDownload.Cancellation();
         cancellation.cancel();

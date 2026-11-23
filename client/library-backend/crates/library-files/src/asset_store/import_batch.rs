@@ -3,8 +3,11 @@
 //! available throughout; Move and provider uploads use individual durability.
 use super::{AssetStore, AssetStoreError};
 use client_platform_runtime::executor::run_blocking;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem as fs;
+#[cfg(target_os = "linux")]
+use client_platform_runtime::filesystem::File;
 use std::collections::BTreeSet;
-use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -78,7 +81,7 @@ impl AssetStore {
             // A library may contain mount points: flush each affected device.
             // Keep paths on failure so the complete boundary can be retried.
             for path in paths.iter() {
-                let file = File::open(path)?;
+                let file = fs::open(path)?;
                 if devices.insert(file.metadata()?.dev()) {
                     client_platform_native::filesystem::sync_filesystem(&file)?;
                 }
@@ -88,10 +91,10 @@ impl AssetStore {
         {
             let mut directories = BTreeSet::new();
             for path in paths.iter() {
-                File::options().read(true).write(true).open(path)?.sync_all()?;
+                fs::OpenOptions::new().read(true).write(true).open(path)?.sync_all()?;
                 // Include ancestors: a newly created proof directory's name
                 // must survive along with the files inside it.
-                directories.extend(path.ancestors().skip(1).map(Path::to_path_buf));
+                directories.extend(path.ancestors().skip(1).take_while(|directory| directory.starts_with(&self.0.library_root)).map(Path::to_path_buf));
             }
             for directory in directories.iter().rev() {
                 client_platform_native::filesystem::sync_directory(directory)?;

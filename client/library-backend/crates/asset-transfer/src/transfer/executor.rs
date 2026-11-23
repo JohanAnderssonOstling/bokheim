@@ -1,9 +1,8 @@
 //! Book and cover transfers with independent metadata commands.
-#[cfg(not(target_arch = "wasm32"))]
-use crate::deadline::download_deadline;
 use crate::TransferError;
 use crate::{deadline::transfer_deadline, policy::SMALL_REQUEST_TIMEOUT};
 use content_address::ContentHash;
+use cpu_contract::CpuHost;
 use futures_util::{stream, StreamExt};
 use library_database::DatabaseClient;
 use library_model::BookUploadIntent;
@@ -11,7 +10,7 @@ use library_model::BookUploadIntent;
 use library_model::{DownloadState, LibraryUpdate, TransferOrigin};
 use library_placement::LibraryState;
 use library_services::{
-    account::LibraryAuthentication,
+    account::LibraryAccount,
     events::{LibraryEvent, LibraryEventRouter},
     interest::NotificationInterest,
 };
@@ -33,12 +32,12 @@ pub struct AssetExecutor {
     pub(crate) http_client: reqwest::Client,
     pub(crate) library_id: LibraryId,
     pub(crate) events: LibraryEventRouter,
-    pub(super) authentication: LibraryAuthentication,
+    pub(super) account: LibraryAccount,
     pub(super) notification_interest: NotificationInterest,
     pub(super) availability_changed: Arc<AtomicBool>,
     pub(crate) state: Arc<RwLock<LibraryState>>,
     pub(crate) database: DatabaseClient,
-    pub(crate) cpu: Arc<dyn cpu_host::CpuHost>,
+    pub(crate) cpu: Arc<dyn CpuHost>,
 }
 
 /// Poll uploads on the library thread. Ordinary failures leave later work
@@ -63,21 +62,8 @@ where
 impl AssetExecutor {
     /// Keep metadata commands independent of file admission and pair renewal
     /// with its credentials. State supplies the current filesystem handles.
-    pub fn new(
-        state: Arc<RwLock<LibraryState>>, database: DatabaseClient, events: LibraryEventRouter, library_id: LibraryId, authentication: LibraryAuthentication, notification_interest: NotificationInterest, cpu: Arc<dyn cpu_host::CpuHost>,
-    ) -> Self {
-        Self {
-            asset_storage_enabled: Arc::new(AtomicBool::new(true)),
-            http_client: http_response::client(),
-            library_id,
-            events,
-            authentication,
-            notification_interest,
-            availability_changed: Arc::new(AtomicBool::new(false)),
-            state,
-            database,
-            cpu,
-        }
+    pub fn new(state: Arc<RwLock<LibraryState>>, database: DatabaseClient, events: LibraryEventRouter, library_id: LibraryId, account: LibraryAccount, notification_interest: NotificationInterest, cpu: Arc<dyn CpuHost>) -> Self {
+        Self { asset_storage_enabled: Arc::new(AtomicBool::new(true)), http_client: http_response::client(), library_id, events, account, notification_interest, availability_changed: Arc::new(AtomicBool::new(false)), state, database, cpu }
     }
 
     pub fn http_client(&self) -> &reqwest::Client {
@@ -100,22 +86,27 @@ impl AssetExecutor {
             error => TransferError::retryable(error),
         })?;
         self.check_transfer_account(&credentials).await?;
-        for intent in intents.iter().filter(|intent| response.owned.contains(&intent.book_id)) {
-            let endpoint = sync_transport::blob_endpoint(credentials.server_url(), &self.library_id, &intent.book_id).map_err(crate::AssetResponseError::Url)?;
-            let head = transfer_deadline(SMALL_REQUEST_TIMEOUT, self.http_client.head(endpoint).bearer_auth(credentials.access_token()).send()).await?.map_err(TransferError::retryable)?;
-            let head = crate::validate_streaming_asset_response(head)?;
-            let checksum = head
-                .headers()
-                .get("x-bokheim-content-hash")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<ContentHash>().ok())
-                .or_else(|| intent.book_id.content_hash())
-                .ok_or_else(|| TransferError::rejected("the server did not provide the canonical book checksum"))?;
-            self.check_transfer_account(&credentials).await?;
-            let size = head.headers().get(reqwest::header::CONTENT_LENGTH).and_then(|value| value.to_str().ok()).and_then(|value| value.parse::<u64>().ok());
-            self.database.confirm_uploaded_content_with_pdf(intent.book_id, checksum, size, None).await?;
-        }
+
         Ok(response)
+    }
+
+    /// Confirm each already-owned book independently of the rest of its page.
+    async fn confirm_remote_book(&self, intent: &BookUploadIntent) -> Result<(), TransferError> {
+        let credentials = self.credentials().await?;
+        let endpoint = sync_transport::blob_endpoint(credentials.server_url(), &self.library_id, &intent.book_id).map_err(crate::AssetResponseError::Url)?;
+        let head = transfer_deadline(SMALL_REQUEST_TIMEOUT, self.http_client.head(endpoint).bearer_auth(credentials.access_token()).send()).await?.map_err(TransferError::retryable)?;
+        let head = crate::validate_streaming_asset_response(head)?;
+        let checksum = head
+            .headers()
+            .get("x-bokheim-content-hash")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<ContentHash>().ok())
+            .or_else(|| intent.book_id.content_hash())
+            .ok_or_else(|| TransferError::rejected("the server did not provide the canonical book checksum"))?;
+        self.check_transfer_account(&credentials).await?;
+        let size = head.headers().get(reqwest::header::CONTENT_LENGTH).and_then(|value| value.to_str().ok()).and_then(|value| value.parse::<u64>().ok());
+        self.database.confirm_uploaded_content_with_pdf(intent.book_id, checksum, size, None).await?;
+        Ok(())
     }
 
     /// Negotiate once per page; native uploads run four at a time, browser
@@ -126,8 +117,6 @@ impl AssetExecutor {
         }
         let _interest = self.notification_interest.work();
         let response = self.refreshed(|| self.negotiate_uploads(intents)).await?;
-        let owned = intents.iter().filter(|intent| response.owned.contains(&intent.book_id)).cloned().collect();
-        self.database.settle_book_uploads(owned).await?;
         let uploads: Vec<_> = intents
             .iter()
             .map(|intent: &BookUploadIntent| {
@@ -137,7 +126,7 @@ impl AssetExecutor {
                     if let Some(error) = rejected {
                         Err(error)
                     } else if present {
-                        Ok(())
+                        self.refreshed(|| self.confirm_remote_book(intent)).await
                     } else {
                         self.refreshed(|| self.upload_book(intent)).await
                     }
@@ -152,7 +141,7 @@ impl AssetExecutor {
         if !self.asset_storage_enabled() {
             return Ok(());
         }
-        let snapshot = self.database.transfer_snapshot(&[intent.book_id]).await?;
+        let snapshot = self.database.book_upload_snapshot(&intent.book_id).await?;
         self.upload_blob_version(&snapshot, intent).await
     }
 
@@ -214,7 +203,7 @@ impl AssetExecutor {
     #[cfg(not(target_arch = "wasm32"))]
     async fn download_book_mode(&self, hash: BookId, force: bool) -> Result<(), TransferError> {
         let origin = self.database.book_download_origin(&hash).await?.unwrap_or(TransferOrigin::Background);
-        let result = self.download_book_with_origin(hash, origin, force).await;
+        let result = self.fetch_book(hash, force).await;
         if let Err(error) = &result {
             let storage = self.state.read().await.clone();
             self.report_download_failure(&storage, hash, origin, error).await;
@@ -239,7 +228,7 @@ impl AssetExecutor {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    async fn download_book_with_origin(&self, hash: BookId, origin: TransferOrigin, force: bool) -> Result<(), TransferError> {
+    async fn fetch_book(&self, hash: BookId, force: bool) -> Result<(), TransferError> {
         let _interest = self.notification_interest.work();
         let snapshot = {
             let storage = self.state.read().await.clone();
@@ -249,13 +238,11 @@ impl AssetExecutor {
                 self.publish_download_status(&storage, hash).await?;
                 return Ok(());
             }
-            storage.database().transfer_snapshot(&[hash]).await?
+            storage.database().book_download_snapshot(&hash).await?
         };
         {
-            let placement = snapshot.placements.iter().find(|entry| entry.book_id == hash && entry.book.is_some());
-            if let Some(entry) = placement {
-                let placement = library_model::BookPlacement::new(hash, entry.rel_path.clone());
-                let result = self.refreshed(|| async { download_deadline(origin, crate::policy::BOOK_DOWNLOAD_TIMEOUT, Box::pin(self.download_blob(&snapshot, &hash, &placement))).await? }).await;
+            if let Some(book) = snapshot.first() {
+                let result = self.refreshed(|| async { transfer_deadline(crate::policy::BOOK_DOWNLOAD_TIMEOUT, Box::pin(self.download_blob(book))).await? }).await;
                 if matches!(result, Err(TransferError::Rejected(_))) {
                     self.database.complete_download(&hash).await?;
                 }
@@ -293,7 +280,7 @@ impl AssetExecutor {
     }
 
     pub(crate) async fn credentials(&self) -> Result<SyncCredentials, TransferError> {
-        self.authentication.credentials().await.ok_or(TransferError::AuthenticationRequired)
+        self.account.credentials().await.ok_or(TransferError::AuthenticationRequired)
     }
 
     pub(crate) async fn check_transfer_account(&self, credentials: &SyncCredentials) -> Result<(), TransferError> {
@@ -316,7 +303,7 @@ mod failure_tests {
     use book_model::{BookDetails, BookFormat, BookRecord};
     use client_platform_runtime::executor::BoxedBackendFuture;
     use client_protocol::BackendError;
-    use cpu_host::{BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse, ThumbnailBytes};
+    use cpu_contract::{BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse, ThumbnailBytes};
     use library_database::{executor::BackendExecutor, DatabaseClient, ImportCommit};
     use library_files::AssetStore;
     use library_model::{BlobKind, DownloadState, PublishedStagedBook};
@@ -324,13 +311,12 @@ mod failure_tests {
     use std::{
         cell::Cell,
         io::{self, Error, ErrorKind},
-        sync::RwLock,
     };
     use sync_common::{
         api::assets::{ThumbnailBatchDownloadResponse, ThumbnailBatchEntry},
         ROOT_DIR_ID,
     };
-    use thumbnail::ThumbnailVersions;
+    use thumbnail_contract::ThumbnailVersions;
 
     struct UnusedCpu;
     impl CpuHost for UnusedCpu {
@@ -372,7 +358,15 @@ mod failure_tests {
         database.sync_request_book_downloads(&[hash], origin).await.unwrap();
         let (events, state) = LibraryEventRouter::new();
         let placement = Arc::new(tokio::sync::RwLock::new(LibraryState::new(database.clone(), AssetStore::open(root.path().to_str().unwrap()).unwrap(), events)));
-        let executor = AssetExecutor::new(placement.clone(), database, placement.read().await.events().clone(), LibraryId::new_v4(), LibraryAuthentication::Credentials(Arc::new(RwLock::new(None))), Default::default(), Arc::new(UnusedCpu));
+        let executor = AssetExecutor::new(
+            placement.clone(),
+            database,
+            placement.read().await.events().clone(),
+            LibraryId::new_v4(),
+            LibraryAccountSession::load(Persistence, "https://example.com".parse().unwrap()).unwrap().library_account(),
+            Default::default(),
+            Arc::new(UnusedCpu),
+        );
         (root, executor, state, hash)
     }
 
@@ -394,16 +388,16 @@ mod failure_tests {
         Session::try_new("https://example.com".parse().unwrap(), user.into(), format!("{user}@example.com"), token.to_string().repeat(43), i64::MAX - 1, "r".repeat(43), i64::MAX).unwrap()
     }
 
-    fn install_account(executor: &mut AssetExecutor) -> LibraryAccountSession<Persistence> {
-        let account = LibraryAccountSession::load(Persistence, "https://example.com".parse().unwrap()).unwrap();
-        account.set(session("reader", 'a')).unwrap();
-        executor.authentication = LibraryAuthentication::Account(account.library_account());
+    fn install_account(executor: &mut AssetExecutor, server_url: account_client::Url) -> LibraryAccountSession<Persistence> {
+        let account = LibraryAccountSession::load(Persistence, server_url.clone()).unwrap();
+        account.set(Session::try_new(server_url, "reader".into(), "reader@example.com".into(), "a".repeat(43), i64::MAX - 1, "r".repeat(43), i64::MAX).unwrap()).unwrap();
+        executor.account = account.library_account();
         account
     }
 
     #[tokio::test]
-    async fn transfer_preflight_rejects_missing_credentials_and_leaves_other_results_unchanged() {
-        let (_root, mut executor, _state, _hash) = fixture(TransferOrigin::Background).await;
+    async fn transfer_preflight_rejects_missing_credentials() {
+        let (_root, executor, _state, _hash) = fixture(TransferOrigin::Background).await;
         let calls = Cell::new(0);
         let error = executor
             .refreshed(|| {
@@ -414,26 +408,13 @@ mod failure_tests {
             .unwrap_err();
         assert!(matches!(error, TransferError::AuthenticationRequired));
         assert_eq!(calls.get(), 0);
-
-        executor.authentication = LibraryAuthentication::Credentials(Arc::new(RwLock::new(Some(sync_transport::SyncCredentials::new("https://example.com".parse().unwrap(), "fixture-token")))));
-        for expected in [Ok(()), Err(TransferError::retryable("temporary failure")), Err(TransferError::rejected("permanent failure")), Err(TransferError::AuthenticationRequired)] {
-            calls.set(0);
-            let result = executor
-                .refreshed(|| {
-                    calls.set(calls.get() + 1);
-                    std::future::ready(expected.clone())
-                })
-                .await;
-            assert_eq!(calls.get(), 1, "a transfer without account renewal cannot retry");
-            assert_eq!(result.as_ref().err().map(ToString::to_string), expected.as_ref().err().map(ToString::to_string));
-        }
     }
 
     #[tokio::test]
     async fn concurrent_token_renewal_retries_once_and_keeps_the_renewed_session() {
         for succeeds in [true, false] {
             let (_root, mut executor, _state, _hash) = fixture(TransferOrigin::Background).await;
-            let account = install_account(&mut executor);
+            let account = install_account(&mut executor, "https://example.com".parse().unwrap());
             let calls = Cell::new(0);
             let result = executor
                 .refreshed(|| async {
@@ -464,7 +445,7 @@ mod failure_tests {
     #[tokio::test]
     async fn retry_cannot_adopt_an_account_that_signed_in_during_the_transfer() {
         let (_root, mut executor, _state, _hash) = fixture(TransferOrigin::Background).await;
-        let account = install_account(&mut executor);
+        let account = install_account(&mut executor, "https://example.com".parse().unwrap());
         let calls = Cell::new(0);
         let result: Result<(), TransferError> = executor
             .refreshed(|| async {
@@ -483,7 +464,7 @@ mod failure_tests {
     #[tokio::test]
     async fn an_unrefreshable_rejected_session_stops_before_a_second_transfer() {
         let (_root, mut executor, _state, _hash) = fixture(TransferOrigin::Background).await;
-        let account = install_account(&mut executor);
+        let account = install_account(&mut executor, "https://example.com".parse().unwrap());
         let calls = Cell::new(0);
         let result: Result<(), TransferError> = executor
             .refreshed(|| async {
@@ -525,7 +506,7 @@ mod failure_tests {
             BlobManifestResponse { owned: vec![owned], upload: Vec::new(), rejected: vec![RejectedBlobManifestEntry { book_id: rejected, reason: BlobManifestRejectionReason::QuotaExceeded }] },
             Some((owned, canonical, 6)),
         );
-        executor.authentication = LibraryAuthentication::Credentials(Arc::new(RwLock::new(Some(credentials))));
+        install_account(&mut executor, credentials.server_url().clone());
         let results = executor.upload_books(&[BookUploadIntent { byte_checksum: None, id: 1, book_id: owned, size_bytes: 4 }, BookUploadIntent { byte_checksum: None, id: 2, book_id: rejected, size_bytes: 4 }]).await.unwrap();
         server.join().unwrap();
 
@@ -544,7 +525,7 @@ mod failure_tests {
     fn asset_server_with_head(response: impl serde::Serialize, head: Option<(BookId, ContentHash, u64)>) -> (sync_transport::SyncCredentials, std::thread::JoinHandle<()>) {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::TcpListener;
-        use sync_common::transport;
+        use sync_common::http as transport;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
@@ -608,7 +589,7 @@ mod failure_tests {
             let present = answer.into_iter().map(|index| hashes[index]).collect::<Vec<_>>();
             let expected = request.iter().filter(|hash| !present.contains(hash)).copied().collect::<Vec<_>>();
             let (credentials, server) = asset_server(ThumbnailPresenceResponse { present: present.clone(), revisions: vec![] });
-            executor.authentication = LibraryAuthentication::Credentials(Arc::new(RwLock::new(Some(credentials))));
+            install_account(&mut executor, credentials.server_url().clone());
             assert_eq!(executor.cover_presence(&request).await.unwrap(), expected);
             server.join().unwrap();
             assert_eq!(executor.state.read().await.database().server_has_cover(&first).unwrap(), present.contains(&first));
@@ -632,7 +613,7 @@ mod failure_tests {
                 let unexpected = BookId::from_bytes([9; 32]);
                 let present = vec![hash, if duplicate { hash } else { unexpected }];
                 let (credentials, server) = asset_server(ThumbnailPresenceResponse { present, revisions: vec![] });
-                executor.authentication = LibraryAuthentication::Credentials(Arc::new(RwLock::new(Some(credentials))));
+                install_account(&mut executor, credentials.server_url().clone());
                 let result = executor.cover_presence(&[hash, second, hash]).await;
                 server.join().unwrap();
                 assert!(matches!(result, Err(TransferError::Retryable(ref error)) if error.to_string().contains("invalid thumbnail presence response")));
@@ -656,12 +637,12 @@ mod failure_tests {
             let master = b"\xff\xd8\xffserver master";
             let browse = b"\xff\xd8\xffserver browse";
             let (credentials, server) = asset_server(ThumbnailBatchDownloadResponse { thumbnails: vec![ThumbnailBatchEntry { book_id: hash, bytes: master.to_vec(), browse_bytes: browse.to_vec() }], missing: vec![] });
-            executor.authentication = LibraryAuthentication::Credentials(Arc::new(RwLock::new(Some(credentials))));
+            install_account(&mut executor, credentials.server_url().clone());
             executor.download_thumbnail_batch(&[hash]).await.unwrap();
             server.join().unwrap();
             assert_eq!(executor.state.read().await.assets().read_bytes(BlobKind::Thumbnail, &hash).await.unwrap().unwrap(), master);
-            assert_eq!(executor.state.read().await.assets().read_named(thumbnail_variant_name(&hash, thumbnail::BROWSE_THUMBNAIL_WIDTH)).await.unwrap().unwrap(), browse);
-            assert_eq!(executor.state.read().await.assets().read_named(thumbnail_variant_name(&hash, thumbnail::THUMBNAIL_WIDTH)).await.unwrap().unwrap(), master);
+            assert_eq!(executor.state.read().await.assets().read_named(thumbnail_variant_name(&hash, thumbnail_contract::BROWSE_THUMBNAIL_WIDTH)).await.unwrap().unwrap(), browse);
+            assert_eq!(executor.state.read().await.assets().read_named(thumbnail_variant_name(&hash, thumbnail_contract::THUMBNAIL_WIDTH)).await.unwrap().unwrap(), master);
             assert_eq!(executor.state.read().await.database().thumbnail_work_state(&hash).unwrap().as_deref(), Some("ready"));
             // The server has stopped: a cached pair must require no further request.
             executor.download_thumbnail_batch(&[hash]).await.unwrap();
@@ -672,7 +653,7 @@ mod failure_tests {
     async fn invalid_server_browse_thumbnail_is_rejected_before_storage() {
         let (_root, mut executor, _state, hash) = fixture(TransferOrigin::Background).await;
         let (credentials, server) = asset_server(ThumbnailBatchDownloadResponse { thumbnails: vec![ThumbnailBatchEntry { book_id: hash, bytes: b"\xff\xd8\xffmaster".to_vec(), browse_bytes: b"not a JPEG".to_vec() }], missing: vec![] });
-        executor.authentication = LibraryAuthentication::Credentials(Arc::new(RwLock::new(Some(credentials))));
+        install_account(&mut executor, credentials.server_url().clone());
         assert!(executor.download_thumbnail_batch(&[hash]).await.is_err());
         server.join().unwrap();
         assert!(!executor.state.read().await.assets().exists(BlobKind::Thumbnail, &hash).await.unwrap());
@@ -702,7 +683,7 @@ mod failure_tests {
                 _ => unreachable!(),
             }
             let (credentials, server) = asset_server(response);
-            executor.authentication = LibraryAuthentication::Credentials(Arc::new(RwLock::new(Some(credentials))));
+            install_account(&mut executor, credentials.server_url().clone());
             let result = executor.download_thumbnail_batch(&[hash, second]).await;
             server.join().unwrap();
             assert!(matches!(result, Err(TransferError::Retryable(_))), "{invalid}: {result:?}");
@@ -730,7 +711,7 @@ mod failure_tests {
                 missing: if with_cover { vec![second] } else { vec![hash, second] },
             };
             let (credentials, server) = asset_server(response);
-            executor.authentication = LibraryAuthentication::Credentials(Arc::new(RwLock::new(Some(credentials))));
+            install_account(&mut executor, credentials.server_url().clone());
             executor.download_thumbnail_batch(&[hash, hash, second]).await.unwrap();
             server.join().unwrap();
             assert_eq!(executor.state.read().await.database().server_has_cover(&hash).unwrap(), with_cover);
@@ -751,13 +732,15 @@ mod failure_tests {
         }
     }
 
-    impl crate::thumbnail_jobs::ThumbnailProcessor for RecoveryProcessor {
-        fn decode(&self, bytes: Vec<u8>) -> BoxedBackendFuture<'_, Result<ThumbnailVersions, BackendError>> {
+    impl CpuHost for RecoveryProcessor {
+        fn request(&self, request: CpuRequest) -> BoxedBackendFuture<'_, Result<CpuResponse, BackendError>> {
+            let CpuRequest::Cover { bytes } = request else { panic!("unexpected CPU request") };
             assert!(self.cached, "only the cached-artwork case should decode an image");
             assert_eq!(bytes, b"cached");
-            Box::pin(async { Ok(Self::versions()) })
+            Box::pin(async { Ok(CpuResponse::Thumbnail(Some(Self::versions()))) })
         }
-        fn generate(&self, extension: String, mut reader: book_access::BoxedBookReader) -> BoxedBackendFuture<'_, Result<Option<ThumbnailVersions>, BackendError>> {
+        fn book(&self, task: BookTask, mut reader: BoxedCpuReader) -> BoxedBackendFuture<'_, Result<CpuResponse, BackendError>> {
+            let BookTask::Thumbnail { extension } = task else { panic!("unexpected book task") };
             assert!(!self.cached, "cached artwork should not reopen the book");
             assert_eq!(extension, "epub");
             Box::pin(async move {
@@ -767,27 +750,13 @@ mod failure_tests {
                 if self.fails {
                     return Err(BackendError::message("CPU work failed"));
                 }
-                Ok(self.has_cover.then(Self::versions))
+                Ok(CpuResponse::Thumbnail(self.has_cover.then(Self::versions)))
             })
         }
     }
 
-    #[derive(Default)]
-    struct RecoveryObserver {
-        completed: usize,
-        ready: Vec<BookId>,
-    }
-    impl crate::thumbnail_jobs::ThumbnailObserver for RecoveryObserver {
-        fn completed(&mut self) {
-            self.completed += 1;
-        }
-        fn ready(&mut self, hash: BookId) {
-            self.ready.push(hash);
-        }
-    }
-
     #[tokio::test]
-    async fn thumbnail_recovery_completes_cached_generated_and_absent_artwork() {
+    async fn thumbnail_jobs_report_cached_generated_and_absent_artwork() {
         use crate::thumbnail_jobs::ThumbnailJobs;
         use library_files::asset_store::thumbnail_variant_name;
 
@@ -800,16 +769,16 @@ mod failure_tests {
                 std::fs::write(root.path().join("book.epub"), b"book").unwrap();
             }
             let processor = RecoveryProcessor { cached, has_cover, fails: false };
-            let mut observer = RecoveryObserver::default();
-            ThumbnailJobs::new(&executor.state.read().await.database(), &executor.state.read().await.assets(), &processor).run(vec![hash], &mut observer).await.unwrap();
-            assert_eq!(observer.completed, 1);
-            assert_eq!(observer.ready, if has_cover { vec![hash] } else { vec![] });
-            assert_eq!(executor.state.read().await.database().thumbnail_work_state(&hash).unwrap().as_deref(), Some(if has_cover { "ready" } else { "no_cover" }));
+            let mut completed = None;
+            let job = ThumbnailJobs::new(&executor.state.read().await.database(), &executor.state.read().await.assets()).prepare(hash).await.unwrap().unwrap();
+            job.run(&processor, |result| completed = Some(result)).await.unwrap();
+            assert_eq!(completed, Some(Some(has_cover)));
+            assert_eq!(executor.state.read().await.database().thumbnail_work_state(&hash).unwrap().as_deref(), Some("pending"), "only the library owner acknowledges completion");
             assert_eq!(executor.state.read().await.assets().thumbnail_set_exists(&hash).await.unwrap(), has_cover);
             if has_cover {
                 assert_eq!(executor.state.read().await.assets().read_bytes(BlobKind::Thumbnail, &hash).await.unwrap().unwrap(), b"master");
-                assert_eq!(executor.state.read().await.assets().read_named(thumbnail_variant_name(&hash, thumbnail::BROWSE_THUMBNAIL_WIDTH)).await.unwrap().unwrap(), b"browse");
-                assert_eq!(executor.state.read().await.assets().read_named(thumbnail_variant_name(&hash, thumbnail::THUMBNAIL_WIDTH)).await.unwrap().unwrap(), b"card");
+                assert_eq!(executor.state.read().await.assets().read_named(thumbnail_variant_name(&hash, thumbnail_contract::BROWSE_THUMBNAIL_WIDTH)).await.unwrap().unwrap(), b"browse");
+                assert_eq!(executor.state.read().await.assets().read_named(thumbnail_variant_name(&hash, thumbnail_contract::THUMBNAIL_WIDTH)).await.unwrap().unwrap(), b"card");
             }
         }
     }
@@ -822,42 +791,34 @@ mod failure_tests {
         executor.state.read().await.database().shared_request_thumbnail(&hash).await.unwrap();
         std::fs::write(root.path().join("book.epub"), b"book").unwrap();
         let processor = RecoveryProcessor { cached: false, has_cover: true, fails: true };
-        let mut observer = RecoveryObserver::default();
-        let error = ThumbnailJobs::new(&executor.state.read().await.database(), &executor.state.read().await.assets(), &processor).run(vec![hash], &mut observer).await.unwrap_err();
+        let mut completed = None;
+        let job = ThumbnailJobs::new(&executor.state.read().await.database(), &executor.state.read().await.assets()).prepare(hash).await.unwrap().unwrap();
+        let error = job.run(&processor, |result| completed = Some(result)).await.unwrap_err();
         assert!(error.to_string().contains("CPU work failed"));
         assert_eq!(executor.state.read().await.database().pending_thumbnail_job_count().unwrap(), 1);
         assert!(!executor.state.read().await.assets().thumbnail_set_exists(&hash).await.unwrap());
-        assert_eq!(observer.completed, 0);
-        assert!(observer.ready.is_empty());
+        assert_eq!(completed, None);
 
         let processor = RecoveryProcessor { fails: false, ..processor };
-        ThumbnailJobs::new(&executor.state.read().await.database(), &executor.state.read().await.assets(), &processor).run(vec![hash], &mut observer).await.unwrap();
-        assert_eq!(executor.state.read().await.database().pending_thumbnail_job_count().unwrap(), 0);
-        assert_eq!(executor.state.read().await.database().thumbnail_work_state(&hash).unwrap().as_deref(), Some("ready"));
-        assert_eq!(observer.completed, 1);
-        assert_eq!(observer.ready, vec![hash]);
+        let job = ThumbnailJobs::new(&executor.state.read().await.database(), &executor.state.read().await.assets()).prepare(hash).await.unwrap().unwrap();
+        job.run(&processor, |result| completed = Some(result)).await.unwrap();
+        assert_eq!(completed, Some(Some(true)));
+        assert!(executor.state.read().await.assets().thumbnail_set_exists(&hash).await.unwrap());
+        assert_eq!(executor.state.read().await.database().thumbnail_work_state(&hash).unwrap().as_deref(), Some("pending"));
     }
 
     #[tokio::test]
     async fn local_recovery_leaves_server_master_untouched() {
-        use crate::thumbnail_jobs::{ThumbnailExtractor, ThumbnailJobs, ThumbnailObserver};
-
-        struct Observer;
-        impl ThumbnailObserver for Observer {
-            fn completed(&mut self) {}
-            fn ready(&mut self, _: BookId) {
-                panic!("server cover must be downloaded, not generated");
-            }
-        }
+        use crate::thumbnail_jobs::ThumbnailJobs;
 
         let (_root, executor, _state, hash) = fixture(TransferOrigin::Background).await;
         let master = b"\xff\xd8\xffcached server master";
         executor.state.read().await.assets().write(BlobKind::Thumbnail, &hash, master).await.unwrap();
         executor.state.read().await.database().record_remote_asset(BlobKind::Thumbnail, &hash).await.unwrap();
         executor.state.read().await.database().shared_request_thumbnail(&hash).await.unwrap();
-        let processor = ThumbnailExtractor::new(executor.cpu.clone());
-        let jobs = ThumbnailJobs::new(&executor.state.read().await.database(), &executor.state.read().await.assets(), &processor);
-        jobs.run(vec![hash], &mut Observer).await.unwrap();
+        let storage = executor.state.read().await;
+        let jobs = ThumbnailJobs::new(storage.database(), storage.assets());
+        assert!(jobs.prepare(hash).await.unwrap().is_none());
         assert_eq!(executor.state.read().await.assets().read_bytes(BlobKind::Thumbnail, &hash).await.unwrap().unwrap(), master);
     }
 
@@ -887,7 +848,6 @@ mod failure_tests {
     #[tokio::test]
     async fn actual_download_space_check_alerts_only_for_user_actions() {
         use std::time::Duration;
-        use sync_transport::SyncCredentials;
         use tokio::{
             io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
             net::TcpListener,
@@ -899,7 +859,7 @@ mod failure_tests {
             let updates = state.updates.subscribe();
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let server_url = format!("http://{}", listener.local_addr().unwrap()).parse().unwrap();
-            executor.authentication = LibraryAuthentication::Credentials(Arc::new(RwLock::new(Some(SyncCredentials::new(server_url, "test-token")))));
+            install_account(&mut executor, server_url);
             let server = tokio::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut socket = BufReader::new(socket);

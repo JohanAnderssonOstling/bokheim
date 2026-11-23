@@ -74,7 +74,7 @@ pub fn sanitize_path(path: &Path, kind: EntryType, policy: Policy) -> io::Result
         if name != MENU_CONFIGURATION {
             let relative = name.strip_prefix(".adds/bokheim/").ok_or_else(|| invalid(format!("The update cannot replace {name}")))?;
             let top = relative.split('/').next().unwrap_or_default();
-            let directory = matches!(top, "runtime" | "pdfium" | "third-party-source" | "command-shims" | "nickelmenu-install" | "nickelmenu-icons");
+            let directory = matches!(top, "runtime" | "pdfium" | "fonts" | "third-party-source" | "command-shims" | "nickelmenu-install" | "nickelmenu-icons");
             let file = matches!(
                 top,
                 "desktop-gpui-kobo" | "fbink" | "run.sh" | "run-monitored.sh" | "monitor-nickel.sh" | "wifi-power.sh" | "command-timeout.sh" | "probe-kobo-audio.sh" | "update-recovery.sh" | "BUILD-INFO.txt" | "taxonomy.sqlite3"

@@ -1,6 +1,6 @@
+use crate::Button;
 use gpui::{FontFeatures, FontWeight, Styled};
 use std::sync::OnceLock;
-use crate::Button;
 
 use crate::theme::BrowserTheme;
 
@@ -63,7 +63,7 @@ pub fn selectable_button(button: Button, selected: bool, theme: BrowserTheme) ->
     }
     // On Kobo nothing is filled: current is a black border on the page.
     if cfg!(feature = "kobo") {
-        return button.selected(true).bg(theme.page_bg).text_color(theme.text).border_2().border_color(theme.accent).hover(move |style| style.bg(theme.hover));
+        return button.selected(true).bg(theme.page_bg).text_color(theme.text).border_2().border_color(theme.accent);
     }
     button.selected(true).bg(theme.accent).text_color(theme.accent_text).hover(move |style| style.bg(theme.accent_hover))
 }
@@ -186,9 +186,7 @@ pub const DISPLAY_FONT_FAMILY: &str = "Bodoni Moda";
 /// set this way runs slightly larger than its nominal size suggests.
 pub fn small_caps() -> FontFeatures {
     static FEATURES: OnceLock<FontFeatures> = OnceLock::new();
-    FEATURES
-        .get_or_init(|| FontFeatures::new(vec![("smcp".to_owned(), 1), ("c2sc".to_owned(), 1)]))
-        .clone()
+    FEATURES.get_or_init(|| FontFeatures::new(vec![("smcp".to_owned(), 1), ("c2sc".to_owned(), 1)])).clone()
 }
 
 /// Placeholder proportions and the tallest cover frame reserved by book cards.
@@ -237,7 +235,7 @@ pub const CONTENT_INSET: f32 = SPACE_SM;
 /// nowhere else and sat between two steps.
 pub const BOOK_CARD_TITLE_SIZE: f32 = TEXT_SM;
 /// Main titles carry more weight than subtitles.
-pub const BOOK_CARD_TITLE_WEIGHT: FontWeight = FontWeight::SEMIBOLD;
+pub const BOOK_CARD_TITLE_WEIGHT: FontWeight = FontWeight::BOLD;
 pub const BOOK_CARD_TITLE_LINE_HEIGHT_EM: f32 = 1.25;
 pub const BOOK_CARD_TEXT_LINES: usize = 3;
 pub const BOOK_CARD_SUBTITLE_SIZE: f32 = TEXT_XS;
@@ -302,20 +300,16 @@ pub const SHELF_ROW_WIDTH_REM: f32 = 1000.0;
 
 /// The navigation rail and library switcher scale with the UI rem.
 ///
-/// The rail reserves 5rem for icons and destination labels. The
-/// destination tile is also the unit the folder chips are cut from — see
-/// `COMPACT_HIERARCHY_ITEM_HEIGHT_REM`, which is half of it. Both the rail
-/// and its labels scale with the chosen UI size.
+/// The rail reserves 4rem on Kobo and 5rem elsewhere for icons and labels.
+/// Its width and square destination height use the same value.
 ///
 /// Measure both interface faces before adding a longer destination label.
-pub const NAV_RAIL_SIZE_REM: f32 = 5.0;
+pub const NAV_RAIL_SIZE_REM: f32 = if cfg!(feature = "kobo") { 4.0 } else { 5.0 };
 /// Rail destinations are square: their height is the rail's width. Changing
 /// the rail's width deliberately changes their height with it.
 ///
-/// The square is still generous for what it holds: a 1.5rem icon, a SPACE_XXS
-/// gap and one `NAV_RAIL_LABEL_SIZE` line come to 38px of the 80px box. That
-/// slack is the point — it is what makes the item read as a tile rather than a
-/// row.
+/// The square leaves room around a 1.5rem icon, a `SPACE_XXS` gap and one
+/// `NAV_RAIL_LABEL_SIZE` line, keeping each destination visually distinct.
 ///
 /// Rail labels sit below their icon in a fixed-width column, so they run
 /// smaller than ordinary caption text: the icon is the primary cue and the word
@@ -330,13 +324,13 @@ pub const BOTTOM_NAV_HEIGHT_REM: f32 = 4.0;
 /// its own buttons at a large UI font. The inset rides along at 16px to the rem
 /// rather than staying fixed, because a height made of a rem part and a pixel
 /// part cannot be given to a single element.
-/// Kobo uses the bottom navigation height for all page bars.
+/// Kobo page bars fit their compact square actions without vertical padding.
 pub fn topbar_height_rem() -> f32 {
-    if cfg!(feature = "kobo") { BOTTOM_NAV_HEIGHT_REM } else { topbar_action_height_rem() + 2.0 * CONTENT_INSET / 16.0 }
+    if cfg!(feature = "kobo") { topbar_action_height_rem() } else { topbar_action_height_rem() + 2.0 * CONTENT_INSET / 16.0 }
 }
 /// Also the size of every square icon button (`outlined_icon_button`).
 pub fn topbar_action_height_rem() -> f32 {
-    if touch_ui() { TOUCH_TARGET_REM } else { 2.0 }
+    if touch_ui() && !cfg!(feature = "kobo") { TOUCH_TARGET_REM } else { 2.0 }
 }
 pub const TOPBAR_ACTION_LABEL_WEIGHT: FontWeight = FontWeight::NORMAL;
 /// Touch-sized icon buttons already carry their spacing as padding around the
@@ -412,5 +406,7 @@ pub const CONTENTS_AMOUNT_WIDTH_REM: f32 = 5.125;
 pub fn settings_control_size_rem() -> f32 {
     if touch_ui() { TOUCH_TARGET_REM } else { 2.0 }
 }
-pub const SETTINGS_STEPPER_VALUE_WIDTH_REM: f32 = 4.5;
+pub fn settings_stepper_size_rem() -> f32 {
+    settings_control_size_rem()
+}
 pub const SETTINGS_CONTROL_GAP: f32 = 1.0;

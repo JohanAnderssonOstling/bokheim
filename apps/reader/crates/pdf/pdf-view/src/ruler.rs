@@ -329,7 +329,7 @@ mod tests {
             let revision = view.navigation_revision;
             let geometry = PageTextGeometry::new([TextCharacter::new(0, 'A', NormalizedRect::new(0.1, 0.1, 0.1, 0.1))]);
             let selection = Arc::new(geometry.select((0.12, 0.12), (0.18, 0.18)).unwrap());
-            view.selection = Some(selection.clone());
+            view.selection = vec![SelectedPdfPage { page_index: 0, selection: selection.clone(), crop: NormalizedRect::new(0.0, 0.0, 1.0, 1.0) }];
             assert!(!view.step_reading_ruler(true, cx));
             view.set_reading_ruler(ReadingRulerStyle::Band, 2, rgb(0x466853).into(), cx);
             let first = view.prepare_reading_ruler();
@@ -343,7 +343,7 @@ mod tests {
             assert_eq!(view.prepare_reading_ruler(), first);
             assert_eq!(view.ruler.anchor.get().unwrap().character, Some(10));
             assert_eq!(view.ruler.anchor.get().unwrap().page, original.page);
-            assert!(Arc::ptr_eq(view.selection.as_ref().unwrap(), &selection));
+            assert!(Arc::ptr_eq(&view.selection.first().unwrap().selection, &selection));
             assert_eq!(view.navigation_revision, revision);
             view.set_reading_ruler(ReadingRulerStyle::Underline, 2, rgb(0x466853).into(), cx);
             let rules = view.prepare_reading_ruler();

@@ -2,7 +2,7 @@
 use crate::foliate::FoliateLibrary;
 use crate::import::validate_import_destination;
 use crate::reader_batch::ReaderImportBatch;
-use crate::reader_transfer::ReaderBookResult;
+use crate::reader_transfer::{ReaderBookResult, ReaderImportOperation};
 use crate::readest::ReadestLibrary;
 use crate::{ImportFailure, LibraryImport};
 use client_platform_runtime::executor::run_blocking;
@@ -118,7 +118,7 @@ pub(crate) trait ReaderImportBook {
         Ok(())
     }
 
-    async fn import(self, importer: &LibraryImport<'_>, parent: DirId, mode: ImportMode, batch: Option<&mut ReaderImportBatch>) -> Result<ReaderBookResult, BackendError>;
+    async fn import(self, importer: &LibraryImport<'_>, parent: DirId, operation: ReaderImportOperation<'_>) -> Result<ReaderBookResult, BackendError>;
 }
 
 pub(crate) async fn import_books<B: ReaderImportBook>(importer: &LibraryImport<'_>, books: Vec<B>, options: ReaderImportOptions) -> Result<ReaderImportReport, BackendError> {
@@ -146,7 +146,11 @@ pub(crate) async fn import_books<B: ReaderImportBook>(importer: &LibraryImport<'
             let folders = book.folders()?;
             // Reuse the destination prepared for this import.
             let parent = if folders.is_empty() { options.parent_id } else { destinations.get(&folders).copied().ok_or_else(|| BackendError::message("reader import folder was not prepared"))? };
-            book.import(importer, parent, options.mode, batch.as_mut()).await
+            let operation = match batch.as_mut() {
+                Some(batch) => ReaderImportOperation::Copy(batch),
+                None => ReaderImportOperation::Move,
+            };
+            book.import(importer, parent, operation).await
         }
         .await;
         match result {

@@ -1,10 +1,10 @@
 //! Deserialize the protobuf tree directly. Byte sequences stream u8 values;
-//! arbitrary map keys alone retain the original Serde ordering and deduplication.
-use crate::protobuf::{self, value::Kind, Value};
-use crate::{domain_value, protobuf_value, WireError};
+//! string keys must be strictly ordered and all maps reject duplicate keys.
+use crate::protobuf::{self, Value, value::Kind};
+use crate::{WireError, domain_value, protobuf_value};
 use serde::de::{self, DeserializeSeed, Deserializer as _, Visitor};
 use serde_value::{DeserializerError as Error, Value as Key};
-use std::collections::{btree_map, BTreeMap};
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::vec;
 
 pub(crate) fn validate(value: &Value) -> Result<(), WireError> {
@@ -22,6 +22,7 @@ pub(crate) fn validate(value: &Value) -> Result<(), WireError> {
             }
         }
         Kind::Map(value) => {
+            validate_keys(value).map_err(|error| WireError::Decode(error.to_string()))?;
             for entry in &value.entries {
                 validate(entry.key.as_ref().ok_or(WireError::InvalidHeader)?)?;
                 validate(entry.value.as_ref().ok_or(WireError::InvalidHeader)?)?;
@@ -39,8 +40,40 @@ pub(crate) struct Deserializer {
 fn error(message: &str) -> Error {
     de::Error::custom(message)
 }
-fn ordered_entries(value: protobuf::Map, byte_fields: bool) -> Result<BTreeMap<Key, Value>, Error> {
-    value.entries.into_iter().map(|entry| Ok((domain_value(entry.key.ok_or_else(|| error("missing map key"))?, byte_fields).map_err(|failure| error(&failure.to_string()))?, entry.value.ok_or_else(|| error("missing map value"))?))).collect()
+// Check even maps inside ignored/unknown fields during envelope validation.
+// String/struct maps use borrowed comparisons without allocating key copies.
+fn validate_keys(value: &protobuf::Map) -> Result<bool, Error> {
+    if value.entries.iter().all(|entry| matches!(entry.key.as_ref().and_then(|key| key.kind.as_ref()), Some(Kind::StringValue(_)))) {
+        let mut previous: Option<&str> = None;
+        for entry in &value.entries {
+            let Some(Kind::StringValue(key)) = entry.key.as_ref().and_then(|key| key.kind.as_ref()) else { unreachable!() };
+            if previous.is_some_and(|previous| previous >= key.as_str()) {
+                return Err(error("protobuf string map keys must be strictly ordered and unique"));
+            }
+            previous = Some(key);
+        }
+        return Ok(true);
+    }
+    let mut keys = BTreeSet::new();
+    for entry in &value.entries {
+        let key = domain_value(entry.key.clone().ok_or_else(|| error("missing map key"))?, false).map_err(|failure| error(&failure.to_string()))?;
+        if !keys.insert(key) {
+            return Err(error("duplicate protobuf map key"));
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn ordered_entries(value: protobuf::Map, byte_fields: bool) -> Result<BTreeMap<Key, Value>, Error> {
+    let mut entries = BTreeMap::new();
+    for entry in value.entries {
+        let key = domain_value(entry.key.ok_or_else(|| error("missing map key"))?, byte_fields).map_err(|failure| error(&failure.to_string()))?;
+        let value = entry.value.ok_or_else(|| error("missing map value"))?;
+        if entries.insert(key, value).is_some() {
+            return Err(error("duplicate protobuf map key"));
+        }
+    }
+    Ok(entries)
 }
 
 // Keep mismatched compound values out of each typed visitor's generated code.
@@ -278,22 +311,7 @@ enum MapEntries {
 }
 impl MapEntries {
     fn new(value: protobuf::Map, byte_fields: bool) -> Result<Self, Error> {
-        // Struct fields and string maps emitted by our encoder are already
-        // strictly ordered. Retain sorting and last-duplicate behavior for
-        // other keys and for maps received in a different order.
-        let sorted_strings = value
-            .entries
-            .iter()
-            .try_fold(None, |previous, entry| {
-                let Some(Kind::StringValue(key)) = entry.key.as_ref().and_then(|key| key.kind.as_ref()) else {
-                    return Err(());
-                };
-                if previous.is_some_and(|previous| previous >= key) {
-                    return Err(());
-                }
-                Ok(Some(key))
-            })
-            .is_ok();
+        let sorted_strings = validate_keys(&value)?;
         Ok(if sorted_strings { Self::Strings(value.entries.into_iter()) } else { Self::Ordered(ordered_entries(value, byte_fields)?.into_iter()) })
     }
     fn next(&mut self) -> Option<Result<(Value, Value), Error>> {

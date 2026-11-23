@@ -9,8 +9,6 @@ pub const CARD_TARGET_HEIGHT_RATIO: f64 = 1.6;
 pub const CARD_MAX_HORIZONTAL_CROP: f64 = 0.07;
 /// The same limit bounds stretching short covers and compressing tall ones.
 pub const CARD_MAX_VERTICAL_STRETCH: f64 = 0.20;
-/// Increment when the crop policy changes, to retire previously cached cards.
-pub const CARD_THUMBNAIL_VERSION: u32 = 5;
 
 /// Source crop in pixels and final JPEG dimensions. Detail/master thumbnails
 /// never use this geometry; all card densities use the same source crop.
@@ -71,10 +69,6 @@ pub fn encode_card_thumbnail_at_width(decoded: &RgbImage, width: u32) -> Thumbna
     let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Hamming)).crop(geometry.left, geometry.top, geometry.source_width, geometry.source_height);
     Resizer::new().resize_typed(&source, &mut destination_view, Some(&options))?;
     encode_jpeg(destination.as_raw(), geometry.output_width, geometry.output_height)
-}
-
-pub fn card_thumbnail_suffix(width: u32) -> String {
-    format!("card-v{CARD_THUMBNAIL_VERSION}-{width}")
 }
 
 #[cfg(test)]

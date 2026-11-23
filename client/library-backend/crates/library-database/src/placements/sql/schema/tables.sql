@@ -25,7 +25,7 @@ create table if not exists book_dir(
     -- compute on every scan so unchanged files can be skipped without re-reading
     -- their contents (see get_book_dir_by_hash). Not unique and not portable
     -- across devices, so it is an attribute, not the key.
-    local_hash      TEXT not null,
+    local_hash      BLOB CHECK(local_hash IS NULL OR (typeof(local_hash)='blob' AND length(local_hash)=8)),
     -- Native: this placement has materialized bytes. Browser: its shared OPFS object exists.
     is_downloaded   INTEGER not null default 0 CHECK(is_downloaded IN (0,1)),
     deleted_at      INTEGER,

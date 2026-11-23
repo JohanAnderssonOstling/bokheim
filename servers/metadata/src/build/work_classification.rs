@@ -1,7 +1,7 @@
 //! Work-level LCC selection uses edition records, never counts of call-number variants.
 use metadata_contract::{classification_consensus_notation, ClassificationScheme};
 use std::collections::{BTreeMap, BTreeSet};
-use subject_projection::{unified_subject_paths, LCC_SYSTEM_ID};
+use subject_projection::{LCC_SYSTEM_ID, unified_subject_routes};
 
 #[derive(Default)]
 pub(super) struct SiblingLccEvidence {
@@ -20,10 +20,10 @@ impl SiblingLccEvidence {
 
     pub(super) fn select(&self, imported: BTreeSet<String>) -> BTreeSet<String> {
         let roots = self.support.keys().map(|code| (code, classification_roots(code))).collect::<BTreeMap<_, _>>();
-        let mut root_support = BTreeMap::<String, BTreeSet<i64>>::new();
+        let mut root_support = BTreeMap::<i64, BTreeSet<i64>>::new();
         for (code, editions) in &self.support {
             for root in &roots[code] {
-                root_support.entry(root.clone()).or_default().extend(editions);
+                root_support.entry(*root).or_default().extend(editions);
             }
         }
         // One observation cannot establish corroborated dominance. A failed
@@ -42,7 +42,7 @@ impl SiblingLccEvidence {
             .collect::<BTreeSet<_>>();
 
         let sufficient_work = primary.is_some_and(|primary| {
-            !imported.is_empty() && imported.iter().all(|code| classification_consensus_notation(ClassificationScheme::LibraryOfCongress, code).is_some() && classification_roots(code) == BTreeSet::from([primary.clone()]))
+            !imported.is_empty() && imported.iter().all(|code| classification_consensus_notation(ClassificationScheme::LibraryOfCongress, code).is_some() && classification_roots(code) == BTreeSet::from([*primary]))
         });
         if sufficient_work {
             // A usable, corroborated work classification covers the primary
@@ -60,13 +60,13 @@ impl SiblingLccEvidence {
     }
 }
 
-fn classification_roots(code: &str) -> BTreeSet<String> {
-    let paths = unified_subject_paths(LCC_SYSTEM_ID, code);
+fn classification_roots(code: &str) -> BTreeSet<i64> {
+    let routes = unified_subject_routes(LCC_SYSTEM_ID, code);
     // A top-level fallback alone does not make a work classification sufficient.
-    if paths.is_empty() || paths.iter().any(|path| !path.contains(" / ")) {
+    if routes.is_empty() || routes.iter().any(|route| route.len() < 2) {
         return BTreeSet::new();
     }
-    paths.into_iter().filter_map(|path| path.split(" / ").next().map(str::to_owned)).collect()
+    routes.into_iter().map(|route| route[0]).collect()
 }
 
 #[cfg(test)]

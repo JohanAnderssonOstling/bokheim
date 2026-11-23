@@ -19,9 +19,9 @@ use ui_text::text;
 
 use crate::Button;
 use gpui::prelude::*;
-use gpui::{App, AppContext, Entity, Window, Div, ElementId, MouseButton, SharedString, Stateful, div, px};
-use gpui_component::{Icon, IconName, Sizable};
+use gpui::{App, AppContext, Div, ElementId, Entity, MouseButton, SharedString, Stateful, Window, div, px};
 use gpui_component::input::{Input, InputState};
+use gpui_component::{Icon, IconName, Sizable};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -35,9 +35,7 @@ pub fn contents_filter_input(window: &mut Window, cx: &mut App) -> Entity<InputS
 
 /// Shared contents toolbar: the filter grows and reset stays at its right edge.
 pub fn contents_filter_bar(input: &Entity<InputState>, reset: Option<Button>, theme: BrowserTheme) -> Div {
-    crate::reader_search_bar(theme)
-        .child(crate::reader_search_box(theme).debug_selector(|| "reader-toc-filter".into()).child(Input::new(input).appearance(false).cleanable(true).size_full()))
-        .children(reset)
+    crate::reader_search_bar(theme).child(crate::reader_search_box(theme).debug_selector(|| "reader-toc-filter".into()).child(Input::new(input).appearance(false).cleanable(true).size_full())).children(reset)
 }
 
 pub fn contents_read_reset_button(id: impl Into<ElementId>) -> Button {
@@ -180,7 +178,7 @@ pub fn contents_disclosure(id: impl Into<ElementId>, row: ContentsRow, theme: Br
 /// cursor is `accent_wash` and the pointer is the light `hover`, as the ladder
 /// in `tokens.rs` sets out. The cursor on the current entry steps it to
 /// `accent_hover`. Finished entries use muted ink and a checkmark.
-pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: Option<impl IntoElement>, title: impl IntoElement, amount: Option<SharedString>, reset: Option<ContentsReadReset>, theme: BrowserTheme) -> Stateful<Div> {
+pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: Option<impl IntoElement>, title: impl IntoElement, reset: Option<ContentsReadReset>, theme: BrowserTheme) -> Stateful<Div> {
     let (background, hovered, ink) = match (row.marked, row.focused) {
         (true, true) => (Some(theme.accent_hover), theme.accent_hover, theme.accent_text),
         (true, false) => (Some(theme.accent), theme.accent_hover, theme.accent_text),
@@ -212,11 +210,9 @@ pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: Opti
         .children(disclosure)
         .child(div().flex_1().min_w_0().whitespace_normal().line_height_auto().line_clamp(2).text_ellipsis().child(title))
         .when_some(row.timing, |row, timing| {
-            row.child(contents_amount_cell(format_chapter_time(timing.start)).text_color(quiet)).child(contents_amount_cell(timing.duration.map(format_chapter_time).unwrap_or_else(|| "—".into())).text_color(quiet))
+            row.child(contents_amount_cell(format_chapter_time(timing.start)).text_color(quiet))
+                .child(contents_amount_cell(timing.duration.map(format_chapter_time).unwrap_or_else(|| "—".into())).debug_selector(|| "contents-row-amount".into()).text_color(quiet))
         })
-        .children(
-            amount.map(|amount| div().debug_selector(|| "contents-row-amount".into()).w(gpui::rems(CONTENTS_AMOUNT_WIDTH_REM)).flex_none().whitespace_nowrap().text_right().text_size(gpui::rems(TEXT_XS)).text_color(quiet).child(amount)),
-        )
         // Reserve the status column before completion so the title keeps its
         // width. Its contents fill the existing row without setting its height.
         .child(div().relative().w(gpui::rems(2.0)).flex_none().self_stretch().my(px(-ROW_PADDING_Y)).when(row.read, |status| match reset {
@@ -244,8 +240,8 @@ mod tests {
 
     impl Render for CompletedContents {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let row = ContentsRow { read: true, ..Default::default() };
-            div().w(px(260.0)).child(contents_row("chapter", row, None::<Div>, "Chapter title", Some("123 min".into()), Some(Rc::new(|_, _, _| {})), BrowserTheme::default()))
+            let row = ContentsRow { read: true, timing: Some(ContentsTiming { start: Duration::ZERO, duration: Some(Duration::from_secs(123 * 3600)) }), ..Default::default() };
+            div().w(px(260.0)).child(contents_row("chapter", row, None::<Div>, "Chapter title", Some(Rc::new(|_, _, _| {})), BrowserTheme::default()))
         }
     }
 
@@ -256,7 +252,7 @@ mod tests {
         cx.run_until_parked();
         let amount = cx.debug_bounds("contents-row-amount").unwrap();
         let check = cx.debug_bounds("chapter-read-checkmark").unwrap();
-        assert!(amount.size.height <= px(24.0), "a three-digit duration must remain one line");
+        assert!(amount.size.height <= px(24.0), "a long duration must remain one line");
         assert!(check.left() >= amount.right(), "the completion checkmark follows the duration at the far right");
     }
 }

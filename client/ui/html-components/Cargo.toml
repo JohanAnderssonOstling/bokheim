@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-ui-components = { path = "../../../apps/components" }
+ui-components = { path = "../../../apps/components", default-features = false }
 gpui.workspace = true
 gpui-component.workspace = true
 html-gpui.workspace = true

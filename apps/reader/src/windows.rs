@@ -450,10 +450,6 @@ impl ReaderView {
                 }
             }
         });
-        #[cfg(feature = "kobo")]
-        if let Err(error) = gpui_kobo::request_experience_mode(gpui_kobo::KoboExperienceMode::ReaderQuality) {
-            log::error!("failed to enter Kobo reader quality mode: {error}");
-        }
         Self {
             title: reader_title,
             state: ReaderState::Loading,

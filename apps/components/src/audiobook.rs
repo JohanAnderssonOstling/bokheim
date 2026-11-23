@@ -19,6 +19,10 @@ const SCRUB_THUMB_SIZE: f32 = 14.0;
 
 /// Every secondary playback control shares this square hit area.
 pub const PLAYBACK_SECONDARY_SIZE_REM: f32 = 2.5;
+
+pub fn playback_secondary_size_rem() -> f32 {
+    if touch_ui() { crate::TOUCH_TARGET_REM } else { PLAYBACK_SECONDARY_SIZE_REM }
+}
 const INLINE_GLYPH_REM: f32 = 1.625;
 /// Preferred play/pause circle size across desktop audiobook and narration layouts.
 const DESKTOP_PLAY_SIZE_REM: f32 = 4.0;
@@ -110,12 +114,13 @@ impl TransportControl {
             (TransportControl::Play, TransportLayout::MiniPlayer) => (3.0, 1.5),
             (TransportControl::Play, TransportLayout::Dock) => (4.0, 2.0),
         };
-        match (self, layout, touch_ui()) {
+        let (size, icon_size) = match (self, layout, touch_ui()) {
             (Self::Play, TransportLayout::MiniPlayer, _) => (size, icon_size),
             (Self::Play, TransportLayout::Dock, false) => (DESKTOP_DOCK_PLAY_SIZE_REM, DESKTOP_DOCK_PLAY_ICON_SIZE_REM),
             (Self::Play, _, false) => (DESKTOP_PLAY_SIZE_REM, icon_size),
             _ => (size, icon_size),
-        }
+        };
+        (if touch_ui() { size.max(crate::TOUCH_TARGET_REM) } else { size }, icon_size)
     }
 }
 
@@ -174,12 +179,13 @@ pub fn now_playing_sleep_button(id: impl Into<ElementId>, running: Option<Shared
 
 /// Give icon and value controls the same fixed square, without extra padding.
 pub fn playback_secondary_button(button: Button) -> Button {
-    button.p_0().flex_none().size(rems(PLAYBACK_SECONDARY_SIZE_REM))
+    button.p_0().flex_none().size(rems(playback_secondary_size_rem()))
 }
 
 /// Compact speed and sleep controls with no hover fill around their contents.
 fn inline_secondary_button(id: impl Into<ElementId>, tooltip: impl Into<SharedString>, set: bool, theme: BrowserTheme) -> Button {
-    crate::base_button(id).ghost().no_fill().flex_none().p_0().h(rems(2.0)).min_w(rems(2.0)).px(px(SPACE_XXS)).when(set, |button| button.text_color(theme.text_accent)).tooltip(tooltip)
+    let target = if touch_ui() { crate::TOUCH_TARGET_REM } else { 2.0 };
+    crate::base_button(id).ghost().no_fill().flex_none().p_0().h(rems(target)).min_w(rems(target)).px(px(SPACE_XXS)).when(set, |button| button.text_color(theme.text_accent)).tooltip(tooltip)
 }
 
 /// The page itself, covering the window and everything on it.

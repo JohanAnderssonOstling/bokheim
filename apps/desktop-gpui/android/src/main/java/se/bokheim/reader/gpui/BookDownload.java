@@ -75,7 +75,6 @@ final class BookDownload {
 
     static File save(String address, String userAgent, String referer, String disposition,
                      String mime, File directory, Progress progress, Cancellation cancellation) throws IOException {
-        // Browser downloads are explicit user requests, regardless of network cost.
         cancellation.check();
         if (!webAddress(address)) throw new IOException(UiText.ANDROID_THIS_DOWNLOAD_NEEDS_AN_HTTP_OR_HTTPS_LINK);
         HttpURLConnection connection = null;

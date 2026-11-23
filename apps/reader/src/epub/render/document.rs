@@ -5,7 +5,6 @@ use ui_text::text;
 use dictionary::can_lookup;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, DispatchPhase, Entity, IntoElement, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Window, px};
-use gpui_component::ElementExt;
 use gpui_component::menu::{ContextMenuExt, OpenContextMenu};
 use html::export::TableExportFormat;
 use ui_components as components;
@@ -54,7 +53,7 @@ impl ReaderView {
                 let renderer = renderer.clone();
                 crate::shell::dictionary::DictionaryPopup::track_anchor(popup.downgrade(), move |cx| renderer.read(cx).selection_bounds())
             }))
-            .on_prepaint(move |_, window, _| {
+            .child(gpui::canvas(|_, _, _| (), move |_, _, window, _| {
                 // The renderer consumes selection drags during bubbling.
                 // Observe movement in capture, including outside the document.
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
@@ -62,7 +61,7 @@ impl ReaderView {
                         let _ = movement_target.update(cx, |reader, _| reader.move_word_click(event.position));
                     }
                 });
-            })
+            }).absolute().size_full())
             .on_click(cx.listener(|reader, event, window, cx| {
                 if crate::shell::chrome::is_page_tap(event) {
                     reader.toggle_mobile_controls(window, cx);
@@ -84,13 +83,8 @@ impl ReaderView {
                 }
                 reader.begin_word_click(event);
                 if event.button == MouseButton::Left {
-                    let dismiss_selection = event.click_count == 1
-                        && matches!(&reader.load_state, LoadState::Ready(renderer)
-                            if renderer.read(cx).has_text_selection());
+                    // Keep capture running so the context menu can dismiss itself.
                     reader.dismiss_selection(cx);
-                    if dismiss_selection {
-                        cx.stop_propagation();
-                    }
                     return;
                 }
                 if event.button != MouseButton::Right {

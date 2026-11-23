@@ -10,9 +10,8 @@ use ui_components::{BrowserDownloadPhase, BrowserDownloadUpdate, BrowserDownload
 use super::format::download_byte_progress;
 use crate::library::mark_catalog_book_added;
 
-/// Imports a source book into the requested folder. The caller owns progress
-/// and completion feedback for its particular surface.
-pub(crate) async fn import_catalog_book(library: &LibraryClient, source: BookSource, destination: DirId) -> Result<BookId, BackendError> {
+/// Backend operation wrapped by the common progress and completion feedback.
+async fn import_catalog_book(library: &LibraryClient, source: BookSource, destination: DirId) -> Result<BookId, BackendError> {
     match source {
         BookSource::Catalog { book_id } => library.add_catalog_book(destination, book_id).await,
         BookSource::ExternalCatalog { entry, downloadable: true } => library.add_external_catalog_audiobook(destination, entry).await,
@@ -55,7 +54,6 @@ pub(crate) async fn import_catalog_book_with_progress(library: &LibraryClient, b
                 let (percent, text) = download_byte_progress(downloaded_bytes, total_bytes);
                 downloads.progress_detail(&download, percent, text.into(), window, cx);
             }
-            CatalogImportProgress::Waiting => downloads.waiting(&download, window, cx),
             CatalogImportProgress::Importing => downloads.apply(BrowserDownloadUpdate { phase: BrowserDownloadPhase::Importing, ..update.clone() }, window, cx),
         });
     };

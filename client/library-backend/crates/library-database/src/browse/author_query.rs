@@ -1,6 +1,7 @@
 //! Relational author selection. Only heading aggregates cross into Rust;
 //! each requested author's ordered membership is loaded on demand.
 use super::{BrowseOptions, BrowseRow, invalid_integer_column, ordering, parse_uuid_column};
+use crate::query_methods::text_column;
 use crate::query_methods::uuid_blob_column;
 use crate::{Database, DatabaseError, SqlParam};
 use book_model::{AUTHOR_MARC_RELATOR_CODE, AuthorId, normalize_search_text};
@@ -21,7 +22,9 @@ names AS (
  GROUP BY identity.id
 ),
 eligible AS (
- SELECT book.row_id,book.search_title,book.title,book.content_hash AS key,book.read_at,
+ SELECT book.row_id,book.search_title,book.title,book.content_hash AS key,book.read_at,book.search_author,book.format,
+        coalesce(book.read_progress,0) AS progress,
+        COALESCE((SELECT size_bytes FROM book_content WHERE book_id=book.content_hash),(SELECT upload_size FROM book_transfer WHERE content_hash=book.content_hash),(SELECT max(size_bytes) FROM book_dir WHERE book_row_id=book.row_id AND deleted_at IS NULL)) AS size_bytes,
         presence.downloaded,0 AS source_priority,
         CASE WHEN :search='' THEN 0 ELSE instr(book.search_title,:search)>0 OR instr(book.search_author,:search)>0 END AS text_match
  FROM book JOIN library_book_presence presence ON presence.book_row_id=book.row_id
@@ -42,7 +45,8 @@ members AS (
 ),
 names AS (SELECT row_id AS author_id,author_id AS identity,name FROM author WHERE 1 {name_scope}),
 eligible AS (
- SELECT browse.row_id,browse.search_title,source.title,source.key,NULL AS read_at,
+ SELECT browse.row_id,browse.search_title,source.title,source.key,NULL AS read_at,browse.search_author,source.format,
+        0 AS progress,NULL AS size_bytes,
         0 AS downloaded,browse.source_priority,
         CASE WHEN :search='' THEN 0 ELSE instr(browse.search_title,:search)>0 OR instr(browse.search_author,:search)>0 END AS text_match
  FROM catalog_browse_search browse JOIN book source ON source.row_id=browse.book_row_id
@@ -72,7 +76,11 @@ impl Database {
 }
 
 impl AuthorQuery<'_> {
-    fn read(&self, sql: &str, author: Option<AuthorId>, selected: &[AuthorId], mut read: impl FnMut(&Row<'_>) -> rusqlite::Result<()>) -> Result<(), DatabaseError> {
+    fn read(&self, sql: &str, author: Option<AuthorId>, selected: &[AuthorId], read: impl FnMut(&Row<'_>) -> rusqlite::Result<()>) -> Result<(), DatabaseError> {
+        self.read_with_books(sql, author, selected, "[]", read)
+    }
+
+    fn read_with_books(&self, sql: &str, author: Option<AuthorId>, selected: &[AuthorId], books: &str, mut read: impl FnMut(&Row<'_>) -> rusqlite::Result<()>) -> Result<(), DatabaseError> {
         if self.empty {
             return Ok(());
         }
@@ -101,7 +109,8 @@ impl AuthorQuery<'_> {
         let authors = if self.catalog { serde_json::to_string(&selected.iter().map(|id| id.simple()).collect::<Vec<_>>()) } else { serde_json::to_string(selected) }.map_err(DatabaseError::operation)?;
         let role = &AUTHOR_MARC_RELATOR_CODE.0[..];
         let threshold = f64::from(FINISHED_PROGRESS_THRESHOLD);
-        let parameters: [(&str, &SqlParam<'_>); 10] = [
+        let parameters: [(&str, &SqlParam<'_>); 11] = [
+            (":book_ids", &books),
             (":author", &author),
             (":authors", &authors),
             (":role", &role),
@@ -138,7 +147,7 @@ impl AuthorQuery<'_> {
     }
 
     fn identity(&self, row: &Row<'_>, column: usize) -> rusqlite::Result<AuthorId> {
-        if self.catalog { uuid_blob_column(row, column) } else { parse_uuid_column(row.get(column)?, column) }
+        if self.catalog { uuid_blob_column(row, column) } else { parse_uuid_column(text_column(row, column)?, column) }
     }
 
     pub(super) fn headings(&self) -> Result<Vec<BrowseRow>, DatabaseError> {
@@ -159,7 +168,7 @@ impl AuthorQuery<'_> {
             }
             let id = self.identity(row, 0)?;
             let location = if self.catalog { BrowseLocation::CatalogAuthor(Some(id)) } else { BrowseLocation::Author(Some(id)) };
-            rows.push(BrowseRow { id: location, name, path: None, book_count: count(row, 2)?, downloaded_book_count: count(row, 3)? });
+            rows.push(BrowseRow { id: location, name, path: None, book_count: count(row, 2)?, downloaded_book_count: count(row, 3)?, size_bytes: None });
             priorities.insert(location, row.get::<_, u8>(4)?);
             Ok(())
         })?;
@@ -194,15 +203,20 @@ impl AuthorQuery<'_> {
         Ok(orders)
     }
 
-    fn order(&self) -> &'static str {
-        if self.catalog {
-            "(source_priority=0) DESC,search_title,title,key"
-        } else {
-            match self.options.book_sort {
-                BrowseBookSort::RecentlyRead => "read_at DESC,search_title,title,key",
-                _ => "search_title,title,key",
-            }
-        }
+    fn order(&self) -> String {
+        let order = ordering::book_order(self.options.book_sort);
+        if self.catalog && matches!(self.options.book_sort, BrowseBookSort::Alphabetical | BrowseBookSort::DefaultOrder) { format!("(source_priority=0) DESC,{order}") } else { order.into() }
+    }
+
+    pub(super) fn selected_ordered(&self, selected: &std::collections::BTreeSet<i64>) -> Result<Vec<i64>, DatabaseError> {
+        let ids = serde_json::to_string(selected).map_err(DatabaseError::operation)?;
+        let sql = format!("SELECT eligible.row_id FROM eligible WHERE eligible.row_id IN (SELECT value FROM json_each(:book_ids)) ORDER BY {}", self.order());
+        let mut books = Vec::with_capacity(selected.len());
+        self.read_with_books(&sql, None, &[], &ids, |row| {
+            books.push(row.get(0)?);
+            Ok(())
+        })?;
+        Ok(books)
     }
 
     pub(super) fn all_ordered(&self) -> Result<Vec<i64>, DatabaseError> {

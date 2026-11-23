@@ -1,7 +1,7 @@
 //! Exact source headings can supply classification even without an indexed ISBN.
 use book_model::{BookRecord, BookSubject};
 use metadata_contract::matching::bibliographic_match_key;
-use subject_projection::{BISAC_SYSTEM_ID, has_usable_lcc_classification, is_broad_literature_classification, project_subject_codes, reviewed_source_heading_subject, unified_subject_paths};
+use subject_projection::{BISAC_SYSTEM_ID, has_unified_subjects, has_usable_lcc_classification, is_broad_literature_classification, project_subject_codes, reviewed_source_heading_subject};
 
 const HEADINGS: &[(&str, &str)] = &[
     ("science fiction", "FIC028000"),
@@ -143,8 +143,7 @@ pub(super) fn recover(record: &mut BookRecord) -> bool {
             reviewed_code(&heading, subject.name())
         };
         let Some(code) = code else { continue };
-        let paths = unified_subject_paths(BISAC_SYSTEM_ID, code);
-        if paths.is_empty() || is_broad_literature_classification(BISAC_SYSTEM_ID, code) {
+        if !has_unified_subjects(BISAC_SYSTEM_ID, code) || is_broad_literature_classification(BISAC_SYSTEM_ID, code) {
             continue;
         }
         let projected = BookSubject::new(None, subject.name(), format!("metadata:source-heading:{}", subject.source()), Some(BISAC_SYSTEM_ID.into()), Some(code.into())).expect("reviewed source heading must be valid");
@@ -168,7 +167,7 @@ mod tests {
     use super::*;
     use book_model::BookDetails;
     use std::collections::BTreeSet;
-    use subject_projection::unified_concept_id;
+    use subject_projection::{unified_concept_id, unified_subject_paths};
 
     fn record(name: &str) -> BookRecord {
         let subject = BookSubject::new(None, name, "dc:subject", None, None).unwrap();

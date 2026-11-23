@@ -1,6 +1,7 @@
 //! Folder browsing: hierarchy, contents, facets, paths.
 
 use crate::browse::{BrowseRow, FoldersSql, invalid_integer_column, parse_uuid_column};
+use crate::query_methods::text_column;
 use crate::{Database, DatabaseError};
 use library_model::BrowseLocation;
 #[cfg(test)]
@@ -13,7 +14,7 @@ impl Database {
     pub(super) fn browse_folder(&self, directory_id: DirId, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<super::LibraryBrowseData, DatabaseError> {
         let options = super::BrowseOptions::from_query(query, downloaded_only);
         self.with_browse_snapshot(|| {
-            let tree = self.folder_tree(&directory_id.to_string(), &options)?;
+            let tree = self.folder_tree(directory_id, &options)?;
             let contents = self.folder_contents(tree.scope(&options), &tree.counts, &options)?;
             let sections = if options.search.is_empty() {
                 {
@@ -23,15 +24,14 @@ impl Database {
                     let ids = json(&parents.iter().filter_map(|row| row.id.folder()).collect::<Vec<_>>())?;
                     let mut with_books = HashSet::new();
                     self.connection.folder_placements(&ids, |row| {
-                        with_books.insert(row.get::<_, String>(1)?);
+                        with_books.insert(parse_uuid_column(text_column(row, 1)?, 1)?);
                         Ok(())
                     })?;
                     let (mut plain, mut wrappers) = (Vec::new(), Vec::new());
                     for parent in parents {
                         let BrowseLocation::Folder(id) = parent.id else { continue };
-                        let key = id.to_string();
-                        let contents = self.folder_contents(std::slice::from_ref(&key), counts, options)?;
-                        let wrapper = !with_books.contains(&key) && !contents.children.is_empty();
+                        let contents = self.folder_contents(std::slice::from_ref(&id), counts, options)?;
+                        let wrapper = !with_books.contains(&id) && !contents.children.is_empty();
                         let section = library_model::BrowseSection { parent: parent.clone(), children: contents.children, books: contents.books, book_count: None };
                         if wrapper {
                             wrappers.push(section);
@@ -54,12 +54,12 @@ impl Database {
     }
 
     #[cfg(test)]
-    fn folder_contents(&self, scope: &[String], counts: &FolderCounts, options: &super::BrowseOptions) -> Result<library_model::BrowseContents, DatabaseError> {
+    fn folder_contents(&self, scope: &[DirId], counts: &FolderCounts, options: &super::BrowseOptions) -> Result<library_model::BrowseContents, DatabaseError> {
         let children = self.folder_children(scope, counts, options)?;
         let books = {
             let mut placements = BTreeMap::<i64, Vec<uuid::Uuid>>::new();
             self.connection.folder_placements(&json(scope)?, |row| {
-                placements.entry(row.get(0)?).or_default().push(parse_uuid_column(row.get(1)?, 1)?);
+                placements.entry(row.get(0)?).or_default().push(parse_uuid_column(text_column(row, 1)?, 1)?);
                 Ok(())
             })?;
             let matching = self.matching_books(&placements.keys().copied().collect(), options)?;
@@ -86,7 +86,7 @@ impl Database {
     pub(super) fn browse_folder_contents(&self, folder_id: DirId, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<library_model::BrowseContents, DatabaseError> {
         let options = super::BrowseOptions::from_query(query, downloaded_only);
         self.with_browse_snapshot(|| {
-            let tree = self.folder_tree(&folder_id.to_string(), &options)?;
+            let tree = self.folder_tree(folder_id, &options)?;
             self.folder_contents(tree.scope(&options), &tree.counts, &options)
         })
     }
@@ -97,11 +97,11 @@ impl Database {
     pub(super) fn folder_ancestors(&self, path: &[library_model::BrowsePathSegment], options: &super::BrowseOptions) -> Result<Vec<(BrowseLocation, Vec<BrowseRow>)>, DatabaseError> {
         let Some((_, above)) = path.split_last() else { return Ok(Vec::new()) };
         let options = super::BrowseOptions { search: String::new(), ..options.clone() };
-        let tree = self.folder_tree(&ROOT_DIR_ID.to_string(), &options)?;
+        let tree = self.folder_tree(ROOT_DIR_ID, &options)?;
         let mut ancestors = Vec::with_capacity(above.len() + 1);
         for location in std::iter::once(BrowseLocation::Folder(ROOT_DIR_ID)).chain(above.iter().map(|segment| segment.id)) {
             let BrowseLocation::Folder(id) = location else { continue };
-            ancestors.push((location, self.folder_children(&[id.to_string()], &tree.counts, &options)?));
+            ancestors.push((location, self.folder_children(&[id], &tree.counts, &options)?));
         }
         Ok(ancestors)
     }
@@ -112,15 +112,15 @@ impl Database {
 
     /// Children of every folder in `scope`: the direct children normally, and
     /// every folder below when a search widened the scope to the subtree.
-    pub(super) fn folder_children(&self, scope: &[String], counts: &FolderCounts, options: &super::BrowseOptions) -> Result<Vec<BrowseRow>, DatabaseError> {
+    pub(super) fn folder_children(&self, scope: &[DirId], counts: &FolderCounts, options: &super::BrowseOptions) -> Result<Vec<BrowseRow>, DatabaseError> {
         let mut folders = Vec::new();
         let mut parents = Vec::new();
         self.connection.folder_children(&json(scope)?, |row| {
             let name: String = row.get(2)?;
             if book_model::normalize_search_text(&name).contains(&options.search) {
                 folders.push({
-                    let id: String = row.get(1)?;
-                    BrowseRow { id: BrowseLocation::Folder(parse_uuid_column(id, 0)?), name, path: None, book_count: 0, downloaded_book_count: 0 }
+                    let id = text_column(row, 1)?;
+                    BrowseRow { id: BrowseLocation::Folder(parse_uuid_column(id, 1)?), name, path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None }
                 });
                 parents.push(row.get::<_, String>(0)?);
             }
@@ -138,11 +138,12 @@ impl Database {
             let show_empty = options.file_types == 0 && options.languages.is_empty() && !options.hide_finished;
             folders.retain_mut(|folder| {
                 let count = match folder.id {
-                    BrowseLocation::Folder(id) => counts.get(&id.to_string()).copied().unwrap_or_default(),
+                    BrowseLocation::Folder(id) => counts.get(&id).copied().unwrap_or_default(),
                     _ => FolderCount::default(),
                 };
                 folder.book_count = if options.downloaded_only { count.downloaded } else { count.total };
                 folder.downloaded_book_count = count.downloaded;
+                folder.size_bytes = if options.downloaded_only { (count.downloaded_sized == count.downloaded).then_some(count.downloaded_size_bytes) } else { (count.sized == count.total).then_some(count.size_bytes) };
                 // Empty directories stay navigable in local-only libraries and name searches.
                 // Folders containing only remote books still obey the download filter.
                 folder.book_count > 0 || show_empty && count.total == 0
@@ -154,19 +155,19 @@ impl Database {
 
     /// Walk the live folders below `root` one level per query, then count
     /// them all in one query and add each folder's subtree up from the leaves.
-    pub(super) fn folder_tree(&self, root: &str, options: &super::BrowseOptions) -> Result<FolderTree, DatabaseError> {
-        let mut folders = vec![root.to_owned()];
-        let mut seen = HashSet::from([root.to_owned()]);
-        let mut children = HashMap::<String, Vec<String>>::new();
+    pub(super) fn folder_tree(&self, root: DirId, options: &super::BrowseOptions) -> Result<FolderTree, DatabaseError> {
+        let mut folders = vec![root];
+        let mut seen = HashSet::from([root]);
+        let mut children = HashMap::<DirId, Vec<DirId>>::new();
         let mut level = 0..1;
         while !level.is_empty() {
             let parents = json(&folders[level.clone()])?;
             level = level.end..level.end;
             self.connection.folder_children(&parents, |row| {
-                let (parent, child) = (row.get::<_, String>(0)?, row.get::<_, String>(1)?);
+                let (parent, child) = (parse_uuid_column(text_column(row, 0)?, 0)?, parse_uuid_column(text_column(row, 1)?, 1)?);
                 // Each folder is visited once, so an ancestry loop cannot walk forever.
-                if seen.insert(child.clone()) {
-                    children.entry(parent).or_default().push(child.clone());
+                if seen.insert(child) {
+                    children.entry(parent).or_default().push(child);
                     folders.push(child);
                 }
                 Ok(())
@@ -176,47 +177,79 @@ impl Database {
         let selected = json(&folders)?;
         let mut counts = FolderCounts::new();
         self.connection.folder_direct_counts(&selected, options.file_types, &options.languages, i32::from(options.hide_finished), f64::from(library_model::FINISHED_PROGRESS_THRESHOLD), |row| {
-            counts.insert(row.get(0)?, FolderCount { total: count_column(row, 1)?, downloaded: count_column(row, 2)? });
+            counts.insert(
+                parse_uuid_column(text_column(row, 0)?, 0)?,
+                FolderCount {
+                    total: count_column(row, 1)?,
+                    downloaded: count_column(row, 2)?,
+                    size_bytes: size_column(row, 3)?,
+                    sized: count_column(row, 4)?,
+                    downloaded_size_bytes: size_column(row, 5)?,
+                    downloaded_sized: count_column(row, 6)?,
+                },
+            );
             Ok(())
         })?;
         // Children follow their parents in `folders`, so going in reverse
         // completes every subtree before its parent adds it.
         for folder in folders.iter().rev() {
             let below = children.get(folder).into_iter().flatten().map(|child| counts.get(child).copied().unwrap_or_default());
-            let (total, downloaded) = below.fold((0, 0), |(total, downloaded), child| (total + child.total, downloaded + child.downloaded));
-            let entry = counts.entry(folder.clone()).or_default();
-            (entry.total, entry.downloaded) = (entry.total + total, entry.downloaded + downloaded);
+            let below = below.fold(FolderCount::default(), |mut total, child| {
+                total.add(child);
+                total
+            });
+            let entry = counts.entry(*folder).or_default();
+            entry.add(below);
         }
 
         Ok(FolderTree { folders, counts })
     }
 }
 
-/// Books in each folder and everything below it: (all, downloaded).
+/// Counts and known sizes in each folder and everything below it.
 #[derive(Clone, Copy, Default)]
 pub(super) struct FolderCount {
     total: usize,
     downloaded: usize,
+    size_bytes: u64,
+    sized: usize,
+    downloaded_size_bytes: u64,
+    downloaded_sized: usize,
 }
-pub(super) type FolderCounts = HashMap<String, FolderCount>;
+
+impl FolderCount {
+    fn add(&mut self, child: Self) {
+        self.total += child.total;
+        self.downloaded += child.downloaded;
+        self.size_bytes += child.size_bytes;
+        self.sized += child.sized;
+        self.downloaded_size_bytes += child.downloaded_size_bytes;
+        self.downloaded_sized += child.downloaded_sized;
+    }
+}
+pub(super) type FolderCounts = HashMap<DirId, FolderCount>;
 
 /// Every live folder from a page's folder down, and their book counts.
 pub(super) struct FolderTree {
     /// The page's folder first, every folder before its children.
-    pub(super) folders: Vec<String>,
+    pub(super) folders: Vec<DirId>,
     pub(super) counts: FolderCounts,
 }
 
 impl FolderTree {
     /// Where the page looks for chips and books: its own folder, or every
     /// folder below it when searching.
-    pub(super) fn scope(&self, options: &super::BrowseOptions) -> &[String] {
+    pub(super) fn scope(&self, options: &super::BrowseOptions) -> &[DirId] {
         if options.search.is_empty() { &self.folders[..1] } else { &self.folders }
     }
 }
 
 fn count_column(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<usize> {
     usize::try_from(row.get::<_, i64>(column)?).map_err(|_| invalid_integer_column(column, "folder count must not be negative"))
+}
+
+fn size_column(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<u64> {
+    u64::try_from(row.get::<_, i64>(column)?).map_err(|_| invalid_integer_column(column, "folder size must not be negative"))
 }
 
 fn json(ids: &[impl serde::Serialize]) -> Result<String, DatabaseError> {

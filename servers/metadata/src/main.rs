@@ -6,10 +6,15 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
 };
+use subject_projection::installed;
 use tracing_subscriber::{EnvFilter, fmt};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     fmt().with_writer(io::stderr).with_env_filter(EnvFilter::from_default_env()).init();
+    if let Some(path) = std::env::var_os("BOKHEIM_RUNTIME_TAXONOMY").map(PathBuf::from) {
+        installed::validate(&path, installed::metadata(&path)?)?;
+        installed::activate(&path)?;
+    }
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     let command = args.first().and_then(|a| a.to_str()).ok_or_else(usage)?;
     match command {

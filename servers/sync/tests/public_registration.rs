@@ -1,22 +1,23 @@
+use ::wire::typed as wire;
 use account_contract::{
-    AccountSnapshotResponse, AuthResponse, EmailRequest, EmailVerificationRequest, LoginRequest, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse,
-    SessionSummary, StorageUsageResponse,
+    AccountSnapshotResponse, AuthResponse, EmailRequest, EmailVerificationRequest, LoginRequest, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse, SessionSummary,
+    StorageUsageResponse,
 };
-use axum::body::{to_bytes, Body};
-use axum::http::{header, Request, StatusCode};
 use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode, header};
 use server_account::{AccountEmailKind, AccountTokenKey, ClientAddressSource, PostgresAccountService};
 use server_postgres::PostgresDatabase;
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-async fn post<T: serde::Serialize + ?Sized>(app: &Router, path: &str, body: &T, bearer: Option<&str>) -> axum::response::Response {
+async fn post<T: wire::Contract>(app: &Router, path: &str, body: &T, bearer: Option<&str>) -> axum::response::Response {
     post_from(app, path, body, bearer, "203.0.113.20").await
 }
 
-async fn post_from<T: serde::Serialize + ?Sized>(app: &Router, path: &str, body: &T, bearer: Option<&str>, address: &str) -> axum::response::Response {
+async fn post_from<T: wire::Contract>(app: &Router, path: &str, body: &T, bearer: Option<&str>, address: &str) -> axum::response::Response {
     let encoded = wire::encode(body).unwrap();
     let mut request = Request::builder().method("POST").uri(path).header(header::CONTENT_TYPE, wire::MEDIA_TYPE).header(header::ACCEPT, wire::MEDIA_TYPE).header("x-forwarded-for", address);
     if let Some(token) = bearer {
@@ -30,7 +31,7 @@ async fn auth_response(response: axum::response::Response) -> AuthResponse {
     wire::decode(&to_bytes(response.into_body(), 64 * 1024).await.unwrap(), 64 * 1024).unwrap()
 }
 
-async fn response_body<T: serde::de::DeserializeOwned>(response: axum::response::Response) -> T {
+async fn response_body<T: wire::Contract>(response: axum::response::Response) -> T {
     assert!(response.status().is_success());
     wire::decode(&to_bytes(response.into_body(), 64 * 1024).await.unwrap(), 64 * 1024).unwrap()
 }
@@ -82,7 +83,10 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     assert_eq!(verification.token.len(), account_contract::EMAIL_VERIFICATION_PIN_DIGITS);
     assert!(verification.token.bytes().all(|byte| byte.is_ascii_digit()));
     assert_ne!(stored_ciphertext, verification.token, "PostgreSQL must not contain the recoverable PIN in plaintext");
-    assert_eq!(post(&app, "/api/auth/verify-email", &EmailVerificationRequest { email: "other@example.com".to_owned(), pin: verification.token.clone(), password: original_password.to_owned() }, None).await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        post(&app, "/api/auth/verify-email", &EmailVerificationRequest { email: "other@example.com".to_owned(), pin: verification.token.clone(), password: original_password.to_owned() }, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
     // The mailed PIN alone does not verify: whoever enters it must also know
     // the pending registration's password, or they would adopt another's.
     let foreign_password = EmailVerificationRequest { email: email.clone(), pin: verification.token.clone(), password: "someone-elses-chosen-password".to_owned() };
@@ -192,19 +196,11 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     // row of zeroes: the client knows which libraries exist and fills the rest.
     assert!(snapshot.library_storage.is_empty());
     for obsolete in ["/api/account/storage", "/api/account/storage/libraries"] {
-        let response = app
-            .clone()
-            .oneshot(accepted(Request::get(obsolete)).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let response = app.clone().oneshot(accepted(Request::get(obsolete)).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "obsolete account endpoint must be removed: {obsolete}");
     }
     for obsolete in ["/api/libraries", "/api/libraries/deleted"] {
-        let response = app
-            .clone()
-            .oneshot(accepted(Request::get(obsolete)).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let response = app.clone().oneshot(accepted(Request::get(obsolete)).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "obsolete library read endpoint must be removed: {obsolete}");
     }
 

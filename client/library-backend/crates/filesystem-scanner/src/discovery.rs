@@ -2,8 +2,9 @@
 
 use audiobook_archive::Track;
 use book_model::BookFormat;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem as fs;
 use library_files::filesystem::{DirectoryEntry, DirectoryWalk};
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 

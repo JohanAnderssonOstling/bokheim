@@ -4,8 +4,9 @@
 use book_content::{Book, BookFormat as ContainerFormat, DeclaredMetadata};
 use book_content::{IdentifierScheme, MetadataCredit, MetadataProperty};
 use book_model::{AUTHOR_MARC_RELATOR_CODE, BookFormat, BookMetadata, BookMetadataError, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, LanguageTag, Scheme, Scope, marc_relator_code_from_metadata_role, unique_book_year};
+use book_normalization::{isbn_from_filename, unusable_filename_title};
+use client_platform_runtime::filesystem as fs;
 use regex::Regex;
-use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -18,21 +19,16 @@ fn cached_regex(cache: &'static OnceLock<Result<Regex, String>>, pattern: &str) 
 }
 
 mod book;
-#[cfg(not(target_arch = "wasm32"))]
-pub use book::{inspect_audiobook_folder_reader, inspect_audiobook_folder_content};
 pub use audiobook_archive::archive_content_hash as audiobook_content_hash;
-pub use book_inspection_contract::{AudiobookMetadata, CachedPdfReader, InspectedBook, PdfSourceIdentity};
+#[cfg(not(target_arch = "wasm32"))]
+pub use book::{inspect_audiobook_folder_content, inspect_audiobook_folder_reader};
 pub use book::{inspect_book_reader, inspect_book_reader_with_cached_pdf, inspect_book_reader_with_hash, inspect_book_reader_with_pdf_metadata};
+pub use book_inspection_contract::{AudiobookMetadata, CachedPdfReader, InspectedBook, PdfSourceIdentity};
 pub mod evidence;
 mod mobi;
 pub use mobi::{inspect_mobi_frontmatter, inspect_mobi_metadata_reader, inspect_mobi_pages_reader, inspect_mobi_reader, inspect_mobi_with_frontmatter};
 mod document_evidence;
-mod filename_identifiers;
-mod filename_identity;
-mod filename_isbn;
-mod identity_evidence;
-mod title_identity;
-pub use title_identity::{normalize_with_filename, title_readings};
+pub use book_normalization::{normalize_with_filename, title_readings};
 mod pdf;
 mod pdf_ranges;
 pub mod pdf_source_identity;
@@ -238,7 +234,7 @@ fn author_names(raw: &str) -> Vec<String> {
 
 fn is_author_tool(name: &str) -> bool {
     let lowered = name.trim().to_ascii_lowercase();
-    filename_identity::unusable_title(name) || AUTHOR_TOOL_PREFIXES.iter().any(|prefix| lowered.starts_with(prefix))
+    unusable_filename_title(name) || AUTHOR_TOOL_PREFIXES.iter().any(|prefix| lowered.starts_with(prefix))
 }
 
 /// The blurb a reader should be given, where a book states two.
@@ -267,7 +263,7 @@ fn long_description(properties: &[MetadataProperty]) -> Option<String> {
 }
 
 pub fn open_epub(path: &Path) -> MetadataResult<Book> {
-    let provider = Book::open_reader(ContainerFormat::Epub, std::fs::File::open(path)?)?;
+    let provider = Book::open_reader(ContainerFormat::Epub, fs::open(path)?)?;
     Ok(provider)
 }
 
@@ -343,7 +339,7 @@ fn metadata_from_declared(path: &Path, metadata: DeclaredMetadata) -> MetadataRe
         let stem = file_name.strip_suffix(".opf").or_else(|| file_name.strip_suffix(".OPF"))?;
         let stem = stem.trim().trim_start_matches(|character: char| matches!(character, '_' | '-'));
         let stem = stem.strip_prefix("ISBN").or_else(|| stem.strip_prefix("isbn")).map(|value| value.trim_start_matches(|character: char| matches!(character, '_' | '-' | ':' | ' '))).unwrap_or(stem);
-        filename_isbn::from_filename_single(stem)
+        isbn_from_filename(stem)
     }) {
         book_model::push_isbn(&mut identifiers, isbn, Scope::Book)?;
     }
@@ -367,7 +363,7 @@ fn metadata_from_declared(path: &Path, metadata: DeclaredMetadata) -> MetadataRe
                     if evidence::usable_lcc(&subject.value) {
                         authority = Some("lcc".to_owned());
                         code = Some(subject.value.clone());
-                    } else if !subject_projection::unified_subject_paths(subject_projection::BISAC_SYSTEM_ID, &subject.value).is_empty() {
+                    } else if subject_projection::has_unified_subjects(subject_projection::BISAC_SYSTEM_ID, &subject.value) {
                         authority = Some("bisac".to_owned());
                         code = Some(subject.value.clone());
                     }
@@ -484,7 +480,7 @@ pub fn inspect_epub_pages_reader<R: Read + Seek + Send + 'static>(source_name: &
 
 /// Package metadata and navigation only; page inspection is a separate stage.
 pub fn inspect_epub_metadata_with_toc(path: &Path) -> MetadataResult<InspectedEpub> {
-    inspect_epub_metadata_reader(path, File::open(path)?)
+    inspect_epub_metadata_reader(path, fs::open(path)?)
 }
 
 /// Package facts and navigation for external-reader imports. Copyright-page

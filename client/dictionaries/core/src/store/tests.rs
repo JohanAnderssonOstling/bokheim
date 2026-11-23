@@ -74,7 +74,7 @@ fn dictionary_word(name: &str, word: &str, definition: &str, language: &str) -> 
 }
 
 #[tokio::test]
-async fn dictionary_import_priority_disabled_state_and_removal_survive_reopening() {
+async fn dictionary_import_priority_and_removal_survive_reopening() {
     let root = tempfile::tempdir().unwrap();
     let context = TestStorage::new(root.path().to_owned());
     let backend = Arc::new(DictionaryStore::new(context.clone()));
@@ -83,19 +83,18 @@ async fn dictionary_import_priority_disabled_state_and_removal_survive_reopening
     let catalog = backend.import(dictionary("Second", "A reservation")).await.unwrap();
     let second = catalog[1].id.clone();
     assert_eq!(backend.lookup("BOOK".into(), Vec::new()).await.unwrap().dictionaries[0].dictionary, "First");
-    backend.configure(second.clone(), true, -1).await.unwrap();
-    backend.configure(first.clone(), false, 0).await.unwrap();
+    backend.reorder(second.clone(), -1).await.unwrap();
     assert!(backend.import(DictionaryImport::new(vec![]).unwrap()).await.is_err());
     assert_eq!(backend.list().await.unwrap().len(), 2);
     drop(backend);
     let backend = Arc::new(DictionaryStore::new(context));
     let found = backend.lookup("book".into(), Vec::new()).await.unwrap();
-    assert_eq!(found.enabled_count, 1);
+    assert_eq!(found.installed_count, 2);
     assert_eq!(found.dictionaries[0].dictionary, "Second");
     assert_eq!(found.dictionaries[0].definitions[0].text, "A reservation");
     backend.remove(second.clone()).await.unwrap();
     assert!(!root.path().join("files").join(second).exists());
-    assert_eq!(backend.lookup("book".into(), Vec::new()).await.unwrap().enabled_count, 0);
+    assert_eq!(backend.lookup("book".into(), Vec::new()).await.unwrap().installed_count, 1);
     let installed = backend.list().await.unwrap();
     assert_eq!(installed.len(), 1);
     assert_eq!(installed[0].id, first);
@@ -155,7 +154,7 @@ async fn source_languages_prioritize_matches_and_unknowns_with_foreign_word_fall
 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
-async fn disabling_and_removing_a_curated_pack_preserve_user_choices_after_reopening() {
+async fn removing_a_curated_pack_persists_after_reopening() {
     let root = tempfile::tempdir().unwrap();
     let context = TestStorage::new(root.path().to_owned());
     let backend = Arc::new(DictionaryStore::new(context.clone()));
@@ -167,11 +166,8 @@ async fn disabling_and_removing_a_curated_pack_preserve_user_choices_after_reope
     let files = [("ifo", ifo.into_bytes()), ("idx", index), ("dict", b"Home".to_vec())].into_iter().map(|(suffix, bytes)| DictionaryFile { name: format!("fixture.{suffix}"), bytes }).collect();
     let installed = backend.install(files, Some(spec)).await.unwrap();
     let id = installed[0].id.clone();
-    let installed = backend.configure(id.clone(), false, 0).await.unwrap();
-    assert!(!installed[0].enabled);
     drop(backend);
     let backend = Arc::new(DictionaryStore::new(context.clone()));
-    assert!(!backend.list().await.unwrap()[0].enabled);
     backend.remove(id).await.unwrap();
     drop(backend);
     let backend = Arc::new(DictionaryStore::new(context));
@@ -191,7 +187,7 @@ async fn recommendation_languages_are_request_local_and_never_install_dictionari
         assert!(snapshot.error.is_none());
     }
     assert!(backend.downloads(&[]).await.unwrap().recommended.is_empty());
-    assert_eq!(backend.lookup("Häuser".into(), Vec::new()).await.unwrap().enabled_count, 0);
+    assert_eq!(backend.lookup("Häuser".into(), Vec::new()).await.unwrap().installed_count, 0);
     assert!(backend.list().await.unwrap().is_empty());
     assert!(fs::read_dir(root.path()).unwrap().next().is_none(), "recommendations must not write preferences or dictionary files");
 }
@@ -213,7 +209,7 @@ async fn obsolete_installs_can_be_listed_and_removed_without_migration() {
 }
 
 #[tokio::test]
-async fn offset_tables_are_reused_and_evicted_on_disable_and_removal() {
+async fn offset_tables_are_reused_and_evicted_on_removal() {
     let root = tempfile::tempdir().unwrap();
     let context = TestStorage::new(root.path().to_owned());
     let bytes_read = context.bytes_read.clone();
@@ -225,7 +221,7 @@ async fn offset_tables_are_reused_and_evicted_on_disable_and_removal() {
     assert_eq!(backend.storage.lock().await.len(), 2);
     backend.lookup("BOOK".into(), Vec::new()).await.unwrap();
     assert!(bytes_read.load(Ordering::Relaxed) < cold_reads, "warm lookups must reuse offsets instead of reading complete indexes and metadata again");
-    backend.configure(first.clone(), false, 0).await.unwrap();
+    backend.remove(first.clone()).await.unwrap();
     assert!(!backend.storage.lock().await.contains_key(&first));
     backend.remove(second).await.unwrap();
     assert!(backend.storage.lock().await.is_empty());

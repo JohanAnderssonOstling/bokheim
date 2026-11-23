@@ -9,8 +9,6 @@ pub struct DictionaryInfo {
     pub curated_id: Option<String>,
     pub id: String,
     pub metadata: Metadata,
-    pub enabled: bool,
-    pub size_bytes: u64,
     pub files: Vec<String>,
 }
 
@@ -23,7 +21,7 @@ pub struct DictionaryMatches {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DictionaryLookup {
     pub dictionaries: Vec<DictionaryMatches>,
-    pub enabled_count: usize,
+    pub installed_count: usize,
     pub errors: Vec<OperationError>,
 }
 

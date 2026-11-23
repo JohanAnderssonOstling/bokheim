@@ -31,7 +31,7 @@ use include_sqlite_sql::include_sql;
 use library_model::{BrowsePageRequest, BrowsePageState, BrowseRow};
 
 /// Complete library-owned browse projection returned to any UI transport.
-#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct LibraryBrowseData {
     #[serde(default)]
     pub sections: Vec<library_model::BrowseSection>,

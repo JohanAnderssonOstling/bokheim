@@ -3,15 +3,15 @@ use ui_text::text;
 use crate::Button;
 use crate::{
     BOOK_CARD_SUBTITLE_SIZE, BOOK_COVER_BADGE_INSET, BOOK_COVER_RADIUS, COMPACT_HIERARCHY_ITEM_CONTENT_GAP, COMPACT_HIERARCHY_ITEM_HORIZONTAL_PADDING, COMPACT_HIERARCHY_ITEM_TEXT_SIZE_REM, CONTENT_INSET, DOWNLOAD_ACTION_SIZE_REM,
-    NavigationIcon, SPACE_MD, TEXT_LG, TEXT_MD,
+    NavigationIcon, SPACE_MD, TEXT_MD,
 };
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, AvailableSpace, Bounds, BoxShadow, ClickEvent, ContentMask, Corners, Div, ElementId, ImageSource, ObjectFit, Pixels, RenderImage, SharedString, Stateful, StyledImage, Window, black, canvas, div, fill, img,
-    linear_color_stop, linear_gradient, point, px, size,
+    AnyElement, App, AvailableSpace, Bounds, BoxShadow, ContentMask, Corners, Div, ElementId, ImageSource, ObjectFit, Pixels, RenderImage, SharedString, Stateful, StyledImage, Window, black, canvas, div, fill, img, linear_color_stop,
+    linear_gradient, point, px, size,
 };
 use gpui_component::spinner::Spinner;
-use gpui_component::{Icon, IconName, Selectable, Sizable, Theme, box_shadow};
+use gpui_component::{Disableable, Icon, IconName, Sizable, Theme, box_shadow};
 use library_model::FINISHED_PROGRESS_THRESHOLD;
 use std::sync::Arc;
 use unicode_normalization::UnicodeNormalization;
@@ -124,9 +124,9 @@ pub fn book_cover_audiobook_length(duration_ms: Option<u64>, theme: BrowserTheme
         .border_1()
         .border_color(theme.rule)
         .text_color(theme.text)
-        .text_size(px(11.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .child(Icon::new(crate::Headphones).size(px(11.0)))
+        .text_size(gpui::rems(TEXT_XS))
+        .font_weight(gpui::FontWeight::BOLD)
+        .child(Icon::new(crate::Headphones).size(gpui::rems(TEXT_XS)))
         .child(length)
 }
 
@@ -1061,39 +1061,22 @@ impl HierarchyItemWidth {
     }
 }
 
-/// A compact hierarchy item for mixed paginator pages.
-///
-/// This function owns presentation only. Feature code remains responsible for
-/// attaching click handlers and navigation behavior.
-pub fn compact_hierarchy_item(
-    id: impl Into<ElementId>, icon: NavigationIcon, label: impl Into<SharedString>, path: Option<SharedString>, count: Option<usize>, download: Option<AnyElement>, selected: bool, cursor: bool, marquee: bool, theme: BrowserTheme,
-) -> Button {
-    let label = label.into();
-    let text = hierarchy_item_text(label, path, theme);
-    // A selected chip and the chip under the keyboard cursor are both the
-    // keyboard's tier, `accent_wash`, and keep every foreground they had; see
-    // the ladder in `tokens.rs`. The pointer lifts a washed chip to
-    // `accent_wash_hover` and a plain one to the light `hover`.
-    let washed = selected || cursor;
-    let hovered = if washed { theme.accent_wash_hover } else { theme.hover };
-    let base = if washed { theme.accent_wash } else { theme.page_bg };
-    let button = crate::base_button(id).ghost().selected(selected).bg(base).text_color(theme.text).hover(move |style| if marquee { style.bg(base) } else { style.bg(hovered) });
-    button
+/// Icon and text layout for a hierarchy entry. The enclosing button owns
+/// interaction; callers append counts and download controls as ordinary children.
+pub fn hierarchy_item_content(icon: NavigationIcon, label: impl Into<SharedString>, path: Option<SharedString>, theme: BrowserTheme) -> Div {
+    div()
         .w_full()
-        .max_w_full()
         .min_w_0()
         .h_full()
-        .p_0()
+        .flex()
+        .items_center()
         .px(px(COMPACT_HIERARCHY_ITEM_HORIZONTAL_PADDING))
         .text_size(gpui::rems(COMPACT_HIERARCHY_ITEM_TEXT_SIZE_REM))
         .gap(px(COMPACT_HIERARCHY_ITEM_CONTENT_GAP))
-        .rounded(px(0.0))
         .border_1()
         .border_color(theme.rule)
         .child(crate::navigation_icon(icon).text_color(theme.text_accent))
-        .child(text)
-        .children(count.map(|count| div().flex_none().text_color(theme.text_muted).child(count.to_string())))
-        .when_some(download, |content, download| content.child(div().size(gpui::rems(DOWNLOAD_ACTION_SIZE_REM)).flex_none().flex().items_center().justify_center().child(download)))
+        .child(hierarchy_item_text(label.into(), path, theme))
 }
 
 fn hierarchy_item_text(label: SharedString, path: Option<SharedString>, theme: BrowserTheme) -> Div {
@@ -1110,8 +1093,9 @@ fn hierarchy_item_text(label: SharedString, path: Option<SharedString>, theme: B
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis()
-        .child(label)
-        .children(path.map(|path| div().absolute().top_0().left_0().right_0().h(gpui::relative(0.5)).min_w_0().flex().flex_col().justify_center().text_ellipsis_start().text_size(gpui::rems(0.5)).text_color(theme.text_muted).child(path)))
+        .line_height_auto()
+        .children(path.map(|path| div().min_w_0().text_ellipsis_start().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(path)))
+        .child(div().min_w_0().text_ellipsis().child(label))
 }
 
 #[cfg(test)]
@@ -1209,66 +1193,6 @@ pub fn section_card_content(theme: BrowserTheme) -> Div {
     div().flex_1().min_h_0().min_w_0().flex().flex_col().px(px(SPACE_MD - 1.0)).border_1().border_color(theme.rule).when(cfg!(feature = "kobo"), |content| content.border_0())
 }
 
-/// A section card's title, total and paging controls on a shared colour band.
-/// Only the title's text area points, underlines and opens the section.
-///
-/// A heading that `opens` nothing — a shelf of Home — neither points nor
-/// underlines.
-pub fn section_card_heading(
-    id: impl Into<ElementId>, title: impl Into<SharedString>, count: Option<usize>, pager: Option<AnyElement>, opens: bool, focused: bool, marquee: bool, theme: BrowserTheme, on_open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_none()
-        .h(gpui::rems(crate::SECTION_CARD_HEADING_HEIGHT_REM))
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap(px(SPACE_SM))
-        // Light on the colour band; black on Kobo's unfilled one.
-        .text_color(if cfg!(feature = "kobo") { theme.text } else { gpui::rgb(0xf2efe8).into() })
-        .child(
-            div().flex_1().min_w_0().flex().child(
-                div()
-                    .id("title")
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .when_some(theme.display_font_family(), |text, family| text.font_family(family))
-                    .text_size(gpui::rems(TEXT_LG))
-                    .when(focused && !cfg!(feature = "kobo"), |title| title.text_color(gpui::white()))
-                    .when(opens && !marquee, |title| title.cursor_pointer().hover(|style| style.underline()).on_click(on_open))
-                    .child(title.into()),
-            ),
-        )
-        .children(count.map(|count| div().flex_none().child(count.to_string())))
-        .children(pager)
-}
-
-/// One child in a section card's list, with its navigation icon, optional download
-/// control and quiet count pill. The whole row is the hover and click target.
-pub fn section_card_subject(id: impl Into<ElementId>, icon: NavigationIcon, label: impl Into<SharedString>, count: Option<usize>, download: Option<AnyElement>, theme: BrowserTheme) -> Stateful<Div> {
-    div()
-        .id(id)
-        .group("section-card-subject")
-        .min_h(gpui::rems(crate::SECTION_CARD_SUBJECT_ROW_HEIGHT_REM))
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap(px(SPACE_SM))
-        .mx(px(-SPACE_XS))
-        .px(px(SPACE_XS))
-        .cursor_pointer()
-        .text_size(gpui::rems(TEXT_MD))
-        .line_height_auto()
-        .hover(move |style| style.bg(theme.hover))
-        .child(crate::navigation_icon(icon).size(gpui::rems(0.8)).text_color(theme.text_accent))
-        .child(div().id("label").flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label.into()))
-        .children(download)
-        .children(count.map(|count| div().flex_none().min_w(gpui::rems(1.6)).px(px(SPACE_XS)).text_center().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).bg(theme.hover).child(count.to_string())))
-}
-
 /// The body shared by container cards and book shelves.
 pub fn section_card_body() -> Div {
     // Cells provide the full vertical inset. Offset the content border so it
@@ -1278,22 +1202,25 @@ pub fn section_card_body() -> Div {
 }
 
 /// Paging control in a container or book shelf heading.
-pub fn section_card_cover_arrow(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, enabled: bool) -> Stateful<Div> {
+pub fn section_card_cover_arrow(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, enabled: bool) -> Button {
     let label = label.into();
-    div()
-        .id(id)
+    crate::base_button(id)
+        .ghost()
+        .p_0()
+        .min_h_0()
         .size(gpui::rems(1.5))
         .flex()
         .items_center()
         .justify_center()
-        .when(enabled, |arrow| arrow.cursor_pointer())
+        .disabled(!enabled)
         .border_1()
         // Translucent white on the colour band; outlined black on Kobo's white one.
         .when(!cfg!(feature = "kobo"), |arrow| {
             arrow.text_color(gpui::rgb(0xf2efe8)).bg(gpui::white().opacity(0.12)).border_color(gpui::white().opacity(0.28)).when(enabled, |arrow| arrow.hover(|style| style.bg(gpui::white().opacity(0.22))))
         })
         .when(cfg!(feature = "kobo"), |arrow| arrow.text_color(gpui::black()).bg(gpui::white()).border_color(gpui::black()))
-        .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx))
+        .aria_label(label.clone())
+        .tooltip(label)
         .child(Icon::new(icon).size(px(12.0)))
 }
 
@@ -1307,9 +1234,14 @@ pub fn drop_highlight<T: 'static>(lands_here: impl Fn(&gpui::App) -> bool + 'sta
     let wash = theme.accent.opacity(0.08);
     let lands_here = std::rc::Rc::new(lands_here);
     let lands_here_files = lands_here.clone();
-    div()
+    #[cfg(target_arch = "wasm32")]
+    let lands_here_browser_files = lands_here.clone();
+    let highlight = div()
         .absolute()
         .inset_0()
         .drag_over::<T>(move |style, _, _, cx| if lands_here(cx) { style.border_2().border_color(accent).bg(wash) } else { style })
-        .drag_over::<gpui::ExternalPaths>(move |style, _, _, cx| if lands_here_files(cx) { style.border_2().border_color(accent).bg(wash) } else { style })
+        .drag_over::<gpui::ExternalPaths>(move |style, _, _, cx| if lands_here_files(cx) { style.border_2().border_color(accent).bg(wash) } else { style });
+    #[cfg(target_arch = "wasm32")]
+    let highlight = highlight.drag_over::<gpui::ExternalFiles>(move |style, _, _, cx| if lands_here_browser_files(cx) { style.border_2().border_color(accent).bg(wash) } else { style });
+    highlight
 }

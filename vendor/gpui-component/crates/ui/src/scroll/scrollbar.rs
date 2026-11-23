@@ -373,6 +373,14 @@ impl Scrollbar {
         self
     }
 
+    /// Limit drag repaint frequency for tables on slower displays.
+    pub(crate) fn max_fps(mut self, max_fps: usize) -> Self {
+        self.max_fps = max_fps.clamp(30, 120);
+        self
+    }
+
+    pub(crate) const fn width() -> Pixels { WIDTH }
+
     fn style_for_active(cx: &App) -> (Background, Hsla, Hsla, Pixels, Pixels, Pixels) {
         (
             cx.theme().tokens.scrollbar_thumb_hover.into(),

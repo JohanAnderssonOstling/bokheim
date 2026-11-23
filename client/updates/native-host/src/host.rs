@@ -1,7 +1,7 @@
 //! One durable lifecycle for native hosts; policies supply package differences.
-use update_client::UpdateError;
 use super::*;
 use std::ops::Deref;
+use update_client::UpdateError;
 use update_client::{blocking, native_files::sync_file};
 
 pub trait Platform: Sized {
@@ -44,6 +44,7 @@ impl<P: Platform> NativeHost<P> {
     pub(crate) fn open_for_startup(data: &Path, version: &str, config: DiscoveryConfig, platform: P) -> Result<(Self, UpdateLock, Option<ActiveTaxonomy>), UpdateError> {
         let root = data.join("updates");
         let lock = UpdateLock::acquire(&root)?;
+        recover_selection(&root)?;
         let taxonomy = active(&root)?;
         let mut installed = device(version, taxonomy.as_ref())?;
         installed.target = platform.target();
@@ -105,13 +106,26 @@ impl<P: Platform> NativeHost<P> {
     }
 
     pub fn check_for_updates(&mut self) -> Result<(), UpdateError> {
+        // An authorized local reference can finish even while discovery is offline.
+        if self.coordinator.is_taxonomy_only() && self.coordinator.record().approved.as_ref().is_some_and(|plan| plan.phase != Phase::Quarantined) {
+            self.prepare()?;
+        }
         let lock = self.reload_locked()?;
         self.acknowledge_committed()?;
-        self.coordinator.check_for_updates(&self.root, &lock, &blocking::client(concat!("Bokheim-update/", env!("CARGO_PKG_VERSION")))?, now())
+        self.coordinator.check_for_updates(&self.root, &lock, &blocking::client(concat!("Bokheim-update/", env!("CARGO_PKG_VERSION")))?, now())?;
+        self.coordinator.approve_taxonomy(now())?;
+        Ok(())
     }
 
     pub fn prepare(&mut self) -> Result<UpdateView, UpdateError> {
         let lock = self.reload_locked()?;
+        if self.coordinator.is_taxonomy_only() {
+            let manifest = self.coordinator.approved_manifest()?;
+            if manifest.taxonomy.as_ref().is_some_and(|release| !subject_projection::runtime_format::DOWNLOAD_FORMATS.contains(&release.format_version)) {
+                self.coordinator.quarantine_after_recovery("taxonomy update needs a supported runtime publication".into())?;
+                return Ok(self.view());
+            }
+        }
         if self.coordinator.needs_preparation() {
             let workspace = self.workspace_bytes()?;
             if let Some(reason) = self.platform.preparation_wait(self, workspace)? {
@@ -156,12 +170,13 @@ impl<P: Platform> NativeHost<P> {
             if subject_projection::installed::metadata(&path)? != (release.release_id, release.format_version) {
                 return Err("taxonomy version differs from signed manifest".into());
             }
-            subject_projection::installed::prepare(&path)?;
+            subject_projection::installed::validate(&path, (release.release_id, release.format_version))?;
             sync_file(&path)?;
             activation::sync_dir(&directory)?;
             activation::sync_dir(&self.root.join("generations"))?;
             self.coordinator.begin_activation()?;
-            activation::write_json(&self.root.join("active-taxonomy.json"), &ActiveTaxonomy { path, release: release.release_id })?;
+            let selected = next_selection(&self.root, &ActiveTaxonomy { path, release: release.release_id }, Some(release.artifact.clone()))?;
+            activation::write_json(&self.root.join("active-taxonomy.json"), &selected)?;
         } else {
             if subject_projection::installed::metadata(&path)? != (release.release_id, release.format_version) {
                 return Err("published taxonomy differs from approved release".into());
@@ -169,7 +184,11 @@ impl<P: Platform> NativeHost<P> {
             self.coordinator.begin_activation()?;
         }
         installed.taxonomy_release = release.release_id;
-        self.coordinator.activated(installed)
+        self.coordinator.activated(installed)?;
+        if let Err(error) = self.cleanup_committed() {
+            log::warn!("taxonomy cache cleanup will retry: {error}");
+        }
+        Ok(())
     }
 
     pub(crate) fn reload_locked(&mut self) -> Result<UpdateLock, UpdateError> {
@@ -253,7 +272,10 @@ impl<P: Platform> NativeHost<P> {
     }
 
     pub(crate) fn cleanup_committed(&self) -> Result<(), UpdateError> {
-        let active = active(&self.root)?.map(|taxonomy| taxonomy.path);
+        let selected = selection(&self.root)?;
+        let active = selected.as_ref().map(|selected| PathBuf::from(&selected.current.path));
+        let previous = selected.as_ref().and_then(|selected| selected.previous.as_ref()).map(|reference| PathBuf::from(&reference.path));
+        let running = subject_projection::installed::active_path();
         let pending = self.coordinator.record().approved.as_ref().map(|plan| plan.id.as_str());
         for directory in ["generations", "staging"] {
             let parent = self.root.join(directory);
@@ -263,10 +285,16 @@ impl<P: Platform> NativeHost<P> {
             for entry in fs::read_dir(parent).map_err(UpdateError::operation)? {
                 let entry = entry.map_err(UpdateError::operation)?;
                 let name = entry.file_name();
-                if !entry.file_type().map_err(UpdateError::operation)?.is_dir() || pending == name.to_str() || update_client::decode_hex::<32>(&name.to_string_lossy()).is_err() {
+                if !entry.file_type().map_err(UpdateError::operation)?.is_dir() || pending == name.to_str() || update_client::decode_hex::<32>(name.to_string_lossy().strip_prefix("bundled-").unwrap_or(&name.to_string_lossy())).is_err() {
                     continue;
                 }
                 let path = entry.path();
+                if running.and_then(Path::parent) == Some(path.as_path()) {
+                    continue;
+                }
+                if previous.as_ref().and_then(|previous| previous.parent()) == Some(path.as_path()) {
+                    continue;
+                }
                 if active.as_ref().and_then(|path| path.parent()) == Some(path.as_path()) {
                     for file in fs::read_dir(path).map_err(UpdateError::operation)? {
                         let file = file.map_err(UpdateError::operation)?;

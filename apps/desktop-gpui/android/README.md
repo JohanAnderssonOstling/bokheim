@@ -300,21 +300,26 @@ shows its Settings controls. The native-to-Java updater entry point also
 rejects all commands. The Play manifest removes the APK installation permission,
 the private updater services/activity and its staging FileProvider.
 
-Play also removes `MANAGE_EXTERNAL_STORAGE`, its launch prompt and the Manage
-file access setting. New libraries, imports, downloads and synchronized libraries
-use `files/libraries` in app-owned storage, even if an earlier direct installation
-saved a shared-storage default. Registered libraries are never moved or deleted.
-Existing shared folders need to be selected again with the system picker to
-import copies; switching distributions does not grant raw filesystem access.
+Play removes `MANAGE_EXTERNAL_STORAGE`. Both Android distributions select a
+writable library folder through the system picker on first launch, before the
+native backend starts. The picker starts at Documents; create or select Bokheim
+to use Documents/Bokheim. Cancelling leaves the setup screen open. There is no
+automatic fallback to private library storage.
 
-The system file picker opens individual books, and the folder picker imports
-supported books into a managed library while preserving subfolders. The review
-explains that originals stay in the selected folder. Play always uses the
-provider-backed import path, including when an old all-files grant exists.
-Completed imports are ordinary app-owned files and do not depend on the source
-provider or a persistent URI grant when reopened. These local copies are removed
-if the app is uninstalled; synchronization or separately retained originals are
-needed to recover them.
+The application retains the folder's read/write URI grant and automatically
+creates future libraries beneath it. Settings displays the default location and
+each library's folder. Changing the default affects future libraries only;
+registered libraries are never moved or deleted. Selecting an existing library
+opens it in place, rather than importing private copies. Files in the selected
+shared folder remain after uninstall; Android's grants must be requested again
+following reinstall or revocation.
+
+Rust filesystem access dispatches document-tree locators through the Android
+provider bridge. Book handles use owned file descriptors, while directory
+operations and temporary-file cleanup use the provider. SQLite databases and
+cross-process leases stay in app-private storage. Provider locators are never
+passed directly to OS filesystem calls. An unavailable saved default is retained
+so it can be changed in Settings; startup never recreates a missing volume.
 
 Run both distributions' Android tests with:
 
@@ -356,12 +361,7 @@ HTTP and HTTPS stores are supported; unsupported URL schemes stay out of the bro
 The app's `bokheim_network_security_config.xml` permits HTTP and explicitly replaces
 the network security configuration contributed by `rustls-platform-verifier`.
 Android ignores `usesCleartextTraffic` when a network security configuration is present.
-Settings → Transfers controls automatic transfers on metered connections and is
-off by default. Android's connectivity service supplies the connection cost.
-Automatic uploads and cover/catalog updates wait and resume when allowed. Opening and reading books, explicit downloads from the
-library, catalog or browser, and approved app updates always proceed on
-metered connections. Pending user-requested downloads retain this exemption
-across retries and restarts.
+Automatic transfers are allowed on metered connections.
 
 Book downloads reuse the browser's cookies and user agent, follow HTTP redirects,
 and stream into the selected library's hidden staging folder. Completed EPUB, PDF,
@@ -512,13 +512,25 @@ the file lock serializes extraction both within and between processes.
 
 Android enables the shared offline EPUB/PDF narration controls. The release and
 debug APKs bundle Piper Alba, together with checksum-verified
-ARM64 Sherpa-ONNX runtime libraries. Sherpa and ONNX Runtime load on the synthesis
+ARM64 Sherpa-ONNX runtime libraries. Direct builds compile a minimal ONNX Runtime
+from the pinned sources in `native-source.json`, including only Alba's required
+operators and tensor types. Alba is converted to a portable, pre-optimized ORT
+graph with its original FP32 weights. The runtime and graph are cached together;
+the bundled voice marker changes when either changes, so app updates replace an
+older extracted ONNX voice. The separate F-Droid source build retains its
+Microsoft Maven runtime and ONNX model.
+Sherpa and ONNX Runtime load on the synthesis
 worker when narration is first requested; they are packaged in the APK without
 being startup link dependencies. The voice bundle retains only the English
 eSpeak dictionary and English language definitions, together with shared
 phoneme/voice resources.
 Gradle prepares these with `apps/reader/crates/speech/prepare_android.py`;
-the first build requires downloading the runtime and voice unless they are cached.
+the first direct build requires downloading native sources, the pinned Python
+model-conversion tools, and the voice unless cached. Native source compilation
+currently requires an x86-64 Linux host, the Android SDK/NDK, CMake, Ninja, and
+Python with venv support. `-Pbokheim.speechSourceWork=/local/cache/path` selects
+the native work directory, and `-Pbokheim.nativeJobs=N` overrides the default of
+all available CPU cores. Build work and outputs must use local storage.
 The voice bundle is extracted from APK assets into private storage
 excluded from Android backups by a background worker on first launch. A completed
 copy is reused until that voice's bundled checksum changes. Extraction never blocks the

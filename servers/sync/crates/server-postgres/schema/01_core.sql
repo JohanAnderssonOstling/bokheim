@@ -2,11 +2,11 @@
 -- file's foreign keys ultimately point back to users/libraries, so this
 -- file must be applied first.
 --
--- A new installation starts at schema version 20 (global local-book IDs).
+-- A new installation starts at schema version 23 (optional metadata updates).
 CREATE TABLE bokheim_schema_version (
-    version integer PRIMARY KEY CHECK (version = 20)
+    version integer PRIMARY KEY CHECK (version = 23)
 );
-INSERT INTO bokheim_schema_version(version) VALUES (20);
+INSERT INTO bokheim_schema_version(version) VALUES (23);
 
 CREATE TABLE users (
     id text PRIMARY KEY,

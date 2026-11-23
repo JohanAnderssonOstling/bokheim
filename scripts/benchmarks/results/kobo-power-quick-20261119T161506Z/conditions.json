@@ -1,0 +1,19 @@
+{
+  "run_id": "20261119T161506Z",
+  "output": "/home/johan/Hem/Programmering/RustroverProjects/Html-Prototype/scripts/benchmarks/results/kobo-power-quick-20261119T161506Z",
+  "remote_prefix": "/tmp/bokheim-power-quick-20261119T161506Z",
+  "sampler_pid": "9335",
+  "scope": "Quick idle comparison; frontlight off, Wi-Fi on; no page turns; installed binary",
+  "comparison": "Rough idle estimate; about one minute per app, not a reading/page-turn benchmark",
+  "lighting": "Frontlight brightness 0 in both captures",
+  "wireless": "Wi-Fi connected; SSH disconnected during each capture",
+  "driver_quirk": "Ricoh619 vendor current_now returns remaining charge in mAh; recorder converts this to charge_now in uAh",
+  "vendor_kernel_source": "https://github.com/kobolabs/Kobo-Reader/blob/master/hw/imx6sll-libra2/kernel.tar.bz2",
+  "bokheim_sample_shortened": true,
+  "limitations": [
+    "Whole-device consumption, including Wi-Fi and sampler overhead.",
+    "One mAh gauge steps give coarse estimates in such short captures.",
+    "Different static screens; no controlled page-turn workload.",
+    "Single pass, not repeated measurements."
+  ]
+}

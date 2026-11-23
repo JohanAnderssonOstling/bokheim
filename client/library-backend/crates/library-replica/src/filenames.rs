@@ -1,6 +1,5 @@
 //! Portable file components and bounded UTF-8 names.
 
-
 pub(crate) const MAX_FILE_NAME_BYTES: usize = 240;
 
 pub(crate) fn is_reserved(value: &str) -> bool {

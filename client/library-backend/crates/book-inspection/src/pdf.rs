@@ -1,14 +1,15 @@
-use crate::{author_from_field, author_names, fallback_metadata, CachedPdfReader, MetadataResult, PdfSourceIdentity};
-use crate::evidence::{EvidenceProgress, SectionEvidence, MAX_SECTION_BYTES};
-use book_model::{canonical_doi, canonical_uuid, unique_book_year, BookMetadata, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, LanguageTag, Scheme, Scope, CONTRIBUTOR_MARC_RELATOR_CODE};
+use crate::evidence::{EvidenceProgress, MAX_SECTION_BYTES, SectionEvidence};
+use crate::{CachedPdfReader, MetadataResult, PdfSourceIdentity, author_from_field, author_names, fallback_metadata};
+use book_model::{BookMetadata, BookRecord, BookSubject, BookTocEntry, CONTRIBUTOR_MARC_RELATOR_CODE, Contributor, Identifier, LanguageTag, Scheme, Scope, canonical_doi, canonical_uuid, unique_book_year};
+use book_normalization::{normalize, record_filename_isbns, unusable_title};
+use client_platform_runtime::filesystem as fs;
 use content_address::BookId;
 use lopdf::{Dictionary, Document};
-use pdf_view_common::PdfReaderMetadata;
 use pdf_reader_core::{PdfPageTextVisitor, PdfResult};
+use pdf_view_common::PdfReaderMetadata;
 use roxmltree::{Document as XmlDocument, Node};
 use std::collections::HashSet;
 use std::error::Error;
-use std::fs::File;
 use std::io::SeekFrom;
 use std::io::{Read, Seek};
 use std::path::Path;
@@ -33,7 +34,7 @@ pub struct InspectedPdf {
 /// Extracts bounded, allow-listed bibliographic metadata from the PDF info
 /// dictionary and XMP packet. Opening pages use the shared context-aware evidence rules; arbitrary XMP extensions are never promoted.
 pub fn inspect_pdf(path: &Path) -> MetadataResult<InspectedPdf> {
-    inspect_pdf_reader(path, File::open(path)?)
+    inspect_pdf_reader(path, fs::open(path)?)
 }
 
 /// Opening page evidence joins the file facts used for metadata lookup.
@@ -113,11 +114,7 @@ impl PdfPageEvidence {
     }
 
     fn pages(&self) -> Vec<usize> {
-        if self.progress.complete() {
-            Vec::new()
-        } else {
-            EARLY_TEXT_PAGES.to_vec()
-        }
+        if self.progress.complete() { Vec::new() } else { EARLY_TEXT_PAGES.to_vec() }
     }
 
     fn finish(mut self) -> InspectedPdf {
@@ -199,8 +196,8 @@ fn inspect_pdf_document(path: &Path, document: Document) -> MetadataResult<Inspe
         let mut seen = HashSet::new();
         values.retain(|value| seen.insert((value.name().to_owned(), value.role_code())));
     };
-    let valid_titles = title_values.iter().filter(|value| !crate::title_identity::unusable_title(&value.text, &contributors)).cloned().collect::<Vec<_>>();
-    let title = preferred_language_value(&valid_titles).or_else(|| info_title.clone().filter(|title| !crate::title_identity::unusable_title(title, &contributors))).unwrap_or_else(|| fallback_metadata(path).metadata.title);
+    let valid_titles = title_values.iter().filter(|value| !unusable_title(&value.text, &contributors)).cloned().collect::<Vec<_>>();
+    let title = preferred_language_value(&valid_titles).or_else(|| info_title.clone().filter(|title| !unusable_title(title, &contributors))).unwrap_or_else(|| fallback_metadata(path).metadata.title);
 
     let mut book = BookMetadata::default();
     if let Some(xml) = parsed.as_ref() {
@@ -251,7 +248,7 @@ fn inspect_pdf_document(path: &Path, document: Document) -> MetadataResult<Inspe
     }
 
     for original in title_values.iter().map(|value| value.text.as_str()).chain(info_title.as_deref()) {
-        crate::filename_isbn::record(original, &mut book)?;
+        record_filename_isbns(original, &mut book)?;
     }
 
     // Check complete dictionary/XMP property values regardless of their names.
@@ -294,7 +291,7 @@ fn inspect_pdf_document(path: &Path, document: Document) -> MetadataResult<Inspe
         book.subjects.retain(|value| subjects.insert(value.name().to_owned()));
     };
     let mut metadata = BookRecord { metadata: book_model::BookDetails { title, subtitle: None, contributors, book }, description };
-    crate::title_identity::normalize(&mut metadata).map_err(|error| -> Box<dyn Error + Send + Sync> { error.into() })?;
+    normalize(&mut metadata).map_err(|error| -> Box<dyn Error + Send + Sync> { error.into() })?;
     Ok(InspectedPdf { metadata })
 }
 
@@ -365,7 +362,7 @@ fn bounded_text(value: &str, max_bytes: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::{dictionary, text_string, Object, Stream};
+    use lopdf::{Object, Stream, dictionary, text_string};
     use tempfile::tempdir;
 
     #[test]
@@ -419,7 +416,7 @@ mod tests {
             document.trailer.set("Info", info);
             let inspected = inspect_pdf_document(Path::new("Algorithms_ A Guide (Jeff Erickson) (2019).pdf"), document).unwrap();
             assert_eq!(inspected.metadata.title, "Algorithms");
-            let expected = crate::filename_isbn::from_filename(title);
+            let expected = book_normalization::isbns_from_filename(title);
             assert_eq!(inspected.metadata.book.identifiers.iter().filter(|id| id.scheme() == &Scheme::Isbn).map(|id| id.value().to_owned()).collect::<Vec<_>>(), expected);
             assert_eq!(inspected.metadata.subtitle(), Some("A Guide"));
             assert_eq!(inspected.metadata.contributors[0].name(), "Jeff Erickson");
@@ -540,5 +537,5 @@ mod tests {
 
 /// Read dictionary and XMP values without page text.
 pub fn inspect_pdf_metadata(path: &Path) -> MetadataResult<InspectedPdf> {
-    inspect_pdf_document(path, super::pdf_ranges::metadata(File::open(path)?)?)
+    inspect_pdf_document(path, super::pdf_ranges::metadata(fs::open(path)?)?)
 }

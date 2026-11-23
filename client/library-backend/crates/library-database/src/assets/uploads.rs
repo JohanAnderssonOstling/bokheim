@@ -12,14 +12,61 @@ pub struct BookStorageMetadata {
     pub checksum: Option<ContentHash>,
 }
 
+/// Current upload intent and validated candidate paths for one book.
+#[derive(Clone, Debug)]
+pub struct BookUploadSnapshot {
+    pub intent: Option<BookUploadIntent>,
+    pub paths: Vec<RelativeBookPath>,
+}
+
 impl Database {
+    /// Replace only an unchanged, never-published local upload. Canonical or
+    /// recovered server revisions must never adopt arbitrary local edits.
+    pub fn refresh_book_upload(&self, previous: BookUploadIntent, replacement: BookUploadIntent) -> Result<bool, DatabaseError> {
+        let Some(checksum) = replacement.byte_checksum else { return Ok(false) };
+        if !previous.book_id.is_local() || previous.book_id != replacement.book_id || replacement.size_bytes == 0 {
+            return Ok(false);
+        }
+        self.write(|tx| {
+            let updated = tx.execute(
+                "UPDATE book_transfer SET upload_id=(SELECT sequence+1 FROM upload_clock WHERE singleton=1),
+                    upload_prepared=(SELECT sequence+1 FROM upload_clock WHERE singleton=1),upload_size=?3,upload_checksum=?4
+                 WHERE content_hash=?1 AND upload_id=?2 AND upload_size=?5 AND upload_checksum IS ?6 AND server_has_book=0
+                   AND NOT EXISTS(SELECT 1 FROM book_content WHERE book_id=?1)
+                   AND NOT EXISTS(SELECT 1 FROM local_content_origin WHERE book_id=?1)
+                   AND EXISTS(SELECT 1 FROM book WHERE content_hash=?1 AND deleted_at IS NULL)",
+                rusqlite::params![
+                    previous.book_id,
+                    previous.id,
+                    i64::try_from(replacement.size_bytes).map_err(DatabaseError::operation)?,
+                    replacement.byte_checksum,
+                    i64::try_from(previous.size_bytes).map_err(DatabaseError::operation)?,
+                    previous.byte_checksum
+                ],
+            )?;
+            if updated != 0 {
+                crate::content_identity::record_alias(tx, previous.book_id, checksum)?;
+            }
+            Ok(updated != 0)
+        })
+    }
+
+    pub fn book_upload_snapshot(&self, hash: &BookId) -> Result<BookUploadSnapshot, DatabaseError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let intent = query_last(|read| transaction.transfer_upload_snapshot_intent(hash, read), |row| Ok(BookUploadIntent { byte_checksum: row.get(2)?, id: row.get(0)?, book_id: *hash, size_bytes: row.get::<_, i64>(1)? as u64 }))?;
+        let paths = crate::placements::book_paths_in(&transaction, hash)?;
+        transaction.commit()?;
+        Ok(BookUploadSnapshot { intent, paths })
+    }
+
     /// Gather storage-summary metadata in one read snapshot, before file I/O.
     pub fn book_storage_metadata(&self, for_download: bool) -> Result<Vec<BookStorageMetadata>, DatabaseError> {
         self.with_browse_snapshot(|| {
+            let mut folders = crate::placements::FolderPaths::all(&self.connection)?;
             self.cloud_quota_books()?
                 .into_iter()
                 .map(|book| {
-                    let paths = self.book_paths(&book.book_id)?;
+                    let paths = crate::placements::book_paths_with_folders(&self.connection, &book.book_id, Some(&mut folders))?;
                     let checksum = if for_download && book.server_has_book { self.book_transfer_state_in_snapshot(book.book_id)?.expected_checksum() } else { None };
                     Ok(BookStorageMetadata { book, paths, checksum })
                 })
@@ -76,6 +123,14 @@ impl Database {
 
 // Async access owns its arguments until the synchronous database call completes.
 database_methods! {
+    fn refresh_book_upload(previous: BookUploadIntent, replacement: BookUploadIntent) -> bool;
+    arguments (BookUploadIntent, BookUploadIntent) = (previous, replacement);
+    execute database, arguments => database.refresh_book_upload(arguments.0, arguments.1);
+
+    fn book_upload_snapshot(hash: &BookId) -> BookUploadSnapshot;
+    arguments (BookId,) = (*hash,);
+    execute database, arguments => database.book_upload_snapshot(&arguments.0);
+
     fn book_storage_metadata(for_download: bool) -> Vec<BookStorageMetadata>;
     arguments (bool,) = (for_download,);
     execute database, arguments => database.book_storage_metadata(arguments.0);

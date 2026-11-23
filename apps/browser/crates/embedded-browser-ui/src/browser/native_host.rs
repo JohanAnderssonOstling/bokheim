@@ -56,8 +56,7 @@ impl NativeHost {
         // Keep GDK's real top-level window and event handling. Only change the
         // X11 parent, so GTK draws within GPUI without creating another window.
         let clip = connection.generate_id()?;
-        connection.create_window(COPY_DEPTH_FROM_PARENT, clip, parent, 0, 0, 1, 1, 0,
-            WindowClass::INPUT_OUTPUT, COPY_FROM_PARENT, &CreateWindowAux::new().background_pixel(0))?.check()?;
+        connection.create_window(COPY_DEPTH_FROM_PARENT, clip, parent, 0, 0, 1, 1, 0, WindowClass::INPUT_OUTPUT, COPY_FROM_PARENT, &CreateWindowAux::new().background_pixel(0))?.check()?;
         connection.reparent_window(child, clip, 0, 0)?.check()?;
         let host = Self { window, container, connection, child, clip, parent, overlays: RefCell::default(), mask: RefCell::default() };
         host.set_bounds(bounds)?;
@@ -70,7 +69,9 @@ impl NativeHost {
         let _ = self.connection.flush();
     }
 
-    pub(super) fn parent(&self) -> u32 { self.parent }
+    pub(super) fn parent(&self) -> u32 {
+        self.parent
+    }
 
     pub(super) fn set_bounds(&self, bounds: Rect) -> Result<()> {
         let position = bounds.position.to_physical::<i32>(1.0);
@@ -88,30 +89,37 @@ impl NativeHost {
     /// The GTK surface retains its native focus events and full viewport.
     pub(super) fn set_overlay(&self, key: &'static str, page: Rect, overlay: Option<Bounds<Pixels>>, scale: f32) {
         let mut overlays = self.overlays.borrow_mut();
-        if let Some(bounds) = overlay { overlays.insert(key, bounds); } else { overlays.remove(key); }
+        if let Some(bounds) = overlay {
+            overlays.insert(key, bounds);
+        } else {
+            overlays.remove(key);
+        }
         let size = page.size.to_physical::<u32>(1.0);
         let position = page.position.to_physical::<i32>(1.0);
         let width = size.width.min(u16::MAX as u32) as u16;
         let height = size.height.min(u16::MAX as u32) as u16;
-        let holes: Vec<_> = overlays.values().filter_map(|bounds| {
-            // Include the border outside the measurement canvas.
-            let left = (f32::from(bounds.left()) * scale - position.x as f32 - scale).floor().clamp(0.0, width as f32) as i16;
-            let top = (f32::from(bounds.top()) * scale - position.y as f32 - scale).floor().clamp(0.0, height as f32) as i16;
-            let right = (f32::from(bounds.right()) * scale - position.x as f32 + scale).ceil().clamp(left as f32, width as f32) as u16;
-            let bottom = (f32::from(bounds.bottom()) * scale - position.y as f32 + scale).ceil().clamp(top as f32, height as f32) as u16;
-            let hole_width = right - left as u16;
-            let hole_height = bottom - top as u16;
-            (hole_width > 0 && hole_height > 0).then_some((left, top, hole_width, hole_height))
-        }).collect();
+        let holes: Vec<_> = overlays
+            .values()
+            .filter_map(|bounds| {
+                // Include the border outside the measurement canvas.
+                let left = (f32::from(bounds.left()) * scale - position.x as f32 - scale).floor().clamp(0.0, width as f32) as i16;
+                let top = (f32::from(bounds.top()) * scale - position.y as f32 - scale).floor().clamp(0.0, height as f32) as i16;
+                let right = (f32::from(bounds.right()) * scale - position.x as f32 + scale).ceil().clamp(left as f32, width as f32) as u16;
+                let bottom = (f32::from(bounds.bottom()) * scale - position.y as f32 + scale).ceil().clamp(top as f32, height as f32) as u16;
+                let hole_width = right - left as u16;
+                let hole_height = bottom - top as u16;
+                (hole_width > 0 && hole_height > 0).then_some((left, top, hole_width, hole_height))
+            })
+            .collect();
         let mask = OverlayMask { width, height, holes };
-        if self.mask.borrow().as_ref() == Some(&mask) { return; }
+        if self.mask.borrow().as_ref() == Some(&mask) {
+            return;
+        }
         let result = (|| -> Result<()> {
             if !mask.holes.is_empty() {
                 let holes: Vec<_> = mask.holes.iter().map(|&(x, y, width, height)| Rectangle { x, y, width, height }).collect();
-                self.connection.shape_rectangles(SO::SET, SK::BOUNDING, ClipOrdering::UNSORTED, self.clip, 0, 0,
-                    &[Rectangle { x: 0, y: 0, width, height }])?.check()?;
-                self.connection.shape_rectangles(SO::SUBTRACT, SK::BOUNDING, ClipOrdering::UNSORTED, self.clip, 0, 0,
-                    &holes)?.check()?;
+                self.connection.shape_rectangles(SO::SET, SK::BOUNDING, ClipOrdering::UNSORTED, self.clip, 0, 0, &[Rectangle { x: 0, y: 0, width, height }])?.check()?;
+                self.connection.shape_rectangles(SO::SUBTRACT, SK::BOUNDING, ClipOrdering::UNSORTED, self.clip, 0, 0, &holes)?.check()?;
             } else {
                 self.connection.shape_mask(SO::SET, SK::BOUNDING, self.clip, 0, 0, NONE)?.check()?;
             }
@@ -123,7 +131,6 @@ impl NativeHost {
             Err(error) => eprintln!("Could not reveal browser overlays: {error}"),
         }
     }
-
 }
 
 impl Drop for NativeHost {
@@ -131,7 +138,9 @@ impl Drop for NativeHost {
         // Destroy GTK's window synchronously before its X11 parent. close()
         // queues an event and would leave GDK observing a destroyed child.
         let display = self.window.display();
-        unsafe { self.window.destroy(); }
+        unsafe {
+            self.window.destroy();
+        }
         // GDK and the clipping surface use separate X11 connections.
         display.sync();
         let _ = self.connection.destroy_window(self.clip);

@@ -4,7 +4,7 @@ use ui_text::text;
 
 use crate::invalidation::notify;
 use app_preferences::ReaderPreferencePatch;
-use app_preferences::{READER_SPACING_MAX, READER_SPACING_MIN};
+use app_preferences::{PDF_ZOOM_MAX, PDF_ZOOM_MIN, READER_SPACING_MAX, READER_SPACING_MIN};
 use gpui::prelude::*;
 use gpui::{Context, Window};
 use pdf_view_gpui::{MAX_VISIBLE_PAGE_COUNT, MIN_VISIBLE_PAGE_COUNT, PdfZoomMode, ReadingRulerStyle};
@@ -28,7 +28,6 @@ impl PdfReaderView {
         if settings_navigation::DESKTOP_FULLSCREEN {
             rows.push(SettingsRow::Fullscreen);
         }
-        reading_ruler::append_rows(&mut rows, ReaderSettings::preferences(cx).pdf_reading_ruler != ReadingRulerStyle::Off);
         rows.extend([SettingsRow::PdfFit, SettingsRow::PdfMargins]);
         match self.pdf.read(cx).zoom_mode() {
             PdfZoomMode::FitWidth { .. } => rows.push(SettingsRow::PdfPages),
@@ -36,6 +35,7 @@ impl PdfReaderView {
             PdfZoomMode::FitHeight => {}
         }
         rows.extend([SettingsRow::SideMargins, SettingsRow::VerticalMargins, SettingsRow::ColumnGap]);
+        reading_ruler::append_rows(&mut rows, ReaderSettings::preferences(cx).pdf_reading_ruler != ReadingRulerStyle::Off);
         rows
     }
 
@@ -53,8 +53,9 @@ impl PdfReaderView {
                 SettingsRow::Theme => settings_navigation::adjust_theme(direction, cx),
                 SettingsRow::Fullscreen => settings_navigation::set_fullscreen(direction > 0, window),
                 row @ (SettingsRow::SideMargins | SettingsRow::VerticalMargins | SettingsRow::ColumnGap) => self.adjust_spacing(row, direction as f32 * SPACING_STEP_PX, cx),
-                SettingsRow::ReadingRuler => self.set_reading_ruler_enabled(direction > 0, cx),
-                SettingsRow::ReadingRulerStyle => self.set_reading_ruler(adjacent_value(&[ReadingRulerStyle::Band, ReadingRulerStyle::Focus, ReadingRulerStyle::Underline], ReaderSettings::preferences(cx).pdf_reading_ruler, direction), cx),
+                SettingsRow::ReadingRulerStyle => {
+                    self.set_reading_ruler(adjacent_value(&[ReadingRulerStyle::Off, ReadingRulerStyle::Band, ReadingRulerStyle::Focus, ReadingRulerStyle::Underline], ReaderSettings::preferences(cx).pdf_reading_ruler, direction), cx)
+                }
                 SettingsRow::ReadingRulerLines => self.set_reading_ruler_lines(adjacent_step(&[1, 2, 3, 4, 5], ReaderSettings::preferences(cx).pdf_reading_ruler_lines, direction), cx),
                 SettingsRow::PdfMargins => self.set_trim_margins(direction > 0, cx),
                 SettingsRow::PdfFit => {
@@ -207,7 +208,7 @@ impl PdfReaderView {
             .into_iter()
             .enumerate()
             .map(|(index, (row, label, value))| {
-                components::reader_setting_row(label).map(|content| self.settings_navigation.row(row, &rows, content, theme)).child(components::settings_stepper(
+                components::reader_setting_row(label, theme).map(|content| self.settings_navigation.row(row, &rows, content, theme)).child(components::reader_settings_stepper(
                     components::settings_stepper_button(("pdf-spacing-decrease", index), text!(reader::minus), value <= READER_SPACING_MIN).on_click(cx.listener(move |this, _, _, cx| this.adjust_spacing(row, -SPACING_STEP_PX, cx))),
                     format!("{value:.0}px"),
                     components::settings_stepper_button(("pdf-spacing-increase", index), "+", value >= READER_SPACING_MAX).on_click(cx.listener(move |this, _, _, cx| this.adjust_spacing(row, SPACING_STEP_PX, cx))),
@@ -215,14 +216,13 @@ impl PdfReaderView {
                 ))
             })
             .collect::<Vec<_>>();
-        let general = components::reader_settings_tab_body(theme)
+        let general = components::reader_settings_tab_body(theme, window)
             .when(!cfg!(feature = "kobo"), |body| body.child(components::reader_settings_group(theme).child(self.settings_navigation.row(SettingsRow::Theme, &rows, crate::shell::theme_picker::reader_theme_picker(cx, theme), theme))))
             .children(self.settings_navigation.fullscreen_group(&rows, window, theme))
-            .child(self.reading_ruler_settings(theme, cx))
             .child(
                 components::reader_settings_group(theme)
-                    .child(
-                        components::reader_setting_row_smallcaps(text!(reader::fit), theme).map(|row| self.settings_navigation.row(SettingsRow::PdfFit, &rows, row, theme)).child(
+                    .child(components::reader_settings_intrinsic_columns([
+                        components::reader_setting_row(text!(reader::fit), theme).map(|row| self.settings_navigation.row(SettingsRow::PdfFit, &rows, row, theme)).child(
                             components::reader_tile_group("pdf-fit").children([
                                 components::reader_picture_tile(
                                     ("pdf-fit", 0usize),
@@ -238,9 +238,7 @@ impl PdfReaderView {
                                     .on_click(cx.listener(move |this, _, _, cx| this.set_zoom_mode(PdfZoomMode::Fixed { zoom }, cx))),
                             ]),
                         ),
-                    )
-                    .child(
-                        components::reader_setting_row_smallcaps(text!(reader::margins), theme).map(|row| self.settings_navigation.row(SettingsRow::PdfMargins, &rows, row, theme)).child(
+                        components::reader_setting_row(text!(reader::margins), theme).map(|row| self.settings_navigation.row(SettingsRow::PdfMargins, &rows, row, theme)).child(
                             components::reader_tile_group("pdf-margins").children([
                                 components::reader_picture_tile(("pdf-margins", 0usize), components::reader_tile_picture("icons/reader-settings/pdf-margins-show.svg"), text!(reader::show_margins), !trim_margins, theme)
                                     .on_click(cx.listener(|this, _, _, cx| this.set_trim_margins(false, cx))),
@@ -248,25 +246,26 @@ impl PdfReaderView {
                                     .on_click(cx.listener(|this, _, _, cx| this.set_trim_margins(true, cx))),
                             ]),
                         ),
-                    )
+                    ]))
                     .children(matches!(zoom_mode, PdfZoomMode::FitWidth { .. }).then(|| {
-                        components::reader_setting_row(text!(reader::pages)).map(|row| self.settings_navigation.row(SettingsRow::PdfPages, &rows, row, theme)).child(components::settings_stepper(
-                            components::settings_stepper_button("pdf-pages-decrease", text!(reader::minus), false).on_click(cx.listener(|this, _, _, cx| this.adjust_visible_page_count(-1, cx))),
+                        components::reader_setting_row(text!(reader::pages), theme).map(|row| self.settings_navigation.row(SettingsRow::PdfPages, &rows, row, theme)).child(components::reader_settings_stepper(
+                            components::settings_stepper_button("pdf-pages-decrease", text!(reader::minus), visible_page_count <= MIN_VISIBLE_PAGE_COUNT).on_click(cx.listener(|this, _, _, cx| this.adjust_visible_page_count(-1, cx))),
                             visible_page_count.to_string(),
-                            components::settings_stepper_button("pdf-pages-increase", "+", false).on_click(cx.listener(|this, _, _, cx| this.adjust_visible_page_count(1, cx))),
+                            components::settings_stepper_button("pdf-pages-increase", "+", visible_page_count >= MAX_VISIBLE_PAGE_COUNT).on_click(cx.listener(|this, _, _, cx| this.adjust_visible_page_count(1, cx))),
                             theme,
                         ))
                     }))
                     .children(matches!(zoom_mode, PdfZoomMode::Fixed { .. }).then(|| {
-                        components::reader_setting_row(text!(reader::zoom)).map(|row| self.settings_navigation.row(SettingsRow::PdfZoom, &rows, row, theme)).child(components::settings_stepper(
-                            components::settings_stepper_button("pdf-zoom-out", text!(reader::minus), false).tooltip(text!(reader::zoom_out)).on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(-ZOOM_STEP, cx))),
+                        components::reader_setting_row(text!(reader::zoom), theme).map(|row| self.settings_navigation.row(SettingsRow::PdfZoom, &rows, row, theme)).child(components::reader_settings_stepper(
+                            components::settings_stepper_button("pdf-zoom-out", text!(reader::minus), zoom <= PDF_ZOOM_MIN).tooltip(text!(reader::zoom_out)).on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(-ZOOM_STEP, cx))),
                             format!("{:.0}%", zoom * 100.0),
-                            components::settings_stepper_button("pdf-zoom-in", "+", false).tooltip(text!(reader::zoom_in)).on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(ZOOM_STEP, cx))),
+                            components::settings_stepper_button("pdf-zoom-in", "+", zoom >= PDF_ZOOM_MAX).tooltip(text!(reader::zoom_in)).on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(ZOOM_STEP, cx))),
                             theme,
                         ))
                     })),
             )
-            .child(components::reader_settings_group(theme).child(components::reader_stepper_rows().children(spacing)))
+            .child(components::reader_settings_group(theme).child(components::reader_stepper_rows(spacing)))
+            .child(self.reading_ruler_settings(theme, cx))
             .into_any_element();
         general
     }

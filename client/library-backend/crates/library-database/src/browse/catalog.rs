@@ -285,6 +285,8 @@ pub(super) fn load_cards_in(db: &Connection, ids: &[i64]) -> Result<Vec<BookCard
             download_requested: false,
             format_category: file_type_of(row.get(5)?),
             audiobook_duration_ms: row.get::<_, Option<i64>>(7)?.map(u64::try_from).transpose().map_err(|error| invalid_integer_column(7, error.to_string()))?,
+            size_bytes: None,
+            format: row.get::<_, Option<i64>>(5)?.and_then(book_model::BookFormat::from_code),
             added_at: 0,
             source_directory: None,
         });
@@ -315,6 +317,8 @@ fn card(book: &CatalogBook) -> BookCardRow {
         download_requested: false,
         format_category: file_type_of(Some(book.format() as i64)),
         audiobook_duration_ms: book.audiobook_duration_ms,
+        size_bytes: None,
+        format: Some(book.format()),
         added_at: 0,
         source_directory: None,
     }

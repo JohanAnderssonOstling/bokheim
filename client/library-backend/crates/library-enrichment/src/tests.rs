@@ -15,7 +15,7 @@ use library_files::asset_store::AssetStore;
 use library_model::{BlobKind, PublishedStagedBook};
 use library_services::events::LibraryEventRouter;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::BTreeMap,
     io::Cursor,
     sync::{Arc, Mutex},
 };
@@ -214,13 +214,14 @@ async fn metadata_miss_still_downloads_direct_artwork_and_preserves_newer_local_
         cpu: Arc::new(cpu_host::NativeHost),
         events,
     };
-    assert_eq!(lane.enrich_books(&HashSet::from([hash])).await.unwrap(), 2);
+    lane.enrich_books().await.unwrap();
+    lane.fill_covers().await.unwrap();
     let original = assets.read_bytes(BlobKind::Thumbnail, &hash).await.unwrap().unwrap();
     assert!(!original.is_empty());
-    assert!(db.enrichment_candidates(&[hash], 0).await.unwrap().is_empty());
+    assert!(db.enrichment_candidates(0, None).await.unwrap().0.is_empty());
     assert!(provider.requests.lock().unwrap().iter().all(|path| !path.contains("v3/covers")));
     let state = db.thumbnail_work_state(&hash).await.unwrap();
-    let other = cpu_host::cover(&*lane.cpu, provider.fallback_image.clone()).await.unwrap();
+    let other = cpu_contract::cover(&*lane.cpu, provider.fallback_image.clone()).await.unwrap();
     assert_eq!(lane.apply_enriched_cover(hash, &state, Some(&other)).await.unwrap(), None);
     assert_eq!(assets.read_bytes(BlobKind::Thumbnail, &hash).await.unwrap().unwrap(), original);
     task.abort();
@@ -318,7 +319,7 @@ async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_fail
                 .unwrap();
             hashes.push(hash);
         }
-        let original = database.enrichment_candidates(&hashes, 0).await.unwrap();
+        let original = database.enrichment_candidates(0, None).await.unwrap().0;
         let (events, _) = LibraryEventRouter::new();
         let assets = AssetStore::open(root.path().to_str().unwrap()).unwrap();
         let lane = LibraryEnrichment {
@@ -330,8 +331,7 @@ async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_fail
             cpu: Arc::new(cpu_host::NativeHost),
             events,
         };
-        let changed = lane.enrich_books(&hashes.iter().copied().collect()).await.unwrap();
-        assert_eq!(changed, if fail_first { 2 } else { hashes.len() - 2 });
+        lane.enrich_books().await.unwrap();
         server.abort();
         let requests = requests.lock().unwrap();
         assert_eq!(requests.iter().map(|request| request.books.len()).collect::<Vec<_>>(), [MAX_BOOKS_PER_REQUEST, 2]);
@@ -348,12 +348,12 @@ async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_fail
             assert_eq!(title, format!("Story {index}"), "the file's title is immutable");
             let resolved = database.enrichment_cover_record(&expected.book_id).await.unwrap();
             if failed {
-                assert!(resolved.is_none());
+                assert_eq!(resolved, Some(expected.record.clone()));
             } else {
                 assert_eq!(resolved.unwrap().book.year, Some(2000 + index as i32));
             }
         }
-        let retry = database.enrichment_candidates(&hashes, i64::MAX).await.unwrap();
+        let retry = database.enrichment_candidates(i64::MAX, None).await.unwrap().0;
         let expected = if fail_first { hashes[..MAX_BOOKS_PER_REQUEST].to_vec() } else { vec![hashes[1], hashes[2]] };
         assert_eq!(retry.iter().map(|candidate| candidate.book_id).collect::<Vec<_>>(), expected);
         for candidate in retry {

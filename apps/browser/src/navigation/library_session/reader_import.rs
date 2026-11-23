@@ -3,10 +3,10 @@
 use library_management::management::ManagementClient;
 use ui_text::text;
 
-use super::LibrarySession;
+use super::{LibraryOperationDialog, LibrarySession};
 use crate::services::{import_failure_message, notify_error, notify_info, notify_warning};
 use gpui::prelude::*;
-use gpui::{App, Context, DismissEvent, FocusHandle, Focusable, KeyDownEvent, Role, SharedString, Task, Toggled, Window, div, px, rems};
+use gpui::{App, Context, DismissEvent, FocusHandle, Focusable, KeyDownEvent, Role, SharedString, Task, Toggled, Window, div, px};
 use gpui_component::menu::DropdownMenu as _;
 use gpui_component::{Disableable, IconName};
 use library_backend::{BackendError, DirId, LibraryClient, ReaderBookCounts, ReaderImportMode, ReaderImportOptions, ReaderImportSource, ReaderLibrarySummary};
@@ -14,8 +14,8 @@ use ui_components::{self as components, ScrollableElement, user_facing_error};
 
 impl LibrarySession {
     pub(crate) fn open_reader_import(&mut self, source: ReaderImportSource, parent: DirId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((dialog, _)) = &self.reader_import {
-            dialog.read(cx).focus_handle(cx).focus(window, cx);
+        if let Some(dialog) = &self.operation_dialog {
+            dialog.focus.focus(window, cx);
             return;
         }
         if self.library.files_busy(cx) || self.library.importing(cx) {
@@ -24,20 +24,17 @@ impl LibrarySession {
         let management = self.library.management().clone();
         let library = self.library.backend().clone();
         let dialog = cx.new(|cx| ReaderImportDialog::new(management, library, source, parent, cx));
-        let closed = cx.subscribe_in(&dialog, window, |session, dialog, _: &DismissEvent, window, cx| {
-            if session.reader_import.as_ref().is_none_or(|(current, _)| current.entity_id() != dialog.entity_id()) {
-                return;
-            }
-            let restore_focus = dialog.read(cx).focus_handle(cx).contains_focused(window, cx);
+        cx.subscribe_in(&dialog, window, |session, dialog, _: &DismissEvent, _, cx| {
             let request = dialog.update(cx, |dialog, _| dialog.pending_import.take().map(|options| (dialog.library.clone(), dialog.source, options)));
             if let Some((library, source, options)) = request {
                 let updates = session.library.updates();
                 let completion = updates.downgrade();
                 let task = cx.spawn(async move |_, cx| {
                     let result = library.import_reader(source, options).await;
-                    let _ = completion.update_in(cx, |updates, window, cx| {
+                    let _ = completion.update(cx, |updates, cx| {
                         updates.set_import_task(None, cx);
-                        match result {
+                        let owner = cx.entity_id();
+                        cx.with_window(owner, |window, cx| match result {
                             Ok(report) => {
                                 let summary = format!(text!(browse::imported_already_present_failed), report.imported, report.already_present, report.failures.len());
                                 let message =
@@ -49,30 +46,18 @@ impl LibrarySession {
                                 }
                             }
                             Err(error) => notify_error("reader-import-error", format!("{}: {}", source.name(), user_facing_error(&error, text!(browse::could_not_import_the_selected_books_please_try_again))), window, cx),
-                        }
+                        });
                     });
                 });
                 updates.update(cx, |updates, cx| updates.set_import_task(Some(task), cx));
             }
-            session.reader_import = None;
-            if restore_focus {
-                session.focus_page(window, cx);
-            }
-            cx.notify();
-        });
-        dialog.read(cx).focus_handle(cx).focus(window, cx);
-        self.reader_import = Some((dialog, closed));
-        cx.notify();
-    }
-
-    pub(super) fn dismiss_reader_import(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some((dialog, _)) = &self.reader_import else { return false };
-        dialog.update(cx, |dialog, cx| dialog.dismiss(cx));
-        true
+        })
+        .detach();
+        self.show_operation_dialog(dialog, 26.25, true, window, cx);
     }
 }
 
-pub(super) struct ReaderImportDialog {
+struct ReaderImportDialog {
     focus: FocusHandle,
     source: ReaderImportSource,
     library: LibraryClient,
@@ -82,13 +67,19 @@ pub(super) struct ReaderImportDialog {
     group: Option<String>,
     mode: ReaderImportMode,
     mode_focus: [FocusHandle; 2],
-    pub(super) importing: bool,
+    importing: bool,
     pending_import: Option<ReaderImportOptions>,
     error: Option<SharedString>,
     _load: Task<()>,
 }
 
 impl gpui::EventEmitter<DismissEvent> for ReaderImportDialog {}
+
+impl LibraryOperationDialog for ReaderImportDialog {
+    fn dismiss(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss(cx);
+    }
+}
 
 impl Focusable for ReaderImportDialog {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -224,7 +215,7 @@ impl Render for ReaderImportDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
         let locked = self.loading || self.summary.is_none() || self.importing || self.pending_import.is_some();
-        let heading = div().flex().items_center().justify_between().gap(px(components::SPACE_MD)).child(div().text_size(rems(1.5)).child(format!(text!(browse::import_from), self.source.name()))).child(
+        let heading = div().flex().items_center().justify_between().gap(px(components::SPACE_MD)).child(components::dialog_title(format!(text!(browse::import_from), self.source.name()), theme)).child(
             components::outlined_icon_button("reader-close", text!(common::close), IconName::Close).disabled(self.importing).on_click(cx.listener(|view, _, _, cx| {
                 if !view.importing {
                     view.dismiss(cx);
@@ -301,10 +292,8 @@ impl Render for ReaderImportDialog {
             body = body.child(components::error_text(theme).child(error.clone()));
         }
         let count = counts.total();
-        let buttons = div().flex().justify_end().gap(px(components::SPACE_SM)).child(components::dialog_cancel_button("reader-close-dialog", text!(common::close)).on_click(cx.listener(|view, _, _, cx| view.dismiss(cx)))).child(
-            components::base_button("reader-import")
-                .primary()
-                .label(format!(text!(browse::import), if count == 1 { text!(browse::book) } else { text!(browse::books_plural) }, count = count))
+        let buttons = div().flex().justify_end().gap(px(components::SPACE_SM)).child(components::dialog_cancel_button("reader-close-dialog", text!(common::cancel)).on_click(cx.listener(|view, _, _, cx| view.dismiss(cx)))).child(
+            components::dialog_confirm_button("reader-import", format!(text!(browse::import), if count == 1 { text!(browse::book) } else { text!(browse::books_plural) }, count = count), Some("enter"))
                 .disabled(self.options().is_none())
                 .on_click(cx.listener(|view, _, _, cx| view.start_import(cx))),
         );

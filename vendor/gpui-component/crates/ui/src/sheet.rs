@@ -148,7 +148,8 @@ impl RenderOnce for Sheet {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let placement = self.placement;
         let window_paddings = crate::window_border::window_paddings(window);
-        let size = window.viewport_size()
+        let viewport = window.input_viewport();
+        let size = viewport.size
             - gpui::size(
                 window_paddings.left + window_paddings.right,
                 window_paddings.top + window_paddings.bottom,
@@ -173,7 +174,7 @@ impl RenderOnce for Sheet {
         }
 
         anchored()
-            .position(point(window_paddings.left, window_paddings.top))
+            .position(viewport.origin + point(window_paddings.left, window_paddings.top))
             .snap_to_window()
             .child(
                 div()
@@ -219,6 +220,7 @@ impl RenderOnce for Sheet {
                             .border_color(cx.theme().border)
                             .shadow_xl()
                             .refine_style(&self.style)
+                            .max_h((size.height - if placement == Placement::Bottom { px(0.) } else { top }).max(px(0.)))
                             .map(|this| {
                                 // Set the size of the sheet.
                                 if placement.is_horizontal() {

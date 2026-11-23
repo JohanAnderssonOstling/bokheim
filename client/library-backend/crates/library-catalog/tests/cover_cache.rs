@@ -13,8 +13,8 @@ async fn cover_files_share_fallbacks_retry_failures_and_refresh_together() {
     let key = CardKey([170; 32]);
     let missing = CardKey([171; 32]);
     let retry = CardKey([172; 32]);
-    let browse = thumbnail::card_thumbnail_suffix(300);
-    let dense = thumbnail::card_thumbnail_suffix(600);
+    let browse = thumbnail_contract::card_thumbnail_suffix(300);
+    let dense = thumbnail_contract::card_thumbnail_suffix(600);
     let replies = [
         (key, browse.as_str(), 404, ""),
         (key, "card", 503, "temporary failure"),

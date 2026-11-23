@@ -246,7 +246,7 @@ fn bookkeeping_and_no_op_writes_preserve_results_but_download_requests_do_not() 
     db.connection.execute("INSERT INTO book_transfer(content_hash,cover_state) SELECT content_hash,'ready' FROM book WHERE row_id=1", []).unwrap();
     db.connection.execute("UPDATE book_transfer SET server_has_cover=1,cover_checked=1", []).unwrap();
     db.connection.execute("UPDATE book SET title=title,read_progress=read_progress", []).unwrap();
-    db.connection.execute("UPDATE book_dir SET local_hash='new fingerprint'", []).unwrap();
+    db.connection.execute("UPDATE book_dir SET local_hash=X'0200000000000000'", []).unwrap();
     assert!(db.browse_result_page(&query, false, &revision, BrowsePageRequest::default()).unwrap().is_some());
     assert_eq!(db.browse_results.borrow().preparations, prepared);
     db.connection.execute("UPDATE book_transfer SET book_download='background'", []).unwrap();

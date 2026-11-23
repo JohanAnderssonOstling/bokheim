@@ -7,7 +7,6 @@ import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
-import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
@@ -26,7 +25,6 @@ import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.google.androidgamesdk.GameActivity;
 
-import org.json.JSONArray;
 
 import java.io.IOException;
 import java.io.File;
@@ -47,6 +45,16 @@ public final class MainActivity extends GameActivity {
 
     public static boolean isSelfUpdateEnabled() {
         return !BuildConfig.PLAY_STORE && !BuildConfig.FDROID;
+    }
+
+    public static String storageCommand(android.content.Context context, String command) {
+        return DocumentStorage.command(context, command);
+    }
+
+    public static String defaultLibraryLocation(android.content.Context context) {
+        String root = DocumentStorage.defaultRoot(context);
+        if (root == null) throw new IllegalStateException("Choose a library location before opening Bokheim");
+        return root;
     }
 
     public static String taxonomyFile(android.content.Context context) throws IOException {
@@ -132,6 +140,7 @@ public final class MainActivity extends GameActivity {
                             if (new org.json.JSONObject(request).getString("action").equals("closed") && accountDialog != null && accountDialog.sessionId == session) accountDialog = null;
                         } catch (org.json.JSONException ignored) { }
                     });
+                    if (!message.isNull("resetEmail")) accountDialog.startPasswordReset(message.getString("resetEmail"));
                     accountDialog.show();
                     break;
                 case "result":
@@ -148,7 +157,6 @@ public final class MainActivity extends GameActivity {
     }
 
     private static final String LOG_TAG = "Bokheim";
-    private static final String DIRECTORY_MIME = DocumentsContract.Document.MIME_TYPE_DIR;
     private static final String[] BOOK_EXTENSIONS = {"epub", "pdf", "mobi", "azw", "azw3", "m4b", "fb2", "fbz", "fb2.zip", "cbz"};
 
     private final ExecutorService fileExecutor = Executors.newSingleThreadExecutor();
@@ -206,10 +214,8 @@ public final class MainActivity extends GameActivity {
     private boolean keepScreenAwake;
     private Insets lastSafeAreaInsets;
     private Insets lastImeInsets;
-    private AlertDialog storagePermissionPrompt;
     private AlertDialog batteryPermissionPrompt;
     private boolean resumed;
-    private Boolean publishedStorageAccess;
 
     private static final class PathPrompt {
         final long id;
@@ -225,30 +231,13 @@ public final class MainActivity extends GameActivity {
         }
     }
 
-    private static final class DocumentInfo {
-        final String id;
-        final String name;
-        final String mimeType;
-
-        DocumentInfo(String id, String name, String mimeType) {
-            this.id = id;
-            this.name = name;
-            this.mimeType = mimeType;
-        }
-    }
-
     private native void nativeSelectedFileDescriptor(long requestId, String name, int fileDescriptor);
     private native void nativeFilePromptResult(long requestId, String error, boolean cancelled);
     private native void nativeSelectedDirectoryRoot(long requestId, String name);
-    private native void nativeSelectedDirectoryPath(long requestId, String pathJson);
-    private native void nativeSelectedDirectoryFile(long requestId, String pathJson, String uri, long sizeBytes);
     private native void nativeDirectoryPromptResult(long requestId, String error, boolean cancelled);
     private native void nativeSelectedDirectoryLocalRoot(long requestId, String path);
-    private native void nativeStorageAccessChanged(boolean granted, String documentsLibraryRoot);
     private native void nativeOpenBook(String name, int fileDescriptor);
     private native void nativeOpenReaderLink(String url);
-    static native void nativeNetworkCostChanged(int cost);
-    static void startNetworkCostMonitor(android.content.Context context) { NetworkCostMonitor.start(context); }
     private native void nativeVolumeButton(boolean next);
     private native void nativeWindowInsets(
         int safeLeft,
@@ -282,9 +271,7 @@ public final class MainActivity extends GameActivity {
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         installWindowInsetsReporting();
         applySystemBarsVisibility();
-        // Opening a shared book should go straight to the reader. Offer the
-        // optional storage permission on an ordinary app launch instead.
-        promptForStorageAccess(getIntent());
+
         handleIncomingBookIntent(getIntent());
     }
 
@@ -292,14 +279,8 @@ public final class MainActivity extends GameActivity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        promptForStorageAccess(intent);
-        handleIncomingBookIntent(intent);
-    }
 
-    private void promptForStorageAccess(Intent intent) {
-        if (storagePermissionPrompt == null || !storagePermissionPrompt.isShowing()) {
-            storagePermissionPrompt = AllFilesAccess.promptForLaunch(this, intent);
-        }
+        handleIncomingBookIntent(intent);
     }
 
     public void requestAllFilesAccess() {
@@ -312,12 +293,7 @@ public final class MainActivity extends GameActivity {
         resumed = true;
         suppressReaderChromeReveal();
         applyKeepScreenAwake();
-        boolean granted = AllFilesAccess.isGranted();
-        if (publishedStorageAccess == null || publishedStorageAccess != granted) {
-            publishedStorageAccess = granted;
-            File documentsRoot = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "Bokheim");
-            nativeStorageAccessChanged(granted, documentsRoot.getAbsolutePath());
-        }
+
     }
 
     private void handleIncomingBookIntent(Intent intent) {
@@ -374,6 +350,8 @@ public final class MainActivity extends GameActivity {
         String[] extensions = extensionList.isEmpty() ? new String[0] : extensionList.split("\\n");
         pendingPathPrompt = new PathPrompt(requestId, false, true, extensions);
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.putExtra(Intent.EXTRA_LOCAL_ONLY, true);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
         try {
             pathPromptLauncher.launch(intent);
         } catch (RuntimeException error) {
@@ -415,7 +393,6 @@ public final class MainActivity extends GameActivity {
         if (activity == null) return;
         activity.runOnUiThread(() -> {
             if (!activity.resumed || activity.isFinishing() || activity.isDestroyed()) return;
-            if (activity.storagePermissionPrompt != null && activity.storagePermissionPrompt.isShowing()) return;
             if (activity.batteryPermissionPrompt == null || !activity.batteryPermissionPrompt.isShowing()) {
                 activity.batteryPermissionPrompt = BatteryOptimization.promptIfNeeded(activity);
             }
@@ -643,56 +620,13 @@ public final class MainActivity extends GameActivity {
         nativeFilePromptResult(prompt.id, null, false);
     }
 
-    private void transferSelectedDirectory(PathPrompt prompt, Intent data) throws IOException {
-        Uri treeUri = data.getData();
-        if (treeUri == null) {
-            throw new IOException("The document provider returned no directory");
-        }
-        String rootId = DocumentsContract.getTreeDocumentId(treeUri);
-        Uri rootUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, rootId);
-        DocumentInfo root = queryDocument(rootUri);
-        nativeSelectedDirectoryRoot(prompt.id, root.name);
-        File localRoot = AndroidLibraryStorage.localDirectory(this, treeUri);
-        if (localRoot != null) {
-            nativeSelectedDirectoryLocalRoot(prompt.id, localRoot.getAbsolutePath());
-            nativeDirectoryPromptResult(prompt.id, null, false);
-            return;
-        }
-        collectDirectoryTree(prompt, treeUri, root.id, new ArrayList<>(), new LinkedHashSet<>());
+    private void transferSelectedDirectory(PathPrompt prompt, Intent data) throws Exception {
+        String selectedRoot = DocumentStorage.retain(this, data);
+        Uri tree = data.getData();
+        Uri root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree));
+        nativeSelectedDirectoryRoot(prompt.id, queryDisplayName(root));
+        nativeSelectedDirectoryLocalRoot(prompt.id, selectedRoot);
         nativeDirectoryPromptResult(prompt.id, null, false);
-    }
-
-    private void collectDirectoryTree(PathPrompt prompt, Uri treeUri, String parentDocumentId, List<String> parentPath, Set<String> visitedDirectories) throws IOException {
-        if (!visitedDirectories.add(parentDocumentId)) {
-            return;
-        }
-        Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocumentId);
-        String[] projection = {
-            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-            DocumentsContract.Document.COLUMN_MIME_TYPE,
-            DocumentsContract.Document.COLUMN_SIZE
-        };
-        try (Cursor cursor = getContentResolver().query(childrenUri, projection, null, null, null)) {
-            if (cursor == null) {
-                throw new IOException("The document provider could not list " + parentDocumentId);
-            }
-            while (cursor.moveToNext()) {
-                DocumentInfo child = documentInfo(cursor);
-                List<String> path = new ArrayList<>(parentPath);
-                path.add(child.name);
-                JSONArray pathJson = new JSONArray(path);
-                if (DIRECTORY_MIME.equals(child.mimeType)) {
-                    nativeSelectedDirectoryPath(prompt.id, pathJson.toString());
-                    collectDirectoryTree(prompt, treeUri, child.id, path, visitedDirectories);
-                } else if (matchesExtension(child.name, prompt.extensions)) {
-                    Uri childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, child.id);
-                    int sizeColumn = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE);
-                    long sizeBytes = sizeColumn >= 0 && !cursor.isNull(sizeColumn) ? cursor.getLong(sizeColumn) : -1;
-                    nativeSelectedDirectoryFile(prompt.id, pathJson.toString(), childUri.toString(), sizeBytes);
-                }
-            }
-        }
     }
 
     private static boolean matchesExtension(String name, String[] extensions) {
@@ -726,30 +660,6 @@ public final class MainActivity extends GameActivity {
             throw new IOException("The document provider returned no files");
         }
         return uris;
-    }
-
-    private DocumentInfo queryDocument(Uri uri) throws IOException {
-        String[] projection = {
-            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-            DocumentsContract.Document.COLUMN_MIME_TYPE
-        };
-        try (Cursor cursor = getContentResolver().query(uri, projection, null, null, null)) {
-            if (cursor == null || !cursor.moveToFirst()) {
-                throw new IOException("The document provider returned no metadata for " + uri);
-            }
-            return documentInfo(cursor);
-        }
-    }
-
-    private static DocumentInfo documentInfo(Cursor cursor) throws IOException {
-        String id = cursor.getString(cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID));
-        String name = cursor.getString(cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME));
-        String mime = cursor.getString(cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE));
-        if (name == null || name.isEmpty()) {
-            throw new IOException("The document provider returned an empty filename");
-        }
-        return new DocumentInfo(id, name, mime);
     }
 
     private String queryDisplayName(Uri uri) throws IOException {

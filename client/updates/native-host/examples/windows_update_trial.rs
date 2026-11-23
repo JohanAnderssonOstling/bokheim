@@ -15,6 +15,7 @@ mod fixture {
     use linux_update_host::{now, prepare_candidate, windows::{WindowsHost, WindowsStartup}, windows_process};
     use ring::{digest::{digest, SHA256}, signature::{Ed25519KeyPair, KeyPair}};
     use std::{fs::{self, File, OpenOptions}, io::{Cursor, Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}, process::Command, time::{Duration, Instant}};
+    use subject_projection::runtime_format::DOWNLOAD_FORMATS;
     use update_client::{ApplicationRelease, Artifact, DiscoveryConfig, Manifest, SignedManifest, SIGNATURE_CONTEXT, coordinator::{ArtifactKind, Phase}};
 
     type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -96,7 +97,7 @@ mod fixture {
         let manifest = Manifest {
             protocol_version: 1, channel: "stable".into(), sequence: 1, issued_at_unix: now(), expires_at_unix: now() + 3600, taxonomy: None, catalog: None,
             application: Some(ApplicationRelease { version: "2.0.0".parse()?, name: "Fixture".into(),
-                schema_version: library_database::LIBRARY_SCHEMA_VERSION as u32, taxonomy_format_versions: vec![1],
+                schema_version: library_database::LIBRARY_SCHEMA_VERSION as u32, taxonomy_format_versions: DOWNLOAD_FORMATS.to_vec(),
                 artifacts: [("windows-x86_64-zip".into(), artifact)].into() }),
         };
         let payload = serde_json::to_string(&manifest)?;

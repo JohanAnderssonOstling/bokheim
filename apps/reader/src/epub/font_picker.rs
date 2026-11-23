@@ -1,10 +1,7 @@
 use ui_text::text;
 
-use components::{FontCatalog, FontCatalogTarget};
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render, SharedString, Task, TextSystem, UniformListScrollHandle, Window, div, px, rems, uniform_list};
-use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::scroll::{Scrollbar, ScrollbarAxis, ScrollbarShow};
+use gpui::{Context, Entity, EventEmitter, FocusHandle, IntoElement, KeyDownEvent, Render, TextSystem, Window, div, px, rems};
 use html_view_gpui::is_private_font_family;
 use ui_components as components;
 
@@ -17,13 +14,8 @@ pub(super) struct FontSelected {
 }
 
 pub(super) struct FontPicker {
-    input: Entity<InputState>,
-    panel_focus: FocusHandle,
-    catalog: FontCatalog,
-    catalog_task: Option<Task<()>>,
-    scroll: UniformListScrollHandle,
+    picker: Entity<components::FontPicker>,
     open: bool,
-    previous_focus: Option<FocusHandle>,
     active_role: Option<ReaderFontRole>,
     role_focus: [FocusHandle; 4],
     cjk: bool,
@@ -31,20 +23,8 @@ pub(super) struct FontPicker {
 
 impl EventEmitter<FontSelected> for FontPicker {}
 
-impl FontCatalogTarget for FontPicker {
-    fn font_catalog(&mut self) -> &mut FontCatalog {
-        &mut self.catalog
-    }
-    fn font_query(&self, cx: &App) -> SharedString {
-        self.input.read(cx).value()
-    }
-    fn font_scroll(&self) -> &UniformListScrollHandle {
-        &self.scroll
-    }
-    fn font_filter(&self) -> impl Fn(&TextSystem, &str) -> bool + Send + 'static {
-        let cjk = self.cjk;
-        move |text_system, family| !is_private_font_family(family) && family != components::CJK_FONT_FAMILY && (!cjk || font_supports_cjk(text_system, family))
-    }
+fn book_font_filter(_: &TextSystem, family: &str) -> bool {
+    !is_private_font_family(family) && family != components::CJK_FONT_FAMILY
 }
 
 fn font_supports_cjk(text_system: &TextSystem, family: &str) -> bool {
@@ -56,32 +36,13 @@ fn font_supports_cjk(text_system: &TextSystem, family: &str) -> bool {
 
 impl FontPicker {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder(text!(common::search_fonts)));
-        cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                if let Some(family) = this.catalog.filtered.get(this.catalog.cursor).and_then(|index| this.catalog.families.get(*index)).cloned() {
-                    this.choose(family, window, cx);
-                }
-            } else if matches!(event, InputEvent::Change) {
-                this.filter(cx);
-            }
-            cx.notify();
+        let picker = cx.new(|cx| components::FontPicker::new(window, cx));
+        cx.subscribe_in(&picker, window, |this, _, event, window, cx| match event {
+            components::FontPickerEvent::Selected(family) => this.choose(family.clone(), window, cx),
+            components::FontPickerEvent::Dismissed => this.back(window, cx),
         })
         .detach();
-        // Creating a reader must neither enumerate fonts nor shape previews.
-        components::observe_font_catalog(cx, |this: &mut Self, cx| this.load_catalog(cx)).detach();
-        Self {
-            input,
-            panel_focus: cx.focus_handle(),
-            catalog: FontCatalog::default(),
-            catalog_task: None,
-            scroll: UniformListScrollHandle::new(),
-            open: false,
-            previous_focus: None,
-            active_role: None,
-            cjk: false,
-            role_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
-        }
+        Self { picker, open: false, active_role: None, cjk: false, role_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)) }
     }
 
     pub(super) fn set_cjk(&mut self, cjk: bool) {
@@ -102,40 +63,26 @@ impl FontPicker {
     }
 
     pub(super) fn show_cjk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.previous_focus = window.focused(cx);
         self.select_role(ReaderFontRole::Cjk, window, cx);
-    }
-
-    fn filter(&mut self, cx: &App) {
-        self.filter_font_catalog(cx);
-    }
-
-    fn load_catalog(&mut self, cx: &mut Context<Self>) {
-        if let Some(task) = components::load_font_catalog(self, cx) {
-            self.catalog_task = Some(task);
-        }
     }
 
     pub(super) fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.active_role = None;
-        self.previous_focus = window.focused(cx);
+        self.picker.update(cx, |picker, cx| picker.hide(cx));
         self.role_focus[0].focus(window, cx);
         cx.notify();
     }
 
     fn select_role(&mut self, role: ReaderFontRole, window: &mut Window, cx: &mut Context<Self>) {
         self.active_role = Some(role);
-        self.input.update(cx, |input, cx| input.set_value("", window, cx));
-        self.filter(cx);
-        self.load_catalog(cx);
-        self.input.read(cx).focus_handle(cx).focus(window, cx);
+        let selected = ReaderSettings::preferences(cx).custom_font_family(role).map(str::to_owned);
+        let filter = if self.cjk { font_supports_cjk } else { book_font_filter };
+        self.picker.update(cx, |picker, cx| picker.show(selected, filter, window, cx));
         cx.notify();
     }
 
     fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.catalog_task = None;
-        self.catalog = FontCatalog::default();
         if let Some(role) = self.active_role.take() {
             self.role_focus[role.index()].focus(window, cx);
         }
@@ -150,7 +97,7 @@ impl FontPicker {
 }
 
 impl Render for FontPicker {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
         let preferences = ReaderSettings::preferences(cx).clone();
         let choices = ReaderFontRole::ALL.into_iter().map(|role| {
@@ -188,10 +135,11 @@ impl Render for FontPicker {
             .flex_col()
             .gap(px(components::SPACE_SM))
             .when(!self.cjk && (self.open || preferences.custom_fonts_active()), |rows| rows.mt(px(components::SPACE_SM - components::SPACE_XXS)).child(components::reader_tile_group("reader-custom-font-roles").children(choices)));
-        rows.when(self.active_role.is_some(), |rows| {
-            let picker = cx.entity();
-            rows.child(components::font_picker_overlay(self.panel(window, cx), window, theme, move |window, cx| picker.update(cx, |picker, cx| picker.back(window, cx))))
-        })
+        if let Some(role) = self.active_role {
+            let selected = preferences.custom_font_family(role).map(str::to_owned);
+            self.picker.update(cx, |picker, cx| picker.set_selected(selected, cx));
+        }
+        rows.child(self.picker.clone())
     }
 }
 
@@ -199,73 +147,8 @@ impl FontPicker {
     pub(super) fn hide(&mut self, cx: &mut Context<Self>) {
         self.open = false;
         self.active_role = None;
-        self.catalog_task = None;
-        self.catalog = FontCatalog::default();
+        self.picker.update(cx, |picker, cx| picker.hide(cx));
         cx.notify();
-    }
-
-    fn panel(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = components::browser_theme(cx);
-        let Some(role) = self.active_role else { return div().into_any_element() };
-        let selected = ReaderSettings::preferences(cx).custom_font_family(role);
-        let rows = uniform_list(
-            "font-list",
-            self.catalog.filtered.len(),
-            cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                let theme = components::browser_theme(cx);
-                let selected = this.active_role.and_then(|role| ReaderSettings::preferences(cx).custom_font_family(role));
-                range
-                    .map(|row| {
-                        let index = this.catalog.filtered[row];
-                        let family = this.catalog.families[index].clone();
-                        components::font_picker_row(("system-font", index), family.clone(), selected == Some(family.as_str()), theme)
-                            .when(this.catalog.cursor == row && selected != Some(family.as_str()), |row| row.bg(theme.hover))
-                            .debug_selector(move || format!("custom-font-row-{row}"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.catalog.cursor = row;
-                                this.choose(family.clone(), window, cx);
-                            }))
-                    })
-                    .collect()
-            }),
-        )
-        .size_full()
-        .track_scroll(&self.scroll);
-        let list = div()
-            .id("custom-font-scroll")
-            .debug_selector(|| "custom-font-list".into())
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .overflow_hidden()
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .child(rows)
-            .child(Scrollbar::new(&self.scroll).axis(ScrollbarAxis::Vertical).scrollbar_show(ScrollbarShow::Always));
-        let body = if self.catalog.loading || self.catalog.filtered.is_empty() {
-            div().flex_1().min_h_0().p(px(components::SPACE_SM)).text_color(theme.text_muted).child(if self.catalog.loading { text!(common::loading_fonts) } else { text!(common::no_matching_fonts) }).into_any_element()
-        } else {
-            list.into_any_element()
-        };
-        let panel = components::font_picker_surface(window, theme)
-            .id("reader-font-overlay")
-            .debug_selector(|| "reader-font-overlay".into())
-            .tab_group()
-            .capture_key_down(cx.listener(|this, event, _, cx| this.navigate_font_catalog(event, cx)))
-            .when(self.catalog.loaded && selected.is_some_and(|family| !self.catalog.families.iter().any(|available| available == family)), |panel| {
-                panel.child(div().debug_selector(|| "reader-font-unavailable".into()).text_color(theme.text_muted).child(text!(common::saved_font_unavailable_on_this_device)))
-            })
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(components::SPACE_SM))
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.input)))
-                    .child(components::bottom_sheet_close_button("font-overlay-close", theme).on_click(cx.listener(|this, _, window, cx| this.back(window, cx)))),
-            )
-            .child(body);
-        components::contain_modal_focus(panel, &self.panel_focus, "ReaderFontPicker ModalFocus", cx).into_any_element()
     }
 }
 
@@ -303,21 +186,21 @@ mod tests {
             subscription
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("reader-font-overlay").is_none());
+        assert!(cx.debug_bounds("font-picker-panel").is_none());
         picker.read_with(cx, |picker, cx| {
-            assert!(!picker.catalog.loaded, "restoring a saved choice must not enumerate fonts");
+            assert!(!picker.picker.read(cx).catalog().loaded, "restoring a saved choice must not enumerate fonts");
             assert_eq!(ReaderSettings::preferences(cx).cjk_font_choice, CjkFontChoice::Custom);
         });
 
         cx.update(|window, cx| {
             ReaderSettings::update(cx, |preferences| preferences.cjk_font_choice = CjkFontChoice::Publisher);
             picker.update(cx, |picker, cx| {
-                picker.install_font_catalog(vec!["Saved CJK".into(), "Replacement CJK".into()], cx);
+                picker.picker.update(cx, |picker, cx| picker.install_font_catalog(vec!["Saved CJK".into(), "Replacement CJK".into()], cx));
                 picker.show_cjk(window, cx);
             });
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("reader-font-overlay").is_some());
+        assert!(cx.debug_bounds("font-picker-panel").is_some());
         picker.read_with(cx, |_, cx| assert_eq!(ReaderSettings::preferences(cx).cjk_font_choice, CjkFontChoice::Publisher));
         cx.simulate_keystrokes("r e p enter");
         cx.run_until_parked();
@@ -333,7 +216,7 @@ mod tests {
             picker.update(cx, |picker, cx| picker.activate_cjk(window, cx));
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("reader-font-overlay").is_none());
+        assert!(cx.debug_bounds("font-picker-panel").is_none());
         picker.read_with(cx, |_, cx| assert_eq!(ReaderSettings::preferences(cx).cjk_font_choice, CjkFontChoice::Custom));
 
         cx.update(|window, cx| {
@@ -344,7 +227,7 @@ mod tests {
             picker.update(cx, |picker, cx| picker.activate_cjk(window, cx));
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("reader-font-overlay").is_some());
+        assert!(cx.debug_bounds("font-picker-panel").is_some());
         picker.read_with(cx, |_, cx| assert_eq!(ReaderSettings::preferences(cx).cjk_font_choice, CjkFontChoice::Publisher));
     }
 
@@ -367,27 +250,27 @@ mod tests {
             gpui_component::Root::new(picker, window, cx)
         });
         let picker = cx.update(|_, cx| root.read(cx).view().clone().downcast::<FontPicker>().ok().unwrap());
-        picker.read_with(cx, |picker, _| assert!(!picker.catalog.loaded));
+        picker.read_with(cx, |picker, cx| assert!(!picker.picker.read(cx).catalog().loaded));
         let _subscription = cx.update(|window, cx| {
             let subscription = cx.subscribe(&picker, |_, event: &FontSelected, cx| {
                 ReaderSettings::update(cx, |preferences| preferences.set_custom_font_family(event.role, event.family.clone()));
             });
             picker.update(cx, |picker, cx| {
-                picker.install_font_catalog(vec!["System CJK".into()], cx);
+                picker.picker.update(cx, |picker, cx| picker.install_font_catalog(vec!["System CJK".into()], cx));
                 picker.show_cjk(window, cx)
             });
             subscription
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("custom-font-role-0").is_none());
-        assert!(cx.debug_bounds("reader-font-overlay").is_some());
-        assert!(cx.debug_bounds("reader-font-unavailable").is_some());
+        assert!(cx.debug_bounds("font-picker-panel").is_some());
+        assert!(cx.debug_bounds("font-picker-unavailable").is_some());
         picker.read_with(cx, |_, cx| {
             assert_eq!(ReaderSettings::preferences(cx).system_cjk_font_family.as_deref(), Some("Unavailable CJK font"));
         });
         cx.simulate_keystrokes("c j k enter");
         cx.run_until_parked();
-        assert!(cx.debug_bounds("reader-font-unavailable").is_none());
+        assert!(cx.debug_bounds("font-picker-unavailable").is_none());
         picker.read_with(cx, |picker, cx| {
             assert_eq!(picker.active_role, Some(ReaderFontRole::Cjk));
             let preferences = ReaderSettings::preferences(cx);
@@ -410,37 +293,37 @@ mod tests {
             gpui_component::Root::new(picker, window, cx)
         });
         let picker = cx.update(|_, cx| root.read(cx).view().clone().downcast::<FontPicker>().ok().unwrap());
-        picker.read_with(cx, |picker, _| {
-            assert!(!picker.catalog.loaded);
-            assert!(picker.catalog.families.is_empty(), "reader startup must not enumerate fonts");
+        picker.read_with(cx, |picker, cx| {
+            assert!(!picker.picker.read(cx).catalog().loaded);
+            assert!(picker.picker.read(cx).catalog().families.is_empty(), "reader startup must not enumerate fonts");
         });
         cx.update(|window, cx| picker.update(cx, |picker, cx| picker.show(window, cx)));
         cx.run_until_parked();
         assert!(cx.debug_bounds("custom-font-role-0").is_some());
-        picker.read_with(cx, |picker, _| assert!(!picker.catalog.loaded, "opening the three role choices must not enumerate fonts"));
+        picker.read_with(cx, |picker, cx| assert!(!picker.picker.read(cx).catalog().loaded, "opening the three role choices must not enumerate fonts"));
         let role = cx.debug_bounds("custom-font-role-0").unwrap();
         cx.simulate_click(role.center(), Modifiers::default());
         cx.run_until_parked();
-        let desktop = cx.debug_bounds("reader-font-overlay").unwrap();
+        let desktop = cx.debug_bounds("font-picker-panel").unwrap();
         cx.simulate_resize(gpui::size(px(390.0), px(640.0)));
         cx.run_until_parked();
-        let phone = cx.debug_bounds("reader-font-overlay").unwrap();
+        let phone = cx.debug_bounds("font-picker-panel").unwrap();
         assert!(phone.size.width < desktop.size.width);
         assert!(phone.size.height < desktop.size.height);
         assert!(phone.left() >= px(0.0) && phone.right() <= px(390.0));
         assert!(phone.top() >= px(0.0) && phone.bottom() <= px(640.0));
-        assert!(cx.debug_bounds("custom-font-row-0").is_some());
-        assert!(cx.debug_bounds("custom-font-row-999").is_none(), "offscreen families must not be shaped");
-        let bounds = cx.debug_bounds("custom-font-list").unwrap();
+        assert!(cx.debug_bounds("font-picker-row-0").is_some());
+        assert!(cx.debug_bounds("font-picker-row-999").is_none(), "offscreen families must not be shaped");
+        let bounds = cx.debug_bounds("font-picker-list").unwrap();
         cx.simulate_event(ScrollWheelEvent { position: bounds.center(), delta: ScrollDelta::Pixels(point(px(0.0), px(-132.0))), ..Default::default() });
         cx.run_until_parked();
-        picker.read_with(cx, |picker, _| assert!(picker.scroll.0.borrow().base_handle.offset().y < px(0.0)));
+        picker.read_with(cx, |picker, cx| assert!(picker.picker.read(cx).scroll().0.borrow().base_handle.offset().y < px(0.0)));
         cx.simulate_keystrokes("f o n t space 0 9 9 9");
         cx.run_until_parked();
-        picker.read_with(cx, |picker, _| {
-            assert_eq!(picker.catalog.filtered.len(), 1);
-            assert_eq!(picker.catalog.families[picker.catalog.filtered[0]], "Font 0999");
-            assert_eq!(picker.scroll.0.borrow().base_handle.offset().y, px(0.0));
+        picker.read_with(cx, |picker, cx| {
+            assert_eq!(picker.picker.read(cx).catalog().filtered.len(), 1);
+            assert_eq!(picker.picker.read(cx).catalog().families[picker.picker.read(cx).catalog().filtered[0]], "Font 0999");
+            assert_eq!(picker.picker.read(cx).scroll().0.borrow().base_handle.offset().y, px(0.0));
         });
     }
 
@@ -472,7 +355,7 @@ mod tests {
             cx.run_until_parked();
             cx.simulate_keystrokes("g a r enter");
             cx.run_until_parked();
-            assert!(cx.debug_bounds("reader-font-overlay").is_some());
+            assert!(cx.debug_bounds("font-picker-panel").is_some());
             picker.read_with(cx, |picker, cx| {
                 assert!(picker.open);
                 assert_eq!(picker.active_role, Some(role));
@@ -485,8 +368,8 @@ mod tests {
         cx.update(|window, cx| picker.update(cx, |picker, cx| picker.select_role(ReaderFontRole::Serif, window, cx)));
         picker.read_with(cx, |picker, cx| {
             assert!(picker.open);
-            assert!(picker.input.read(cx).value().is_empty());
-            assert_eq!(picker.catalog.filtered.len(), picker.catalog.families.len(), "reopening must restore the unfiltered catalog");
+            assert!(picker.picker.read(cx).query(cx).is_empty());
+            assert_eq!(picker.picker.read(cx).catalog().filtered.len(), picker.picker.read(cx).catalog().families.len(), "reopening must restore the unfiltered catalog");
         });
         cx.update(|window, cx| picker.update(cx, |picker, cx| picker.show(window, cx)));
         cx.run_until_parked();
@@ -494,7 +377,7 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
-        picker.read_with(cx, |picker, _| {
+        picker.read_with(cx, |picker, cx| {
             assert!(picker.open);
             assert_eq!(picker.active_role, None);
         });

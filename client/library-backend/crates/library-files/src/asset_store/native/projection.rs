@@ -1,6 +1,8 @@
 pub(crate) use super::*;
 use client_platform_native::filesystem::parent_directory;
-use std::fs::OpenOptions;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::filesystem as fs;
+use fs::OpenOptions;
 use std::io::ErrorKind;
 pub(crate) use sync_common::DirId;
 // Native asset-store projections. The shared model owns paths;
@@ -13,7 +15,7 @@ pub(crate) fn readable_path(handle: &Handle, name: String) -> Result<Option<Path
         return Err(AssetStoreError::operation("native books require explicit paths"));
     }
     let path = handle.assets_root.join(name);
-    if path.is_file() {
+    if fs::is_file(&path) {
         return Ok(Some(path));
     }
     root_available(handle);
@@ -24,7 +26,7 @@ pub(crate) fn readable_path(handle: &Handle, name: String) -> Result<Option<Path
 /// in an audiobook folder belong to the user and are left in place.
 /// Explicit eviction trusts the recorded paths without revalidating content.
 pub(crate) fn book_eviction_files(path: &Path) -> Result<Vec<PathBuf>, AssetStoreError> {
-    let metadata = match std::fs::symlink_metadata(path) {
+    let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
@@ -38,7 +40,7 @@ pub(crate) fn book_eviction_files(path: &Path) -> Result<Vec<PathBuf>, AssetStor
     let mut files = audiobook_folder::discover(path)?.into_iter().map(|track| track.path).collect::<Vec<_>>();
     files.extend([audiobook_folder::discover_nfo(path)?, audiobook_folder::discover_cue(path)?, audiobook_folder::discover_cover(path)?].into_iter().flatten().map(|sidecar| sidecar.path));
     let mapping = path.join(audiobook_folder::PATH_MAPPING_FILE);
-    if mapping.try_exists()? {
+    if fs::try_exists(&mapping)? {
         files.push(mapping);
     }
     Ok(files)
@@ -54,17 +56,17 @@ pub(crate) fn evict_book_files(handle: &Handle, relative_paths: &[RelativeBookPa
         if files.is_empty() {
             continue;
         }
-        let directory = std::fs::symlink_metadata(&path)?.is_dir();
+        let directory = fs::symlink_metadata(&path)?.is_dir();
         for file in files {
-            std::fs::remove_file(&file)?;
+            fs::remove_file(&file)?;
             if directory {
                 if let Some(parent) = file.parent().filter(|parent| *parent != path.as_path()) {
-                    let _ = std::fs::remove_dir(parent);
+                    let _ = fs::remove_dir(parent);
                 }
             }
         }
         if directory {
-            let _ = std::fs::remove_dir(&path);
+            let _ = fs::remove_dir(&path);
         }
         sync_parent(&path)?;
     }
@@ -82,7 +84,7 @@ pub(crate) struct DirectoryEntryStamp {
 }
 
 pub(crate) fn directory_entry_stamp(path: &Path) -> Result<Option<DirectoryEntryStamp>, AssetStoreError> {
-    match std::fs::symlink_metadata(path) {
+    match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(Some(DirectoryEntryStamp { directory: metadata.is_dir(), symlink: metadata.file_type().is_symlink(), length: metadata.len(), modified: metadata.modified()? })),
         Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => Ok(None),
         Err(error) => Err(error.into()),
@@ -112,9 +114,9 @@ impl PreparedDirectory {
         let mut exists = record(&destination)?;
         let marker = destination.join(".biblos_uuid");
         let marker_exists = record(&marker)?;
-        let owned = marker_exists && std::fs::read_to_string(&marker)?.trim() == id.to_string();
+        let owned = marker_exists && fs::read_to_string(&marker)?.trim() == id.to_string();
         let chosen = if exists && !owned {
-            let occupied = std::fs::read_dir(parent_directory(&destination)?)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?;
+            let occupied = fs::read_dir(parent_directory(&destination)?)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?;
             let chosen = library_replica::unique_folder_name(name, occupied.iter().chain(sibling_names).map(String::as_str));
             destination.set_file_name(&chosen);
             exists = record(&destination)?;
@@ -130,10 +132,10 @@ impl PreparedDirectory {
             if let Some(old) = projected.filter(|old| *old != relative || chosen.is_some()) {
                 let source = library_path(handle, old);
                 let source_exists = record(&source)?;
-                if source_exists && source.is_dir() {
+                if source_exists && fs::is_dir(&source) {
                     let marker = source.join(".biblos_uuid");
                     record(&marker)?;
-                    if std::fs::read_to_string(&marker)?.trim() != id.to_string() {
+                    if fs::read_to_string(&marker)?.trim() != id.to_string() {
                         return Err(AssetStoreError::operation("folder identity changed before materialization"));
                     }
                     Some(source)
@@ -165,7 +167,7 @@ impl PreparedDirectory {
             sync_parent(source)?;
             sync_parent(&self.destination)?;
         } else if !self.exists {
-            std::fs::create_dir(&self.destination)?;
+            fs::create_dir(&self.destination)?;
             sync_parent(&self.destination)?;
             use std::io::Write as _;
             let mut file = OpenOptions::new().write(true).create_new(true).open(self.destination.join(".biblos_uuid"))?;
@@ -183,10 +185,10 @@ pub(crate) fn create_directory(handle: &Handle, relative: &str, id: DirId) -> Re
     let requested = library_path(handle, relative);
     let parent = requested.parent().ok_or_else(|| AssetStoreError::operation("folder has no parent"))?;
     let name = requested.file_name().and_then(|name| name.to_str()).ok_or_else(|| AssetStoreError::operation("invalid folder name"))?;
-    let occupied = std::fs::read_dir(parent)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?;
+    let occupied = fs::read_dir(parent)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?;
     for chosen in library_replica::folder_name_candidates(name, occupied.iter().map(String::as_str)) {
         let destination = parent.join(&chosen);
-        match std::fs::create_dir(&destination) {
+        match fs::create_dir(&destination) {
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
                 continue;
             }

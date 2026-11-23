@@ -69,7 +69,8 @@ pub struct BookEnrichment {
     pub toc: Option<Vec<book_model::BookTocEntry>>,
     #[serde(default)]
     pub cover: Option<CoverSource>,
-    /// The failed pipeline stage; omitted by servers predating this field.
+    /// A failed pipeline stage, including when other stages produced a usable
+    /// `Found` result. Omitted by servers predating this field.
     /// Missing or unrecognized stages must not trigger optional-cover recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<BookEnrichmentFailure>,
@@ -82,7 +83,8 @@ pub struct BookEnrichment {
 pub enum BookEnrichmentStatus {
     Found,
     NoMatch,
-    /// A lookup failed; ask again soon.
+    /// No usable enrichment was produced because lookup failed. Clients may
+    /// complete the book with its file metadata instead of blocking publication.
     Failed,
 }
 

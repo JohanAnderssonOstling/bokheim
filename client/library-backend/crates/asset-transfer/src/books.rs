@@ -1,32 +1,57 @@
 //! Verified book upload/download workflows with host-supplied resources.
 pub(crate) use super::deadline::transfer_deadline;
 pub(crate) use crate::policy::upload_timeout;
-pub(crate) use crate::TransferError;
 use crate::transfer::AssetExecutor;
+pub(crate) use crate::TransferError;
 #[cfg(not(target_arch = "wasm32"))]
 use client_platform_runtime::executor::run_blocking;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use futures_util::StreamExt;
-use library_database::TransferSnapshot;
+use library_database::BookUploadSnapshot;
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use library_database::NativeBookCompletion;
+pub(crate) use library_database::{NativeBookCompletion, NativeBookSnapshot};
 pub(crate) use library_model::BookUploadIntent;
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use library_model::{BookPlacement, DownloadProgress, DownloadState};
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use sync_common::BookId;
+pub(crate) use library_model::{DownloadProgress, DownloadState};
 
 #[cfg(target_arch = "wasm32")]
 pub mod web_upload;
 
 impl AssetExecutor {
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn refresh_local_upload(&self, snapshot: &BookUploadSnapshot, intent: &BookUploadIntent) -> Result<(), TransferError> {
+        if !intent.book_id.is_local() || self.database.canonical_content_hash(intent.book_id).await?.is_some() {
+            return Ok(());
+        }
+        let assets = self.state.read().await.assets().clone();
+        let _lease = assets.lease_book(&intent.book_id).await?;
+        let Some(mut reader) = assets.open_book_reader(&intent.book_id, snapshot.paths.clone()).await? else { return Ok(()) };
+        let (checksum, size) = run_blocking(move || -> std::io::Result<_> {
+            use std::io::Seek;
+            let checksum = content_address::hash_reader(&mut reader)?;
+            Ok((checksum, reader.stream_position()?))
+        })
+        .await
+        .map_err(TransferError::retryable)?
+        .map_err(TransferError::retryable)?;
+        if Some(checksum) == intent.byte_checksum && size == intent.size_bytes {
+            return Ok(());
+        }
+        let replacement = BookUploadIntent { byte_checksum: Some(checksum), size_bytes: size, ..intent.clone() };
+        if self.database.refresh_book_upload(intent.clone(), replacement).await? {
+            log::info!("refreshed obsolete first upload for {}", intent.book_id);
+            self.events.uploads.wake();
+            self.events.sync.wake();
+        }
+        Ok(())
+    }
+
     /// Upload a version already admitted by the page's manifest negotiation.
-    pub(crate) async fn upload_blob_version(&self, snapshot: &TransferSnapshot, planned: &BookUploadIntent) -> Result<(), TransferError> {
+    pub(crate) async fn upload_blob_version(&self, snapshot: &BookUploadSnapshot, planned: &BookUploadIntent) -> Result<(), TransferError> {
         let assets = self.state.read().await.assets().clone();
         let book_id = &planned.book_id;
         let credentials = self.credentials().await?;
-        let asset = snapshot.asset_for(book_id).ok_or_else(|| TransferError::retryable("transfer snapshot changed during drain"))?;
-        let Some(intent) = asset.upload.intent.as_ref() else {
+        let Some(intent) = snapshot.intent.as_ref() else {
             return Ok(());
         };
         if planned != intent {
@@ -36,17 +61,19 @@ impl AssetExecutor {
         let format = self.database.local_book_info(book_id).await?.format;
         #[cfg(target_arch = "wasm32")]
         let canonical_pdf = self.database.pdf_metadata(book_id).await?;
-        let file_name = asset.upload.local_versions.first().map(|(_, file_name, _)| file_name.as_str()).unwrap_or("unknown file");
-        let Some(book) = assets.verified_book_reader_with_checksum(*book_id, asset.upload_paths.clone(), intent.byte_checksum).await? else {
-            // Verification rejects missing or mismatching bytes without deleting
-            // other local revisions. Retrying that same job forever would
-            // pin the queue behind one pathological file.
+        let file_name = snapshot.paths.first().map(|path| path.file_name()).unwrap_or("unknown file");
+        let Some(book) = assets.verified_book_reader_with_checksum(*book_id, snapshot.paths.clone(), intent.byte_checksum).await? else {
+            #[cfg(not(target_arch = "wasm32"))]
+            self.refresh_local_upload(snapshot, intent).await?;
             return Err(TransferError::rejected(format!("local book is unavailable or invalid: {file_name}")));
         };
         if book.length == 0 {
             return Err(TransferError::rejected(format!("local book is empty: {file_name}")));
         }
         if intent.size_bytes != book.length {
+            drop(book);
+            #[cfg(not(target_arch = "wasm32"))]
+            self.refresh_local_upload(snapshot, intent).await?;
             return Err(TransferError::retryable("local bytes do not match queued book version"));
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -91,17 +118,9 @@ impl AssetExecutor {
     /// Native only: the browser streams books it does not hold instead of
     /// downloading them.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) async fn download_blob(&self, snapshot: &TransferSnapshot, book_id: &BookId, placement: &BookPlacement) -> Result<(), TransferError> {
+    pub(crate) async fn download_blob(&self, book: &NativeBookSnapshot) -> Result<(), TransferError> {
+        let book_id = &book.book_id;
         let assets = self.state.read().await.assets().clone();
-        // No live placement expects this download: the placement went stale
-        // (or never named this hash), so there is nothing to publish. This
-        // mirrors the currency skip below; the queue job still completes.
-        let Some(entry) = snapshot.placement_for(book_id, &placement.rel_path) else {
-            return Ok(());
-        };
-        let Some(book) = entry.book.clone() else {
-            return Ok(());
-        };
         let credentials = self.credentials().await?;
         self.send_download_status(*book_id, DownloadState::Downloading(DownloadProgress::ZERO));
         let endpoint = sync_transport::blob_endpoint(credentials.server_url(), &self.library_id, book_id).map_err(crate::AssetResponseError::Url)?;
@@ -123,8 +142,8 @@ impl AssetExecutor {
         let checksum = known_checksum.or(server_checksum).or_else(|| book_id.content_hash()).ok_or_else(|| TransferError::rejected("book checksum is unavailable"))?;
         let total_bytes = response.content_length();
         let mut destination = {
-            assets.ensure_placement_parent(&placement.rel_path)?;
-            assets.begin_book_write(&placement.rel_path, book_id)?
+            assets.ensure_placement_parent(&book.relative_path)?;
+            assets.begin_book_write(&book.relative_path, book_id)?
         };
         let mut completed_bytes = 0_u64;
         let mut reported_percent = 0_u8;
@@ -169,8 +188,8 @@ impl AssetExecutor {
         let result = async {
             let storage = self.state.write().await;
             // Revalidate the planned placement before publishing downloaded bytes.
-            let current = storage.database().transfer_snapshot(&[*book_id]).await?;
-            let Some(current) = current.placement_for(book_id, &placement.rel_path).and_then(|entry| entry.book.as_ref()).filter(|current| {
+            let current = storage.database().book_download_snapshot(book_id).await?;
+            let Some(current) = current.iter().find(|current| {
                 current.directory == book.directory && current.name == book.name && current.relative_path == book.relative_path && current.format == book.format && current.audiobook_track_titles == book.audiobook_track_titles
             }) else {
                 return Ok(());

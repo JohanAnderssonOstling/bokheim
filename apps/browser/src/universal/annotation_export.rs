@@ -6,7 +6,7 @@ use crate::navigation::{Libraries, LibraryOperationDialog};
 use book_model::BookFormat;
 use futures_util::FutureExt;
 use gpui::prelude::*;
-use gpui::{AnyWindowHandle, App, Context, DismissEvent, Entity, FocusHandle, Focusable, KeyDownEvent, SharedString, Subscription, Task, Window, div, px, rems};
+use gpui::{AnyWindowHandle, App, Context, DismissEvent, Entity, FocusHandle, Focusable, KeyDownEvent, SharedString, Subscription, Task, Window, div, px};
 use gpui_component::Disableable;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{InputEvent, InputState};
@@ -43,7 +43,7 @@ pub(crate) fn open_annotation_export(libraries: Entity<Libraries>, management: M
                 }
             };
             let view = cx.new(|cx| AnnotationExportDialog::new(library, name, window, cx));
-            libraries.update(cx, |libraries, cx| libraries.show_operation_dialog(id, view, 650.0, selection_epoch, window, cx));
+            libraries.update(cx, |libraries, cx| libraries.show_operation_dialog(id, view, 40.625, selection_epoch, window, cx));
         });
     });
 }
@@ -276,7 +276,11 @@ impl AnnotationExportDialog {
                 let message = if result.failure.is_some_and(|failure| failure.file_written) {
                     format!(text!(browse::file_saved_finishing_export_failed), components::path_label(&result.destination.path))
                 } else {
-                    format!("{}: {}", components::path_label(&result.destination.path), result.failure.map_or_else(|| export_failure_message(AnnotationExportFailureKind::Io), |failure| user_facing_error(&failure, export_failure_message(failure.kind))))
+                    format!(
+                        "{}: {}",
+                        components::path_label(&result.destination.path),
+                        result.failure.map_or_else(|| export_failure_message(AnnotationExportFailureKind::Io), |failure| user_facing_error(&failure, export_failure_message(failure.kind)))
+                    )
                 };
                 body = body.child(components::error_text(theme).child(SharedString::from(message)));
             }
@@ -454,7 +458,7 @@ impl Render for AnnotationExportDialog {
                     .flex()
                     .flex_col()
                     .gap(px(components::SPACE_XS))
-                    .child(div().text_size(rems(1.5)).child(text!(browse::export_annotations)))
+                    .child(components::dialog_title(text!(browse::export_annotations), theme))
                     .child(components::form_hint(SharedString::from(if self.loading { self.name.clone() } else { format!(text!(browse::annotations_in_books), self.name, self.books.len(), annotation_count = annotation_count) }), theme)),
             )
             .child(components::outlined_icon_button("annotation-export-close", text!(common::close), gpui_component::IconName::Close).on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))));
@@ -475,13 +479,12 @@ impl Render for AnnotationExportDialog {
                     }
                 }));
             }
-            buttons = buttons.child(components::base_button("annotation-export-done").primary().label(text!(browse::done)).on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))));
+            buttons = buttons.child(components::dialog_confirm_button("annotation-export-done", text!(browse::done), Some("enter")).on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))));
         } else {
             buttons = buttons.child(components::dialog_cancel_button("annotation-export-close-dialog", text!(common::close)).on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))));
             buttons = buttons.child(
-                components::base_button("annotation-export-submit")
-                    .primary()
-                    .label(if self.exporting { text!(browse::exporting_annotations) } else { text!(browse::export) })
+                components::dialog_confirm_button("annotation-export-submit", text!(browse::export), Some("enter"))
+                    .when(self.exporting, |button| button.label(text!(browse::exporting_annotations)))
                     .disabled(self.options(cx).is_none())
                     .on_click(cx.listener(|view, _, _, cx| view.start_export(cx))),
             );

@@ -13,12 +13,12 @@ use crate::{
 /// A viewport-centered touch overlay shared by popovers and manually placed menus.
 /// Content keeps its natural size until it reaches the safe viewport edges.
 pub fn centered_overlay(content: impl IntoElement, window: &Window, cx: &App) -> Anchored {
-    let viewport = window.viewport_size();
+    let viewport = window.input_viewport();
     let safe = window.insets().effective();
-    anchored().position(gpui::point(safe.left, safe.top)).child(
+    anchored().position(viewport.origin + gpui::point(safe.left, safe.top)).child(
         div()
-            .w((viewport.width - safe.left - safe.right).max(px(1.)))
-            .h((viewport.height - safe.top - safe.bottom).max(px(1.)))
+            .w((viewport.size.width - safe.left - safe.right).max(px(1.)))
+            .h((viewport.size.height - safe.top - safe.bottom).max(px(1.)))
             .flex()
             .items_center()
             .justify_center()

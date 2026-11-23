@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["reader-ui/native-audio"]
+default = ["reader-ui/native-audio", "reader-ui/image-zoom", "browser-ui/graph"]
 kobo = ["mobile", "browser-ui/kobo", "reader-ui/kobo", "dep:gpui_kobo", "dep:kobo-device", "app/kobo"]
 mobile = ["browser-ui/mobile", "reader-ui/mobile"]
 packaged-pdfium = ["reader-ui/packaged-pdfium"]
@@ -30,7 +30,7 @@ reader-ui = { path = "../reader", default-features = false }
 sync-common = { path = "../../shared/sync-common" }
 
 gpui-component.workspace = true
-ui-components = { path = "../components" }
+ui-components = { path = "../components", default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { version = "0.3", features = ["Storage", "Window"] }
@@ -38,4 +38,4 @@ web-sys = { version = "0.3", features = ["Storage", "Window"] }
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 tempfile = "3"
-ui-components = { path = "../components" }
+ui-components = { path = "../components", default-features = false }

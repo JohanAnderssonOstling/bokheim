@@ -74,7 +74,7 @@ pub(crate) fn branch_row<C: 'static>(target: &Entity<C>, branch: &SearchBranch, 
     let row = components::ContentsRow { depth, has_children: true, expanded, ..Default::default() };
     let click_target = target.downgrade();
     let key_target = target.downgrade();
-    components::contents_row(("reader-search-branch", id), row, Some(components::contents_disclosure(("reader-search-disclosure", id), row, theme)), branch.title.clone(), None, None, theme)
+    components::contents_row(("reader-search-branch", id), row, Some(components::contents_disclosure(("reader-search-disclosure", id), row, theme)), branch.title.clone(), None, theme)
         .flex_none()
         .focusable()
         .tab_stop(true)

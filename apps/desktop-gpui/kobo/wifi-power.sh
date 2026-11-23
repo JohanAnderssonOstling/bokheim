@@ -24,7 +24,7 @@ case "${WIFI_MODULE:-}" in dhd|8189fs|8189es|8723bs|8723ds|8821cs|moal) ;; *) pr
 if [ "${1:-}" = detect ]; then printf '%s\n' "$WIFI_MODULE"; exit 0; fi
 case "${INTERFACE:-}" in ''|-*|.*|*[!a-zA-Z0-9_.-]*) printf 'Missing or invalid Wi-Fi interface\n' >&2; exit 2 ;; esac
 case "${PLATFORM:-}" in -*|.*|*[!a-zA-Z0-9_.-]*) printf 'Invalid Wi-Fi platform\n' >&2; exit 2 ;; esac
-case "${1:-}" in on|off) ;; *) exit 2 ;; esac
+case "${1:-}" in on|radio-on|off|off-wifi|handoff) ;; *) exit 2 ;; esac
 printf '%s\n' "$WIFI_MODULE" > "$module_state"
 resolve_module() {
     # PLATFORM is not exported by every Nickel launcher. Shutdown does not
@@ -55,12 +55,51 @@ remove_module() {
         sleep 0.2
     done
 }
+stop_processes() {
+    for service_pid in $1; do
+        kill -TERM "$service_pid" 2>/dev/null || true
+    done
+    remaining=30
+    while :; do
+        service_alive=''
+        for service_pid in $1; do
+            if IFS= read -r service_stat 2>/dev/null < "/proc/$service_pid/stat"; then
+                case "${service_stat##*) }" in
+                    Z\ *|X\ *) ;;
+                    *) service_alive="$service_alive $service_pid" ;;
+                esac
+            fi
+        done
+        [ -n "$service_alive" ] || return 0
+        remaining=$((remaining-1))
+        [ "$remaining" -gt 0 ] || return 1
+        sleep 0.1
+    done
+}
 ntx_power() {
     # Use the app's libc adapter instead of depending on a firmware ioctl utility.
     "$(dirname "$0")/desktop-gpui-kobo" --wifi-power-ioctl "$1"
 }
+stop_bluetooth() {
+    # The Libra 2's UART attach process must not retain a controller backed by
+    # a powered-down RTL8723DS. BlueZ and its pairing cache stay available.
+    [ "$WIFI_MODULE" = 8723ds ] || return 0
+    if [ -d /sys/class/bluetooth/hci0 ]; then
+        # Stay in the caller's bounded process group. A nested isolated helper
+        # could otherwise escape when the entire radio operation is cancelled.
+        bluetoothctl --timeout 2 power off >/dev/null 2>&1 || true
+        /bin/hciconfig hci0 down >/dev/null 2>&1 || true
+    fi
+    attach_pids=''
+    for service_pid in $(pidof rtk_hciattach 2>/dev/null || true); do
+        if tr '\000' '\n' < "/proc/$service_pid/cmdline" 2>/dev/null | grep -Fxq /dev/ttymxc1; then
+            attach_pids="$attach_pids $service_pid"
+        fi
+    done
+    stop_processes "$attach_pids"
+}
 case "${1:-}" in
-    on)
+    on|radio-on)
         step="start radio"
         if ! loaded "$WIFI_MODULE"; then
             resolve_module
@@ -92,6 +131,9 @@ case "${1:-}" in
             remaining=$((remaining-1))
             sleep 0.2
         done
+        # Bluetooth needs the module powered, but must not enable Wi-Fi when
+        # the user had disabled it before initializing the Bluetooth adapter.
+        [ "$1" != radio-on ] || exit 0
         ifconfig "$INTERFACE" up
         [ "$WIFI_MODULE" != dhd ] || wlarm_le -i "$INTERFACE" up
         if ! wpa_cli -i "$INTERFACE" ping 2>/dev/null | grep -q '^PONG$'; then
@@ -101,13 +143,43 @@ case "${1:-}" in
                 -c /etc/wpa_supplicant/wpa_supplicant.conf -C /var/run/wpa_supplicant
         fi
         ;;
-    off)
+    off|off-wifi|handoff)
+        if [ "$1" = handoff ]; then
+            # Nickel owns this bridge. Its old connection refers to the
+            # supplicant/driver that Bokheim may have replaced during sleep.
+            step="stop firmware Wi-Fi bridge"
+            stop_processes "$(pidof dhcpcd-dbus 2>/dev/null || true)"
+            # A DHCP request can outlive an app terminated by a signal.
+            dhcp_pids=''
+            for service_pid in $(pidof udhcpc 2>/dev/null || true); do
+                if tr '\000' '\n' < "/proc/$service_pid/cmdline" 2>/dev/null |
+                    awk -v interface="$INTERFACE" '
+                        previous == "-i" && $0 == interface { found=1 }
+                        $0 == "-i" interface { found=1 }
+                        { previous=$0 }
+                        END { exit !found }
+                    '; then
+                    dhcp_pids="$dhcp_pids $service_pid"
+                fi
+            done
+            stop_processes "$dhcp_pids"
+        fi
+        step="release $INTERFACE address"
+        # Use the firmware client's interface-specific shutdown. Leaving it
+        # running while unloading the driver can race subsequent address setup.
+        if command -v dhcpcd >/dev/null 2>&1; then
+            dhcpcd -k "$INTERFACE" >/dev/null 2>&1 || true
+        fi
         step="stop supplicant and bring $INTERFACE down"
         if [ -d "/sys/class/net/$INTERFACE" ]; then
             wpa_cli -i "$INTERFACE" terminate >/dev/null 2>&1 || true
             [ "$WIFI_MODULE" != dhd ] || wlarm_le -i "$INTERFACE" down
             ifconfig "$INTERFACE" down
         fi
+        # Keep the shared radio powered while Bluetooth is in use.
+        [ "$1" != off-wifi ] || exit 0
+        step="release shared Bluetooth controller"
+        stop_bluetooth
         step="unload $WIFI_MODULE"
         remove_module "$WIFI_MODULE"
         if [ "$WIFI_MODULE" = moal ]; then

@@ -1,16 +1,17 @@
-use crate::extract::{asset_error, AuthUser};
+use crate::extract::{AuthUser, asset_error};
 use crate::state::AppState;
-use axum::body::{to_bytes, Body, Bytes};
+use ::wire::typed as wire;
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
 use futures_util::{StreamExt, TryStreamExt};
 use server_asset_store::AssetKind;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use sync_common::api::assets::{
-    BlobManifestRequest, ThumbnailBatchDownloadEntry, ThumbnailBatchDownloadRequest, ThumbnailBatchDownloadResponse, ThumbnailBatchEntry, ThumbnailBatchUploadRequest, MAX_BLOB_MANIFEST_ENTRIES, MAX_THUMBNAIL_BATCH_BYTES,
-    MAX_THUMBNAIL_BATCH_ENTRIES,
+    BlobManifestRequest, MAX_BLOB_MANIFEST_ENTRIES, MAX_THUMBNAIL_BATCH_BYTES, MAX_THUMBNAIL_BATCH_ENTRIES, ThumbnailBatchDownloadEntry, ThumbnailBatchDownloadRequest, ThumbnailBatchDownloadResponse, ThumbnailBatchEntry,
+    ThumbnailBatchUploadRequest,
 };
 use sync_common::{BookId, LibraryId};
 use tokio_util::io::StreamReader;
@@ -243,10 +244,10 @@ pub(super) async fn post_thumbnail_presence(State(state): State<AppState>, user:
 
 #[cfg(test)]
 mod tests {
-    use super::ranges::{parse_range, ByteRange};
+    use super::ranges::{ByteRange, parse_range};
     use super::response_headers;
     use crate::bandwidth::TransferGovernor;
-    use axum::http::{header, StatusCode};
+    use axum::http::{StatusCode, header};
     use server_asset_store::AssetKind;
     use std::io::Cursor;
     use sync_common::BookId;

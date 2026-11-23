@@ -10,7 +10,7 @@ client-platform-runtime = { path = "../../../platforms/runtime" }
 client-protocol = { path = "../../../client-protocol", features = ["http"] }
 audiobook-archive = { path = "../../../../shared/audiobook-archive" }
 content-address = { path = "../../../../shared/content-address" }
-thumbnail = { path = "../thumbnail" }
+thumbnail-contract = { path = "../../../../shared/thumbnail-contract" }
 library-database = { path = "../library-database" }
 library-model = { path = "../../../library-model" }
 update-client = { path = "../../../updates/core" }
@@ -22,6 +22,8 @@ blake3.workspace = true
 tokio = { version = "1", features = ["sync"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["fs", "io-util"] }
 client-platform-native = { path = "../../../platforms/native" }
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
 

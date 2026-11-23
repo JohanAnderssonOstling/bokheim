@@ -23,6 +23,7 @@ use reqwest::blocking::Client;
 use rusqlite::Connection;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use subject_projection::{UNIFIED_SYSTEM_ID, installed, unified_concept_id};
 
 const USAGE: &str = "usage: catalog DIR search FEED_URL
        catalog DIR subject-audit
@@ -48,10 +49,11 @@ const USAGE: &str = "usage: catalog DIR search FEED_URL
        catalog DIR cover HASH IMAGE_URL
        catalog DIR retain-covers MANIFEST_JSON
        catalog DIR extract-standardebooks-covers OUT_DIR
-       catalog DIR publish OUT_DIR RELEASE_ID
+       catalog DIR publish OUT_DIR RELEASE_ID --taxonomy RUNTIME.sqlite3
        catalog compress-snapshot INPUT
 
 DIR holds curation.sqlite3 and the books and covers. HASH may be a prefix.
+Unified subject codes accept a taxonomy path or concept:ID and store concept:ID.
 import adds the EPUBs dropped in DIR/inbox/SOURCE/, SOURCE naming where they
 came from (for example DIR/inbox/standardebooks.org/).
 import-manifest reads an explicit JSON acquisition list, with file paths relative
@@ -133,19 +135,31 @@ fn run(args: &[String]) -> Result<(), String> {
         ("review", []) => review(&dir, &db),
         ("subject", [hash, system, code]) if matches!(system.as_str(), "lcc" | "ddc" | "bisac" | "unified") => edit_subjects(&db, hash, |record| {
             // A manual assignment, as a library user's would be.
-            let subject = BookSubject::new(None, code, "manual:subject", Some(system.clone()), Some(code.clone())).map_err(|e| e.to_string())?;
+            let reference = if system == UNIFIED_SYSTEM_ID {
+                let concept_id = unified_concept_id(code).ok_or_else(|| format!("unknown unified subject: {code}"))?;
+                format!("concept:{concept_id}")
+            } else {
+                code.clone()
+            };
+            let subject = BookSubject::new(None, code, "manual:subject", Some(system.clone()), Some(reference)).map_err(|e| e.to_string())?;
             record.book.subjects.push(subject);
             Ok(())
         }),
         ("unsubject", [hash, system, code]) => edit_subjects(&db, hash, |record| {
-            record.book.subjects.retain(|subject| !(subject.authority() == Some(system.as_str()) && subject.code() == Some(code.as_str())));
+            let concept_id = (system == UNIFIED_SYSTEM_ID).then(|| unified_concept_id(code)).flatten();
+            record.book.subjects.retain(|subject| !(subject.authority() == Some(system.as_str()) && (subject.code() == Some(code.as_str()) || concept_id.is_some_and(|id| subject.code().and_then(unified_concept_id) == Some(id)))));
             Ok(())
         }),
         ("cover", [hash, url]) => {
             let hash = curation::resolve(&db, hash)?;
             CoverAssets::new(&dir, &hash).store_image(&get(&http, &Url::parse(url).map_err(|e| e.to_string())?)?)
         }
-        ("publish", [out, release]) => publish::publish(&dir, &db, Path::new(out), release.parse().map_err(|_| "RELEASE_ID must be a positive integer")?),
+        ("publish", [out, release, option, taxonomy]) if option == "--taxonomy" => {
+            let path = Path::new(taxonomy);
+            installed::validate(path, installed::metadata(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            installed::activate(path).map_err(|e| e.to_string())?;
+            publish::publish(&dir, &db, Path::new(out), release.parse().map_err(|_| "RELEASE_ID must be a positive integer")?)
+        }
         _ => Err(USAGE.into()),
     }
 }

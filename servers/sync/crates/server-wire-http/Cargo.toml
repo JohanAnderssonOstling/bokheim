@@ -10,7 +10,3 @@ workspace = true
 [dependencies]
 axum = "0.7"
 wire = { package = "protobuf-wire", path = "../../../../shared/protobuf-wire" }
-serde = "1"
-
-[dev-dependencies]
-serde_bytes = "0.11"

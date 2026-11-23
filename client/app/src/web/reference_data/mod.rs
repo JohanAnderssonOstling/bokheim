@@ -19,16 +19,25 @@ pub(crate) async fn initialize() -> Result<(), BackendError> {
 
 /// Fetch a deployed application asset. Fetch decodes its HTTP content encoding.
 async fn download_bundle(filename: &str) -> Result<Vec<u8>, BackendError> {
-    let scope: WorkerGlobalScope = global().dyn_into().map_err(|_| "Reference data requires a worker")?;
     let base = js_sys::Reflect::get(&global(), &"__BOKHEIM_ASSET_BASE__".into()).ok().and_then(|base| base.as_string()).unwrap_or_else(|| "./".into());
-    let response: Response =
-        JsFuture::from(scope.fetch_with_str(&format!("{}/{filename}", base.trim_end_matches('/')))).await.map_err(|error| BackendError::operation(OperationError::from(error)).context(format!("{filename} download failed")))?.dyn_into().map_err(|_| format!("Invalid {filename} response"))?;
+    download_url(&format!("{}/{filename}", base.trim_end_matches('/'))).await
+}
+
+async fn download_url(filename: &str) -> Result<Vec<u8>, BackendError> {
+    let scope: WorkerGlobalScope = global().dyn_into().map_err(|_| "Reference data requires a worker")?;
+    let response: Response = JsFuture::from(scope.fetch_with_str(filename))
+        .await
+        .map_err(|error| BackendError::operation(OperationError::from(error)).context(format!("{filename} download failed")))?
+        .dyn_into()
+        .map_err(|_| format!("Invalid {filename} response"))?;
     if !response.ok() {
         return Err(match Failure::from_http_status(response.status()) {
             Some(failure) => BackendError::classified(failure, format!("{filename} download returned HTTP {}", response.status())),
             None => BackendError::message(format!("{filename} download returned HTTP {}", response.status())),
         });
     }
-    let buffer = JsFuture::from(response.array_buffer().map_err(|error| BackendError::operation(OperationError::from(error)).context(format!("{filename} response failed")))?).await.map_err(|error| BackendError::operation(OperationError::from(error)).context(format!("{filename} response failed")))?;
+    let buffer = JsFuture::from(response.array_buffer().map_err(|error| BackendError::operation(OperationError::from(error)).context(format!("{filename} response failed")))?)
+        .await
+        .map_err(|error| BackendError::operation(OperationError::from(error)).context(format!("{filename} response failed")))?;
     Ok(Uint8Array::new(&buffer).to_vec())
 }

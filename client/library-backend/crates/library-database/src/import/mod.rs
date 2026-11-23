@@ -125,8 +125,7 @@ impl Database {
         let prepared = import.inspection.take().map(|inspection| prepare_inspection(inspection, &book_id, import.format)).transpose()?;
         self.write(|tx| {
             tx.pragma_update(None, "defer_foreign_keys", "ON").map_err(DatabaseError::operation)?;
-            let current = first_column::<Option<String>>(|read| tx.shared_scanner_sequence(read)).map_err(DatabaseError::operation)?.flatten();
-            let current = current.unwrap_or_default().parse::<i64>().map_err(|error| DatabaseError::message(format!("scan sequence is not readable: {error}")))?;
+            let current = first_column::<i64>(|read| tx.shared_scanner_sequence(read))?.unwrap_or_default();
             let scan_id = current.checked_add(1).ok_or_else(|| DatabaseError::message("scan sequence overflow"))?;
             tx.scan_seq_update(scan_id).map_err(DatabaseError::operation)?;
             commit_one(tx, import, prepared, matcher)?;
@@ -199,7 +198,7 @@ impl Database {
             for (path, fingerprint, checksum) in sources {
                 tx.execute(
                     "INSERT INTO local_import_source(path,fingerprint,byte_hash) VALUES(?1,?2,?3) ON CONFLICT(path) DO UPDATE SET fingerprint=excluded.fingerprint,byte_hash=excluded.byte_hash",
-                    rusqlite::params![path, fingerprint.to_string(), checksum],
+                    rusqlite::params![path, fingerprint.to_le_bytes(), checksum],
                 )?;
             }
             Ok(created)
@@ -264,33 +263,35 @@ pub(crate) fn admit_import(tx: &Transaction<'_>, import: ImportCommit, prepared:
         if source_hash != book_id || addition.facts.format != format {
             return Err(DatabaseError::message("transferred book identity does not match its bytes"));
         }
-        let has_facts: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM local_book_draft WHERE content_hash=?1) OR EXISTS(SELECT 1 FROM sync_book_record WHERE state_kind='book_add' AND content_hash=?1)", [hash], |row| row.get(0))?;
+        let has_facts: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sync_state_version WHERE state_kind='book_add' AND state_key=?1 AND state_subkey='' AND body IS NOT NULL)", [hash], |row| row.get(0))?;
         tx.ingestion_ensure_book(hash)?;
         record_local(tx, LibraryStateEntry::BookLifecycle { book_id, value: library_replica::BookLifecycleState::Present })?;
         if !has_facts {
-            if addition.enrichment.is_some() {
-                record_local(tx, LibraryStateEntry::BookAdd { book_id, value: addition })?;
-            } else {
-                crate::sync::apply::records::stage(tx, hash, addition)?;
-            }
+            record_local(tx, LibraryStateEntry::BookAdd { book_id, value: addition })?;
         }
         crate::transfer::merge_transfer_progress(tx, book_id, reading, chapter_read, annotations)?;
     }
     if let Some(prepared) = prepared {
-        // The first inspection supplies the draft. Projection owns all
+        // The first inspection supplies file facts. Projection owns all
         // metadata writes; reimports retain the same immutable file facts.
         let PreparedInspection { metadata, navigation, recording, pdf } = prepared;
-        // One immutable addition carries every file fact; lifecycle and
+        // The initial record carries every file fact; lifecycle and
         // placement remain independently mutable.
         tx.ingestion_ensure_book(&hash)?;
         let added_at: i64 = tx.ingestion_added_at(&hash, &(unix_millis()?), |row| row.get(0))?;
         record_local(tx, LibraryStateEntry::BookLifecycle { book_id, value: library_replica::BookLifecycleState::Present })?;
         // Re-imports may change placements and local observations, but cannot
-        // rewrite the immutable addition for the same file hash.
+        // overwrite an existing record for the same file hash.
         if canonical_body(tx, "book_add", &StateKey::Book(*hash), "")?.is_none() {
             let mut metadata = metadata;
             metadata.contributors = resolve_credits(tx, &metadata.contributors, matcher)?.into_iter().map(|(_, credit)| credit).collect();
-            crate::sync::apply::records::stage(tx, hash, BookAddition { facts: BookFacts { added_at: u64::try_from(added_at).map_err(DatabaseError::operation)?, format }, record: metadata, navigation, pdf, recording, enrichment: None })?;
+            record_local(
+                tx,
+                LibraryStateEntry::BookAdd {
+                    book_id: *hash,
+                    value: BookAddition { facts: BookFacts { added_at: u64::try_from(added_at).map_err(DatabaseError::operation)?, format }, record: metadata, navigation, pdf, recording, enrichment: None },
+                },
+            )?;
         }
         tx.record_import_inspection(hash, format as i64, inspection_version).map_err(DatabaseError::operation)?;
     }
@@ -340,7 +341,7 @@ impl ImportObservation {
         } else {
             crate::native::observations::Revision::Retained
         };
-        crate::native::observations::record_file(tx, &parent_id.to_string(), hash, &published.relative_path, published.fingerprint.as_deref(), revision)?;
+        crate::native::observations::record_file(tx, &parent_id.to_string(), hash, &published.relative_path, published.fingerprint, revision)?;
         if request_thumbnail {
             tx.shared_request_thumbnail(hash).map_err(DatabaseError::operation)?;
         }
@@ -410,7 +411,7 @@ mod tests {
                 size_bytes: bytes.len() as u64,
                 inspection_version: -2,
                 inspection: None,
-                published: PublishedStagedBook { name: name.into(), relative_path: format!("/{name}"), published: true, fingerprint: Some("1".into()) },
+                published: PublishedStagedBook { name: name.into(), relative_path: format!("/{name}"), published: true, fingerprint: Some(1) },
                 request_thumbnail: true,
                 restore_paths: Vec::new(),
             },
@@ -435,7 +436,7 @@ mod tests {
             let hash = BookId::from(blake3::hash(bytes));
             assert_eq!(serde_json::to_value(batched.book_transfer_state(hash).unwrap()).unwrap(), serde_json::to_value(sequential.book_transfer_state(hash).unwrap()).unwrap());
             assert_eq!(batched.book_paths(&hash).unwrap(), sequential.book_paths(&hash).unwrap());
-            assert_eq!(batched.local_content_revision(hash, ROOT_DIR_ID, checksum).unwrap().as_deref(), Some("1"));
+            assert_eq!(batched.local_content_revision(hash, ROOT_DIR_ID, checksum).unwrap(), Some(1));
         }
         let first = BookId::from(blake3::hash(b"first"));
         assert_eq!(batched.annotations(first).unwrap().len(), 1);

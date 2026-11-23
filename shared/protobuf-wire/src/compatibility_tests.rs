@@ -89,13 +89,13 @@ fn direct_codec_preserves_float_bits_including_nan() {
 }
 
 #[test]
-fn arbitrary_map_keys_retain_type_order_and_last_duplicate_values() {
+fn arbitrary_map_keys_reject_collisions_after_wire_type_normalization() {
     let keys = [Value::U8(1), Value::U16(1), Value::U32(1), Value::U64(1), Value::Bool(false), Value::String("a".into()), Value::Bytes(vec![1, 2]), Value::Seq(vec![Value::U8(1)]), Value::Newtype(Box::new(Value::String("a".into())))];
     let value = Value::Map(keys.into_iter().enumerate().map(|(index, key)| (key, Value::U64(index as u64))).collect());
     let bytes = assert_bytes(&value);
     let envelope = protobuf::Envelope::decode(bytes.as_slice()).unwrap();
-    let previous = domain_value(envelope.value.unwrap(), false).unwrap();
-    assert_eq!(decode::<Value>(&bytes, 4096).unwrap(), previous);
+    assert!(domain_value(envelope.value.unwrap(), false).is_err());
+    assert!(decode::<Value>(&bytes, 4096).is_err());
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn invalid_values_are_rejected_even_in_ignored_fields() {
         let envelope = protobuf::Envelope {
             version: VERSION,
             value: Some(protobuf::Value {
-                kind: Some(Kind::Map(protobuf::Map { entries: vec![protobuf::MapEntry { key: Some(string("name")), value: Some(string("valid")) }, protobuf::MapEntry { key: Some(string("ignored")), value: Some(invalid) }] })),
+                kind: Some(Kind::Map(protobuf::Map { entries: vec![protobuf::MapEntry { key: Some(string("ignored")), value: Some(invalid) }, protobuf::MapEntry { key: Some(string("name")), value: Some(string("valid")) }] })),
             }),
         };
         #[derive(Deserialize)]
@@ -178,7 +178,7 @@ fn invalid_values_are_rejected_even_in_ignored_fields() {
 }
 
 #[test]
-fn string_map_fast_path_preserves_unsorted_duplicate_and_compact_values() {
+fn string_map_fast_path_requires_ordered_unique_keys() {
     use protobuf::value::Kind;
     let string = |key: &str| protobuf::Value { kind: Some(Kind::StringValue(key.into())) };
     for names in [vec![], vec!["a"], vec!["a", "b", "🦀"], vec!["🦀", "b", "a"], vec!["b", "a", "b"]] {
@@ -188,8 +188,13 @@ fn string_map_fast_path_preserves_unsorted_duplicate_and_compact_values() {
             })),
         };
         let bytes = protobuf::Envelope { version: VERSION, value: Some(value.clone()) }.encode_to_vec();
-        assert_eq!(decode::<Value>(&bytes, 4096).unwrap(), domain_value(value.clone(), false).unwrap());
-        assert_eq!(decode_byte_fields::<Value>(&bytes, 4096).unwrap(), domain_value(value, true).unwrap());
+        if names.windows(2).all(|pair| pair[0] < pair[1]) {
+            assert_eq!(decode::<Value>(&bytes, 4096).unwrap(), domain_value(value.clone(), false).unwrap());
+            assert_eq!(decode_byte_fields::<Value>(&bytes, 4096).unwrap(), domain_value(value, true).unwrap());
+        } else {
+            assert!(decode::<Value>(&bytes, 4096).is_err());
+            assert!(decode_byte_fields::<Value>(&bytes, 4096).is_err());
+        }
     }
 }
 
@@ -202,7 +207,11 @@ fn single_entry_enum_fast_path_keeps_duplicate_variant_and_invalid_map_rules() {
     };
     let encode_map = |entries| protobuf::Envelope { version: VERSION, value: Some(protobuf::Value { kind: Some(Kind::Map(protobuf::Map { entries })) }) }.encode_to_vec();
     for entries in [vec![entry("Newtype", 2)], vec![entry("Newtype", 1), entry("Newtype", 2)]] {
-        assert_eq!(decode::<Shapes>(&encode_map(entries), 4096).unwrap(), Shapes::Newtype(Newtype(2)));
+        if entries.len() == 1 {
+            assert_eq!(decode::<Shapes>(&encode_map(entries), 4096).unwrap(), Shapes::Newtype(Newtype(2)));
+        } else {
+            assert!(decode::<Shapes>(&encode_map(entries), 4096).is_err());
+        }
     }
     assert!(decode::<Shapes>(&encode_map(Vec::new()), 4096).is_err());
     assert!(decode::<Shapes>(&encode_map(vec![entry("Newtype", 1), entry("other", 2)]), 4096).is_err());

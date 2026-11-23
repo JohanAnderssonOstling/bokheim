@@ -1,7 +1,7 @@
 use super::DirectoryEntry;
 use crate::executor::run_blocking;
 use crate::storage_queue;
-use std::fs::{self, File};
+use crate::filesystem::{self as fs, File, temporary};
 use std::io::{self, ErrorKind, Write};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
@@ -25,7 +25,7 @@ pub async fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
 pub fn write_atomic_sync(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
-    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    let mut staged = temporary::NamedTempFile::new_in(parent)?;
     staged.write_all(bytes)?;
     staged.as_file().sync_all()?;
     staged.persist(path).map_err(|error| error.error)?;
@@ -40,7 +40,7 @@ pub async fn write_atomic(path: &Path, bytes: Vec<u8>) -> io::Result<()> {
 
 pub async fn open(path: &Path) -> io::Result<Source> {
     let path = path.to_owned();
-    run_blocking(move || File::open(path)).await.map_err(io::Error::other)?
+    run_blocking(move || fs::open(path)).await.map_err(io::Error::other)?
 }
 
 pub async fn remove_directory(path: &Path) -> io::Result<()> {

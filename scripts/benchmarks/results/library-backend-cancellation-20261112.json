@@ -1,0 +1,83 @@
+{
+  "date": "2026-11-12",
+  "browser_scenarios": [
+    {
+      "name": "standard",
+      "requests": 2,
+      "documents": [
+        "chapter.xhtml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "unusual",
+      "requests": 3,
+      "documents": [
+        "chapter.xml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "comment",
+      "requests": 4,
+      "documents": [
+        "chapter.xhtml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "legacy",
+      "requests": 4,
+      "documents": [
+        "chapter.xhtml"
+      ],
+      "eager_text": true
+    },
+    {
+      "name": "cbz",
+      "requests": 2,
+      "cached_reread": true,
+      "pages": 3,
+      "resumed_page": 1
+    },
+    {
+      "name": "cbz-deleted",
+      "requests": 3,
+      "cached_reread": true,
+      "pages": 2,
+      "resumed_page": 1
+    },
+    {
+      "name": "cbz-legacy",
+      "requests": 6,
+      "cached_reread": true,
+      "pages": 3,
+      "resumed_page": 1
+    },
+    {
+      "failure_cleanup": true,
+      "final_reader_cleanup": true,
+      "name": "opfs-repack",
+      "payload_bytes": 4194304,
+      "repack_ms": 176.7,
+      "source_pin": true,
+      "tracks": 2,
+      "unpublished": true
+    },
+    {
+      "name": "opfs-cancellation",
+      "partial_source_cleanup": true,
+      "persisted_bytes": 65536,
+      "unpublished": true,
+      "http_aborted": true
+    }
+  ],
+  "passed": 9,
+  "failed": 0,
+  "scope": "Production HTTP streaming and OPFS writer APIs; acquisition future dropped after first persisted chunk; server confirms response aborted before worker termination.",
+  "limits": [
+    "Does not invoke catalog lookup or the complete catalog import entry point.",
+    "Does not cover worker termination or cancellation during synchronous repacking.",
+    "Full wall-clock scanner retry cycle remains unmeasured."
+  ]
+}

@@ -17,7 +17,7 @@ use serde_json::Value;
 use sync_common::{BookId, DirId};
 
 use crate::LibraryImport;
-use crate::reader_transfer::{ReaderMetadata, ReaderPreparation, import_reader_book, reading_progress};
+use crate::reader_transfer::{ReaderImportOperation, ReaderMetadata, ReaderPreparation, import_reader_book, reading_progress};
 
 mod library;
 pub use library::{ReadestBookCounts, ReadestGroup, ReadestImportOptions, ReadestImportReport, ReadestLibrary, ReadestLibrarySummary};
@@ -99,13 +99,11 @@ fn readest_format(value: &str) -> Result<BookFormat, BackendError> {
     }
 }
 
-pub(crate) async fn import_book_in_batch(
-    importer: &LibraryImport<'_>, books_directory: &Path, parent: DirId, book: &ReadestBook, config: &ReadestConfig, mode: ImportMode, batch: Option<&mut crate::reader_batch::ReaderImportBatch>,
-) -> Result<ReadestImportResult, BackendError> {
+pub(crate) async fn import_book_in_batch(importer: &LibraryImport<'_>, books_directory: &Path, parent: DirId, book: &ReadestBook, config: &ReadestConfig, operation: ReaderImportOperation<'_>) -> Result<ReadestImportResult, BackendError> {
     let source = resolve_book_path(books_directory, book)?;
     let format = readest_format(&book.format)?;
     let prepare = ReaderPreparation::Readest { book: book.clone(), config: config.clone() };
-    let mut result = import_reader_book(importer, parent, &source, format, mode, batch, prepare).await?;
+    let mut result = import_reader_book(importer, parent, &source, format, operation, prepare).await?;
     result.skipped_pdf_annotations = if format == BookFormat::Pdf { config.booknotes.len() } else { 0 };
     Ok(result)
 }

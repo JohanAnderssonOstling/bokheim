@@ -63,7 +63,7 @@ impl LibraryResources {
         }
         self.database.set_asset_storage_policy(enabled, reset_cloud_presence).await?;
         self.transfers.set_asset_storage_enabled(enabled);
-        self.events.assets.wake();
+        self.events.wake_assets();
         self.events.sync.request_remote_refresh();
         self.events.updates.publish(library_model::LibraryUpdate::SyncStatusChanged);
         Ok(())

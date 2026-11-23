@@ -50,8 +50,22 @@ def verify(apk, version, certificate, metadata, apksigner, aapt):
                     f'Missing or invalid ARM64 native library: {name}')
         for name in ('taxonomy.sqlite3', 'taxonomy.digest'):
             require(archive.getinfo('assets/' + name).file_size > 0, f'Missing taxonomy asset: {name}')
-        for name in ('en_GB-alba-medium.onnx', 'tokens.txt', 'voice.sha256', 'VOICE-LICENSE.txt'):
+        for name in ('en_GB-alba-medium.ort', 'tokens.txt', 'voice.sha256', 'VOICE-LICENSE.txt'):
             require(archive.getinfo('assets/tts/alba/' + name).file_size > 0, f'Missing alba speech asset: {name}')
+        require('assets/tts/alba/en_GB-alba-medium.onnx' not in archive.namelist(),
+                'Minimal Android speech must bundle only the converted ORT model')
+        runtime = json.loads(archive.read('assets/tts/RUNTIME-SOURCE.json'))
+        require(runtime.get('target') == 'aarch64-linux-android'
+                and runtime.get('runtime_features', {}).get('minimal_build') is True
+                and runtime['runtime_features'].get('model_format') == 'ORT',
+                'Missing minimal Android speech runtime provenance')
+        model = 'alba/en_GB-alba-medium.ort'
+        expected = runtime['operator_analysis']['converted_models'][model]['sha256']
+        with archive.open('assets/tts/' + model) as stream:
+            require(hashlib.file_digest(stream, 'sha256').hexdigest() == expected,
+                    'Bundled voice differs from the minimal runtime operator analysis')
+        require(archive.getinfo('assets/tts/RUNTIME-LICENSE.txt').file_size > 0,
+                'Missing speech runtime license notices')
         require(any(name.startswith('assets/tts/alba/espeak-ng-data/') for name in archive.namelist()),
                 'Missing alba speech phonemizer data')
         require(not any(name.startswith('assets/tts/george/') for name in archive.namelist()),

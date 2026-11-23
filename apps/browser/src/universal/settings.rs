@@ -2,10 +2,9 @@
 //!
 //! Preference edits use the shared [`Preferences`] store.
 //!
-//! The account and its sync state are the first section rather than a
-//! destination of their own: signing in is something you do once, and the
-//! things it governs — quota, which libraries sync — are settings like any
-//! other. [`SyncPage`] keeps owning that state and is embedded here.
+//! Appearance leads, with Account beside it when space allows. Libraries and
+//! Dictionaries share the next row on wide screens and stack on narrow ones.
+//! [`SyncPage`] keeps owning account and library state and is embedded here.
 //!
 //! Arrow keys follow the reader settings model: up/down selects a setting,
 //! left/right edits its value, and an accent marker identifies the active row.
@@ -22,7 +21,7 @@ mod navigation;
 
 use ui_components::user_facing_error;
 
-use crate::services::{UpdateControls, format_storage_bytes};
+use crate::services::UpdateControls;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -68,9 +67,8 @@ const MAX_CONTROLS: usize = 512;
 ///
 /// Appearance leads: it is what most visits come to change, and the account
 /// led with a storage figure that nobody opened the page to read. The account
-/// and the libraries follow together, since that is what both are about. The
-/// libraries come last: that block grows with every library on the device and
-/// with whatever is syncing, and nothing should sit underneath it.
+/// and the libraries follow together, since that is what both are about.
+/// Dictionaries follow the library list.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 enum Section {
@@ -80,14 +78,10 @@ enum Section {
     CoverText,
     #[cfg(feature = "kobo")]
     GeneratedCovers,
-    FontFamily,
-    FontSize,
     #[cfg(not(feature = "kobo"))]
     Animations,
-    Dictionaries,
-    #[cfg(not(feature = "kobo"))]
-    Transfers,
-    TextSearch,
+    FontFamily,
+    FontSize,
     Account,
     #[cfg(feature = "kobo")]
     KoboAutoSleep,
@@ -98,9 +92,10 @@ enum Section {
     #[cfg(target_os = "android")]
     LibraryStorage,
     Libraries,
+    Dictionaries,
 }
 
-const SECTION_COUNT: usize = Section::Libraries as usize + 1;
+const SECTION_COUNT: usize = Section::Dictionaries as usize + 1;
 
 /// Where a section can be found: which focus it contains, and where it was last
 /// laid out.
@@ -113,6 +108,7 @@ pub(crate) struct SettingsPage {
     dictionaries: Entity<dictionary_settings::DictionarySettings>,
     keyboard: Entity<components::KeyboardShortcutEditor>,
     keyboard_tab: bool,
+    parallel_sections: bool,
     font_picker: Option<Entity<font_picker::FontPicker>>,
     font_choice_focus: [FocusHandle; 2],
     #[cfg(not(feature = "kobo"))]
@@ -127,11 +123,6 @@ pub(crate) struct SettingsPage {
     /// the page reported a theme that would not save from below everything
     /// else on it.
     error: Option<SharedString>,
-    #[cfg(not(feature = "kobo"))]
-    transfer_save_error: Option<SharedString>,
-    text_search_error: Option<SharedString>,
-    index_usage: Option<SharedString>,
-    index_usage_request: Option<gpui::Task<()>>,
     #[cfg(feature = "kobo")]
     uninstall_error: Option<SharedString>,
     #[cfg(feature = "kobo")]
@@ -154,6 +145,8 @@ impl SettingsPage {
     pub(crate) fn new(updates: Option<Entity<UpdateControls>>, account: Entity<SyncPage>, preferences: Entity<Preferences>, cx: &mut Context<Self>) -> Self {
         let update_changes = updates.as_ref().map(|updates| cx.observe(updates, |_, _, cx| cx.notify()));
         let preference_changes = cx.observe(&preferences, |_, _, cx| cx.notify());
+        #[cfg(target_os = "android")]
+        cx.observe_global::<crate::AndroidStoragePolicy>(|_: &mut Self, cx| cx.notify()).detach();
         let libraries = cx.new(|cx| LibrariesView::new(account.clone(), cx));
         let dictionaries = cx.new(|cx| dictionary_settings::DictionarySettings::new(dictionary_settings::client(cx), Vec::new(), cx));
         let sections = std::array::from_fn(|_| SettingsSection { focus: cx.focus_handle(), bounds: Rc::new(Cell::new(Bounds::default())) });
@@ -166,6 +159,7 @@ impl SettingsPage {
             dictionaries,
             keyboard,
             keyboard_tab: false,
+            parallel_sections: false,
             font_picker: None,
             font_choice_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
             #[cfg(not(feature = "kobo"))]
@@ -176,11 +170,6 @@ impl SettingsPage {
             account,
             libraries,
             error: None,
-            #[cfg(not(feature = "kobo"))]
-            transfer_save_error: None,
-            text_search_error: None,
-            index_usage: None,
-            index_usage_request: None,
             #[cfg(feature = "kobo")]
             uninstall_error: None,
             #[cfg(feature = "kobo")]
@@ -256,42 +245,9 @@ impl SettingsPage {
     /// goes on showing the old value, which without being told reads as the
     /// press having done nothing at all.
     fn update_browsing(&mut self, patch: BrowsingPreferencePatch, cx: &mut Context<Self>) {
-        if let BrowsingPreferencePatch::TextSearch(enabled) = patch {
-            self.text_search_error = None;
-            let saved = self.preferences.update(cx, |preferences, cx| preferences.save_text_search(enabled, cx));
-            cx.spawn(async move |page, cx| {
-                let result = saved.await;
-                let _ = page.update(cx, |page, cx| {
-                    page.text_search_error = result.err().map(|error| format!(text!(settings::could_not_save_text_search), user_facing_error(&error, "")).into());
-                    page.index_usage_request = None;
-                    page.index_usage = None;
-                    cx.notify();
-                });
-            })
-            .detach();
-            return;
-        }
-        #[cfg(not(feature = "kobo"))]
-        if let BrowsingPreferencePatch::AllowMeteredTransfers(enabled) = patch {
-            self.transfer_save_error = None;
-            self.error = None;
-            let saved = self.preferences.update(cx, |preferences, cx| preferences.save_metered_transfers(enabled, cx));
-            cx.spawn(async move |page, cx| {
-                let result = saved.await;
-                let _ = page.update(cx, |page, cx| {
-                    page.transfer_save_error = result.err().map(|error| format!(text!(settings::could_not_save_the_transfer_setting), user_facing_error(&error, "")).into());
-                    cx.notify();
-                });
-            })
-            .detach();
-            cx.notify();
-            return;
-        }
         let showing = self.preferences.read(cx).browsing();
         let (setting, current) = match &patch {
-            BrowsingPreferencePatch::TextSearch(_) => (text!(settings::text_search), if showing.text_search() { text!(common::on) } else { text!(common::off) }.to_owned()),
             BrowsingPreferencePatch::Animations(_) => (text!(settings::animations), if showing.animations() { text!(common::on) } else { text!(common::off) }.to_owned()),
-            BrowsingPreferencePatch::AllowMeteredTransfers(_) => (text!(settings::metered_transfers), if showing.allow_metered_transfers() { text!(common::on) } else { text!(common::off) }.to_owned()),
             BrowsingPreferencePatch::Theme(_) => (text!(settings::application_theme), showing.theme().label().to_owned()),
             BrowsingPreferencePatch::Palette(_, _) => {
                 let appearance = showing.appearance_override().unwrap_or_else(|| components::theme::resolved_appearance(cx));
@@ -300,6 +256,7 @@ impl SettingsPage {
             BrowsingPreferencePatch::UiFontSizePx(_) => (text!(settings::ui_font_size), format!("{}px", showing.ui_font_size_px())),
             BrowsingPreferencePatch::UiFontFamily(_) | BrowsingPreferencePatch::CustomUiFontFamily(_) => (text!(settings::ui_typeface), showing.ui_font_name().to_owned()),
             BrowsingPreferencePatch::CoverText(_) => (text!(settings::cover_text), showing.cover_text().label().to_owned()),
+            BrowsingPreferencePatch::BookListView(_) => (text!(browse::view), showing.book_list_view().label().to_owned()),
             BrowsingPreferencePatch::GeneratedCoversOnly(_) => (text!(settings::covers), if showing.generated_covers_only() { text!(settings::generated) } else { text!(settings::book_art) }.to_owned()),
             BrowsingPreferencePatch::CatalogGrouping(_) => (text!(settings::catalog_grouping), showing.catalog_grouping().label().to_owned()),
             BrowsingPreferencePatch::CatalogLanguages(_) => {
@@ -313,30 +270,12 @@ impl SettingsPage {
         cx.notify();
     }
 
-    pub(crate) fn pause_index_usage(&mut self) {
-        self.index_usage_request = None;
-    }
-
-    // Read once on entering Settings or changing text-search preferences. Keep
-    // the completed task until leaving so rendering does not restart the query.
-    fn refresh_index_usage(&mut self, cx: &mut Context<Self>) {
-        let libraries = self.preferences.read(cx).backend().management.clone();
-        self.index_usage_request = Some(cx.spawn(async move |page, cx| {
-            let result = libraries.text_search_index_bytes().await;
-            let _ = page.update(cx, |page, cx| {
-                let usage = match result {
-                    Ok(bytes) => format_storage_bytes(bytes).into(),
-                    Err(error) => {
-                        log::warn!("could not read text index usage: {error}");
-                        text!(common::unavailable).into()
-                    }
-                };
-                if page.index_usage.as_ref() != Some(&usage) {
-                    page.index_usage = Some(usage);
-                    cx.notify();
-                }
-            });
-        }));
+    #[cfg(not(feature = "kobo"))]
+    fn on_off_choices(ids: [&'static str; 2], enabled: bool, patch: fn(bool) -> BrowsingPreferencePatch, cx: &Context<Self>) -> Div {
+        let theme = components::browser_theme(cx);
+        components::browser_settings_button_group(theme).children(
+            [false, true].into_iter().zip(ids).map(|(value, id)| Self::preference_button(components::settings_choice_button(id, if value { text!(common::on) } else { text!(common::off) }, enabled == value, theme), patch(value), cx)),
+        )
     }
 
     fn preference_button(button: Button, patch: BrowsingPreferencePatch, cx: &Context<Self>) -> Button {
@@ -412,6 +351,14 @@ impl SettingsPage {
             )
             .when(selected, |row| row.child(div().absolute().left(px(-components::CONTENT_INSET)).top_0().bottom_0().w(px(2.0)).bg(theme.accent)))
     }
+
+    /// A whole preference wraps before its controls are squeezed. The basis
+    /// includes the measured label and control widths, so larger text and
+    /// longer font names can put a setting on a row of its own.
+    fn preference_section(&self, id: Section, title: &'static str, control: impl IntoElement, minimum_width: Pixels, window: &Window, cx: &Context<Self>) -> Div {
+        let width = minimum_width.max(components::interface_label_width(title, components::TEXT_XS, window, cx));
+        self.section(id, components::browser_settings_control(title, control, components::browser_theme(cx)), cx).w_auto().flex_auto().flex_basis(width).min_w_0().max_w_full()
+    }
 }
 
 impl Focusable for SettingsPage {
@@ -423,9 +370,6 @@ impl Focusable for SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.visible_sections.borrow_mut().clear();
-        if self.index_usage_request.is_none() {
-            self.refresh_index_usage(cx);
-        }
         let theme = components::browser_theme(cx);
         let preferences = self.preferences.read(cx).browsing();
         let desktop = !components::uses_mobile_navigation(window) && !cfg!(feature = "kobo");
@@ -455,30 +399,30 @@ impl Render for SettingsPage {
             ("increase-ui-font-size", "+", components::configured_shortcut_tooltip(text!(common::increase_interface_font_size), "browse.font_increase", cx), current_font_size.saturating_add(1).min(UI_FONT_SIZE_MAX), UI_FONT_SIZE_MAX),
         ]
         .map(|(id, label, tooltip, value, limit)| Self::preference_button(components::settings_stepper_button(id, label, current_font_size == limit).tooltip(tooltip), BrowsingPreferencePatch::UiFontSizePx(value), cx));
-        let font_size = components::settings_stepper(decrease, format!("{current_font_size}px"), increase, theme);
+        let font_size = components::reader_settings_stepper(decrease, format!("{current_font_size}px"), increase, theme);
 
+        let font_family_width;
         let font_families = {
             let labels =
                 if cfg!(target_arch = "wasm32") { vec![text!(common::serif), text!(common::sans_serif)] } else { vec![text!(common::serif), text!(common::sans_serif), preferences.custom_ui_font_family().unwrap_or(text!(common::custom))] };
-            let width = (window.rem_size() * components::THEME_PICKER_WIDTH_REM).max(components::equal_choice_group_width(&labels, components::TEXT_XS, 2.0, components::SPACE_SM, window, cx));
-            let mut choices = components::reader_tile_group("ui-font-families").w(width).max_w_full().flex_none();
+            let sample_width = components::interface_label_width(text!(common::aa), 1.25, window, cx);
+            font_family_width = (components::equal_choice_group_width(&labels, components::TEXT_SM, f32::from(sample_width) + 2.0 * components::SPACE_SM + components::SPACE_XS, components::SETTINGS_CONTROL_GAP, window, cx) + px(2.0))
+                .max(components::interface_label_width(text!(settings::ui_typeface), components::TEXT_XS, window, cx));
+            let mut choices = components::settings_choice_row(labels.len() as u16, theme).id("ui-font-families");
             for (index, value) in [UiFontFamily::Serif, UiFontFamily::SansSerif].into_iter().enumerate() {
                 choices = choices.child(
-                    components::reader_picture_tile(
+                    components::reader_picture_choice(
                         format!("ui-font-family-{index}"),
                         components::reader_typeface_sample(Some(value.family_name())),
                         value.label(),
                         !preferences.custom_ui_font_active() && value == preferences.ui_font_family(),
                         theme,
                     )
+                    .h_full()
+                    .min_h_0()
+                    .min_w_auto()
                     .track_focus(&self.font_choice_focus[index])
-                    .on_click(cx.listener(move |page, _, _, cx| page.update_browsing(BrowsingPreferencePatch::UiFontFamily(value), cx)))
-                    .on_key_down(cx.listener(move |page, event: &KeyDownEvent, _, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            page.update_browsing(BrowsingPreferencePatch::UiFontFamily(value), cx);
-                            cx.stop_propagation();
-                        }
-                    })),
+                    .on_click(cx.listener(move |page, _, _, cx| page.update_browsing(BrowsingPreferencePatch::UiFontFamily(value), cx))),
                 );
             }
             if !cfg!(target_arch = "wasm32") {
@@ -490,82 +434,68 @@ impl Render for SettingsPage {
                     .detach();
                     picker
                 });
-                picker.update(cx, |picker, _| {
-                    picker.set_selected(preferences.custom_ui_font_family().map(str::to_owned));
+                picker.update(cx, |picker, cx| {
+                    picker.set_selected(preferences.custom_ui_font_family().map(str::to_owned), cx);
                     picker.set_active(preferences.custom_ui_font_active());
                 });
-                choices = choices.child(div().flex_1().min_w_0().overflow_hidden().child(picker.clone()));
+                choices = choices.child(picker.clone());
             }
             choices
         };
 
         let current_cover_text = preferences.cover_text();
+        let cover_text_width = components::equal_choice_group_width(&[text!(settings::always), text!(settings::cover_only)], components::TEXT_SM, 2.0 * components::SPACE_SM, components::SETTINGS_CONTROL_GAP, window, cx) + px(2.0);
         let cover_texts = {
-            let width = (window.rem_size() * components::THEME_PICKER_WIDTH_REM)
-                .max(components::equal_choice_group_width(&[text!(settings::always), text!(settings::cover_only)], components::TEXT_SM, 2.0 * components::SPACE_SM, components::SETTINGS_CONTROL_GAP, window, cx) + px(2.0));
-            let mut choices = components::browser_settings_button_group(theme).w(width).flex_none();
+            let mut choices = components::browser_settings_button_group(theme).w_full();
             for (index, value) in [CoverText::Always, CoverText::CoverOnly].into_iter().enumerate() {
                 choices = choices.child(Self::preference_button(components::settings_choice_button(format!("cover-text-{index}"), value.label(), value == current_cover_text, theme), BrowsingPreferencePatch::CoverText(value), cx));
             }
             choices
         };
 
-        let appearance_settings = components::browser_settings_fieldset(text!(settings::appearance), theme);
+        let mut appearance_controls = div().w_full().min_w_0().flex().flex_col().gap(px(10.0));
         #[cfg(not(feature = "kobo"))]
-        let appearance_settings = appearance_settings.child(self.section(Section::Theme, components::browser_settings_compact_row(text!(settings::application_theme), application_themes, theme).border_t_0(), cx));
-        let appearance_settings =
-            appearance_settings.child(self.section(Section::CoverText, components::browser_settings_compact_row(text!(settings::cover_text), cover_texts, theme).when(cfg!(feature = "kobo"), |row| row.border_t_0()), cx));
+        {
+            appearance_controls = appearance_controls.child(self.section(Section::Theme, components::browser_settings_control(text!(settings::application_theme), application_themes, theme), cx));
+        }
+        let cover_text = self.preference_section(Section::CoverText, text!(settings::cover_text), cover_texts, cover_text_width, window, cx);
+        let mut cover_row = components::browser_settings_paired_controls().child(cover_text);
         // Book art or every book's generated cover; generated skips reading
         // and decoding cover images, the costliest part of a library page here.
         #[cfg(feature = "kobo")]
-        let appearance_settings = {
+        {
             let generated = preferences.generated_covers_only();
             let choices = components::browser_settings_button_group(theme)
+                .w_full()
                 .child(Self::preference_button(components::settings_choice_button("covers-book-art", text!(settings::book_art), !generated, theme), BrowsingPreferencePatch::GeneratedCoversOnly(false), cx))
                 .child(Self::preference_button(components::settings_choice_button("covers-generated", text!(settings::generated), generated, theme), BrowsingPreferencePatch::GeneratedCoversOnly(true), cx));
-            appearance_settings.child(self.section(Section::GeneratedCovers, components::browser_settings_compact_row(text!(settings::covers), choices, theme), cx))
-        };
-        let appearance_settings = appearance_settings.child(self.section(Section::FontFamily, components::browser_settings_compact_row(text!(settings::ui_typeface), font_families, theme), cx));
-        let appearance_settings = appearance_settings.child(self.section(Section::FontSize, components::browser_settings_compact_row(text!(settings::ui_font_size), font_size, theme), cx));
+            let width = components::equal_choice_group_width(&[text!(settings::book_art), text!(settings::generated)], components::TEXT_SM, 2.0 * components::SPACE_SM, components::SETTINGS_CONTROL_GAP, window, cx) + px(2.0);
+            cover_row = cover_row.child(self.preference_section(Section::GeneratedCovers, text!(settings::covers), choices, width, window, cx));
+        }
         #[cfg(not(feature = "kobo"))]
-        let appearance_settings = {
+        {
             let enabled = preferences.animations();
-            let choices = components::browser_settings_button_group(theme)
-                .child(Self::preference_button(components::settings_choice_button("animations-off", text!(common::off), !enabled, theme), BrowsingPreferencePatch::Animations(false), cx))
-                .child(Self::preference_button(components::settings_choice_button("animations-on", text!(common::on), enabled, theme), BrowsingPreferencePatch::Animations(true), cx));
-            appearance_settings.child(self.section(Section::Animations, components::browser_settings_compact_row(text!(settings::animations), choices, theme), cx))
-        };
+            let choices = Self::on_off_choices(["animations-off", "animations-on"], enabled, BrowsingPreferencePatch::Animations, cx).w_full();
+            let width = components::equal_choice_group_width(&[text!(common::off), text!(common::on)], components::TEXT_SM, 2.0 * components::SPACE_SM, components::SETTINGS_CONTROL_GAP, window, cx) + px(2.0);
+            cover_row = cover_row.child(self.preference_section(Section::Animations, text!(settings::animations), choices, width, window, cx));
+        }
+        appearance_controls = appearance_controls.child(cover_row).child(
+            components::browser_settings_paired_controls()
+                .child(self.preference_section(Section::FontFamily, text!(settings::ui_typeface), font_families, font_family_width, window, cx))
+                .child(self.section(Section::FontSize, components::browser_settings_control(text!(settings::ui_font_size), font_size, theme), cx).w_auto().flex_none().min_w_auto().max_w_full()),
+        );
         // Every preference on this page lives in this group, so this is where a
         // preference that would not save reports.
-        let appearance_settings = appearance_settings.children(self.error.clone().map(|error| components::browser_settings_group_error(error, theme)));
+        let appearance_settings = components::browser_settings_fieldset(text!(settings::appearance), theme).child(appearance_controls).children(self.error.clone().map(|error| components::browser_settings_group_error(error, theme)));
 
-        let enabled = preferences.text_search();
-        let choices = components::browser_settings_button_group(theme)
-            .child(Self::preference_button(components::settings_choice_button("text-search-off", text!(common::off), !enabled, theme), BrowsingPreferencePatch::TextSearch(false), cx))
-            .child(Self::preference_button(components::settings_choice_button("text-search-on", text!(common::on), enabled, theme), BrowsingPreferencePatch::TextSearch(true), cx));
-        let usage = self.index_usage.clone().unwrap_or_else(|| text!(account::calculating).into());
-        let text_search = components::browser_settings_fieldset(text!(settings::text_search), theme)
-            .child(self.section(Section::TextSearch, components::browser_settings_compact_row(text!(settings::search_downloaded_book_text), choices, theme).border_t_0(), cx))
-            .child(components::browser_settings_compact_row(text!(settings::index_disk_usage), div().child(usage), theme))
-            .children(self.text_search_error.clone().map(|error| components::browser_settings_group_error(error, theme)));
-        let mut sections = components::browser_settings_sections().child(appearance_settings).child(self.section(Section::Dictionaries, self.dictionaries.clone(), cx));
+        let account = self.section(Section::Account, self.account.clone(), cx).min_w_0();
         #[cfg(not(feature = "kobo"))]
-        {
-            let metered = preferences.allow_metered_transfers();
-            let transfer_choices = components::browser_settings_button_group(theme)
-                .child(Self::preference_button(components::settings_choice_button("transfers-unmetered", text!(common::off), !metered, theme), BrowsingPreferencePatch::AllowMeteredTransfers(false), cx))
-                .child(Self::preference_button(components::settings_choice_button("transfers-metered", text!(common::on), metered, theme), BrowsingPreferencePatch::AllowMeteredTransfers(true), cx));
-            let transfers = components::browser_settings_fieldset(text!(settings::transfers), theme)
-                .child(self.section(Section::Transfers, components::browser_settings_compact_row(text!(settings::allow_automatic_transfers_on_metered_connections), transfer_choices, theme).border_t_0(), cx))
-                .children(self.transfer_save_error.clone().map(|error| components::browser_settings_group_error(error, theme)));
-            sections = sections.child(transfers);
-        }
-        sections = sections.child(text_search).child(self.section(Section::Account, self.account.clone(), cx));
+        let device = None::<Div>;
 
         #[cfg(feature = "kobo")]
-        {
+        let device = {
             let selected = kobo_device::settings::idle_timeout().map_or(0, |timeout| timeout.as_secs() / 60);
-            let mut auto_sleep = components::settings_choice_button_grid(2, theme);
+            let mut auto_sleep = components::settings_choice_button_grid(3, theme);
             for (index, minutes) in kobo_device::settings::AUTO_SLEEP_MINUTES.into_iter().enumerate() {
                 let label = if minutes == 0 { text!(settings::never).to_owned() } else { format!(text!(settings::min), minutes = minutes) };
                 auto_sleep = auto_sleep.child(components::settings_choice_button(format!("kobo-auto-sleep-{index}"), label, selected == u64::from(minutes), theme).on_click(cx.listener(move |page, _, _, cx| {
@@ -574,7 +504,7 @@ impl Render for SettingsPage {
                 })));
             }
             let selected_power_off = kobo_device::settings::power_off_timeout().map_or(0, |timeout| timeout.as_secs() / 60);
-            let mut auto_power_off = components::settings_choice_button_grid(2, theme);
+            let mut auto_power_off = components::settings_choice_button_grid(3, theme);
             for (index, minutes) in kobo_device::settings::AUTO_POWER_OFF_MINUTES.into_iter().enumerate() {
                 let label = if minutes == 0 { text!(settings::never).to_owned() } else { format!(text!(settings::min), minutes = minutes) };
                 auto_power_off = auto_power_off.child(components::settings_choice_button(format!("kobo-auto-power-off-{index}"), label, selected_power_off == u64::from(minutes), theme).on_click(cx.listener(move |page, _, _, cx| {
@@ -583,31 +513,87 @@ impl Render for SettingsPage {
                 })));
             }
             let uninstall = components::base_button("uninstall-bokheim").label(text!(settings::uninstall_bokheim)).danger().on_click(cx.listener(|page, _, window, cx| page.confirm_uninstall(window, cx)));
-            let device = components::browser_settings_fieldset(text!(settings::kobo), theme)
-                .child(self.section(Section::KoboAutoSleep, components::browser_settings_compact_row(text!(settings::automatic_sleep), auto_sleep, theme), cx))
-                .children(self.auto_sleep_error.clone().map(|error| components::browser_settings_group_error(error, theme)))
-                .child(self.section(Section::KoboAutoPowerOff, components::browser_settings_compact_row(text!(settings::automatic_power_off), auto_power_off, theme), cx))
-                .children(self.auto_power_off_error.clone().map(|error| components::browser_settings_group_error(error, theme)))
-                .child(self.section(Section::KoboUninstall, components::browser_settings_row(text!(settings::uninstall_bokheim), text!(settings::remove_the_app_and_its_menu_entry_keep_your_books_and_settings), uninstall, theme), cx))
-                .children(self.uninstall_error.clone().map(|error| components::browser_settings_group_error(error, theme)));
-            sections = sections.child(device);
-        }
+            // Three equal columns need the widest preset, including Never.
+            let labels: Vec<_> = kobo_device::settings::AUTO_SLEEP_MINUTES
+                .iter()
+                .chain(kobo_device::settings::AUTO_POWER_OFF_MINUTES.iter())
+                .map(|minutes| if *minutes == 0 { text!(settings::never).to_owned() } else { format!(text!(settings::min), minutes = minutes) })
+                .collect();
+            let preset_width = labels.iter().map(|label| components::interface_label_width(label, components::TEXT_SM, window, cx)).max().unwrap_or(px(0.0));
+            let minimum_width = (window.rem_size() * 15.0).max((preset_width + px(2.0 * components::SPACE_SM)) * 3.0 + px(4.0));
+            let sleep = div().child(auto_sleep).children(self.auto_sleep_error.clone().map(|error| components::browser_settings_group_error(error, theme)));
+            let power_off = div().child(auto_power_off).children(self.auto_power_off_error.clone().map(|error| components::browser_settings_group_error(error, theme)));
+            Some(
+                components::browser_settings_fieldset(text!(settings::kobo), theme)
+                    .child(components::browser_settings_paired_controls().child(self.preference_section(Section::KoboAutoSleep, text!(settings::automatic_sleep), sleep, minimum_width, window, cx)).child(self.preference_section(
+                        Section::KoboAutoPowerOff,
+                        text!(settings::automatic_power_off),
+                        power_off,
+                        minimum_width,
+                        window,
+                        cx,
+                    )))
+                    .child(self.section(Section::KoboUninstall, div().mt(px(components::SPACE_SM)).pt(px(components::SPACE_MD)).border_t_1().border_color(theme.rule).child(uninstall), cx))
+                    .children(self.uninstall_error.clone().map(|error| components::browser_settings_group_error(error, theme))),
+            )
+        };
 
+        let account_column = components::browser_settings_sections().child(account);
         #[cfg(target_os = "android")]
-        if cx.try_global::<crate::AndroidStoragePolicy>().is_some_and(|policy| policy.all_files_access_available) {
+        let account_column = if cx.try_global::<crate::AndroidStoragePolicy>().is_some_and(|policy| policy.all_files_access_available && !policy.all_files_access_granted) {
             let access = components::browser_settings_path_button("android-file-access", text!(settings::manage_file_access), theme).on_click(|_, _, _| gpui_android::request_all_files_access());
-            sections = sections.child(self.section(
+            account_column.child(self.section(
                 Section::LibraryStorage,
                 components::browser_settings_fieldset(text!(settings::library_storage), theme).child(components::browser_settings_compact_row(text!(settings::android_permissions), access, theme).border_t_0()),
                 cx,
-            ));
+            ))
+        } else {
+            account_column
+        };
+
+        let mut sections = components::browser_settings_sections();
+        if self.parallel_sections {
+            let appearance_column = components::browser_settings_sections().child(appearance_settings).children(device);
+            sections = sections.child(div().w_full().min_w_0().flex().items_start().gap(px(20.0)).child(div().flex_1().min_w_0().child(appearance_column)).child(div().flex_1().min_w_0().child(account_column)));
+        } else {
+            sections = sections.child(appearance_settings).child(account_column).children(device);
         }
+        let libraries = self.section(Section::Libraries, self.libraries.clone(), cx).min_w_0();
+        let dictionaries = self.section(Section::Dictionaries, self.dictionaries.clone(), cx).min_w_0();
+        sections = sections.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_start()
+                .gap(px(20.0))
+                .when(!self.parallel_sections, |row| row.flex_col())
+                .child(libraries.when(self.parallel_sections, |column| column.flex_1()))
+                .child(dictionaries.when(self.parallel_sections, |column| column.flex_1())),
+        );
 
-        sections = sections.child(self.section(Section::Libraries, self.libraries.clone(), cx));
-
-        // Keep account and library invalidations inside their own entities.
-        // Transfer progress reaches the library rows several times a second and
-        // must not rebuild the settings controls above them.
-        self.settings_container(components::browser_settings_content().children(self.update_row(cx)).child(sections), desktop, cx).into_any_element()
+        // Account and library entities retain their own state; Settings still
+        // renders normally when their parent observes a change.
+        let parallel_sections = self.parallel_sections;
+        let minimum_column = (window.rem_size() * 36.0).max(font_family_width);
+        let page = cx.weak_entity();
+        let content = components::browser_settings_content().min_w_0().max_w(px(1440.0)).p(px(12.0)).gap(px(20.0)).child(components::browser_settings_sections().children(self.update_row(cx)).child(sections)).on_children_prepainted(
+            move |children, window, cx| {
+                let Some(bounds) = children.first() else { return };
+                let next_parallel = bounds.size.width >= minimum_column * 2.0 + px(20.0);
+                if next_parallel != parallel_sections {
+                    let page = page.clone();
+                    window.defer(cx, move |_, cx| {
+                        let _ = page.update(cx, |page, cx| {
+                            if page.parallel_sections != next_parallel {
+                                page.parallel_sections = next_parallel;
+                                cx.notify();
+                            }
+                        });
+                    });
+                }
+            },
+        );
+        self.settings_container(content, desktop, cx).into_any_element()
     }
 }

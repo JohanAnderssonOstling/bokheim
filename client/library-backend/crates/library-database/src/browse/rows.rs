@@ -10,6 +10,7 @@ pub(crate) fn read_book_card_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Bo
     let title: Option<String> = row.get("title")?;
     let duration_column = row.as_ref().column_index("audiobook_duration_ms")?;
     let duration_ms: Option<i64> = row.get(duration_column)?;
+    let size_column = row.as_ref().column_index("size_bytes")?;
     Ok(BookCardRow {
         source: library_model::BookSource::Library { book_id },
         title: super::text::display_title(title.as_deref()).to_owned(),
@@ -20,6 +21,8 @@ pub(crate) fn read_book_card_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Bo
         download_requested: row.get("download_requested")?,
         format_category: crate::browse::options::file_type_of(row.get("format")?),
         audiobook_duration_ms: duration_ms.map(u64::try_from).transpose().map_err(|e| invalid_integer_column(duration_column, e.to_string()))?,
+        size_bytes: row.get::<_, Option<i64>>(size_column)?.map(u64::try_from).transpose().map_err(|error| invalid_integer_column(size_column, error.to_string()))?,
+        format: row.get::<_, Option<i64>>("format")?.and_then(book_model::BookFormat::from_code),
         added_at: row.get::<_, Option<i64>>("added_at")?.unwrap_or_default(),
         source_directory: None,
     })

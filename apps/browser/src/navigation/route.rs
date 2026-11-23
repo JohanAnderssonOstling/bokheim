@@ -1,10 +1,12 @@
 //! Browser route definitions.
 
+use std::cell::Cell;
+use sync_common::LibraryId;
 use ui_text::text;
 
 use crate::library::BrowseKind;
 
-/// A page whose state belongs to one library session.
+/// A page displaying the selected library's state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LibraryRoute {
     Home,
@@ -43,6 +45,46 @@ pub enum GlobalRoute {
 pub enum Route {
     Library(LibraryRoute),
     Global(GlobalRoute),
+}
+
+/// One pane's destination, independent of its library's cached page contents.
+pub(super) struct PageNavigation {
+    pub library_id: Cell<Option<LibraryId>>,
+    // Retain the pane's library destination while a global page is open.
+    library_route: Cell<LibraryRoute>,
+    global_route: Cell<Option<GlobalRoute>>,
+    library_view: Cell<LibraryRoute>,
+}
+
+impl PageNavigation {
+    pub fn new(library_id: Option<LibraryId>) -> Self {
+        Self { library_id: Cell::new(library_id), library_route: Cell::new(LibraryRoute::Home), global_route: Cell::new(None), library_view: Cell::new(LibraryRoute::Books) }
+    }
+
+    pub fn route(&self) -> Route {
+        self.global_route.get().map(Route::Global).unwrap_or_else(|| Route::Library(self.library_route()))
+    }
+
+    pub fn library_route(&self) -> LibraryRoute {
+        self.library_route.get()
+    }
+
+    pub fn library_view(&self) -> LibraryRoute {
+        self.library_view.get()
+    }
+
+    pub fn navigate(&self, route: Route) {
+        match route {
+            Route::Library(route) => {
+                self.library_route.set(route);
+                if super::LIBRARY_VIEWS.contains(&route) {
+                    self.library_view.set(route);
+                }
+                self.global_route.set(None);
+            }
+            Route::Global(route) => self.global_route.set(Some(route)),
+        }
+    }
 }
 
 impl Route {

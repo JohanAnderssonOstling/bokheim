@@ -142,7 +142,9 @@ impl ReaderView {
 
         let mut toc = TocState::default();
         toc.cfi = book.cfi.clone();
+        #[cfg(all(feature = "image-zoom", not(feature = "kobo")))]
         let image_canvas = cx.new(|_| ui_components::InfiniteCanvas::new(0.1, 16.0));
+        #[cfg(all(feature = "image-zoom", not(feature = "kobo")))]
         cx.observe(&image_canvas, |_, _, cx| cx.notify()).detach();
         let mut reader = Self {
             dictionary: None,
@@ -206,6 +208,7 @@ impl ReaderView {
             image_preview: None,
             image_backdrop: None,
             save_opened_image: false,
+            #[cfg(all(feature = "image-zoom", not(feature = "kobo")))]
             image_canvas,
             context_sheet: None,
             focus,

@@ -30,12 +30,3 @@ WHERE book.deleted_at IS NULL
   AND (:file_types=0 OR (:file_types & book.format)!=0)
   AND (:languages='' OR EXISTS(SELECT 1 FROM book_language language
        WHERE language.book_row_id=book.row_id AND instr(:languages,',' || language.language || ',')>0));
-
--- name: ordered_books?
--- param: book_ids: &str
--- param: book_sort: i32
-SELECT book.row_id
-FROM json_each(:book_ids) selected
-JOIN book ON book.row_id=selected.value
-ORDER BY CASE WHEN :book_sort=1 THEN book.read_at END DESC,
-         book.search_title,book.title,book.content_hash;

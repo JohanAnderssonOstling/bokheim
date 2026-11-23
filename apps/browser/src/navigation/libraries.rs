@@ -16,7 +16,7 @@ use sync_common::LibraryId;
 use ui_components::user_facing_error;
 
 use super::library_errors::folder_add_message;
-use super::{LibraryOperationDialog, LibrarySession};
+use super::{LibraryOperationDialog, LibrarySession, PageNavigation};
 use crate::library::OpenBook;
 
 pub(crate) struct Libraries {
@@ -25,7 +25,7 @@ pub(crate) struct Libraries {
     sessions: HashMap<LibraryId, Entity<LibrarySession>>,
     now_playing: Entity<crate::NowPlaying>,
     entries: Vec<LibraryEntry>,
-    selected_id: Option<LibraryId>,
+    pub(super) page_navigation: Rc<PageNavigation>,
     pub(super) selected_error: Option<app::BackendError>,
     creating_libraries: usize,
     selection_epoch: Rc<Cell<u64>>,
@@ -73,7 +73,8 @@ impl Libraries {
         });
         // The shared backend scheduler owns startup reconciliation. Each tab
         // uses the initial local list and subscribes to discovery updates.
-        let mut libraries = Self { backend, open_book, sessions: HashMap::new(), now_playing, entries, selected_id: library_id, selected_error: None, creating_libraries: 0, selection_epoch, _list_updates: list_updates };
+        let mut libraries =
+            Self { backend, open_book, sessions: HashMap::new(), now_playing, entries, page_navigation: Rc::new(PageNavigation::new(library_id)), selected_error: None, creating_libraries: 0, selection_epoch, _list_updates: list_updates };
         if let Some(id) = library_id {
             libraries.set_selected_library(id, cx);
         }
@@ -118,7 +119,7 @@ impl Libraries {
         self.backend.as_ref().clone()
     }
     pub(crate) fn selected_id(&self) -> Option<LibraryId> {
-        self.selected_id
+        self.page_navigation.library_id.get()
     }
     pub(crate) fn selection_epoch(&self) -> u64 {
         self.selection_epoch.get()
@@ -127,14 +128,14 @@ impl Libraries {
         self.entries.iter().any(|entry| entry.library_id() == library_id)
     }
     pub(super) fn selected_session(&self) -> Option<Entity<LibrarySession>> {
-        self.selected_id.and_then(|id| self.sessions.get(&id).cloned())
+        self.selected_id().and_then(|id| self.sessions.get(&id).cloned())
     }
 
     pub(super) fn selected_library_blocks_navigation(&self, cx: &App) -> bool {
         self.selected_session().is_some_and(|session| session.read(cx).blocks_navigation(cx))
     }
 
-    pub(crate) fn show_operation_dialog<V: LibraryOperationDialog>(&mut self, library_id: LibraryId, view: Entity<V>, width: f32, selection_epoch: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_operation_dialog<V: LibraryOperationDialog>(&mut self, library_id: LibraryId, view: Entity<V>, width_rem: f32, selection_epoch: u64, window: &mut Window, cx: &mut Context<Self>) {
         if !self.contains(&library_id) {
             return;
         }
@@ -150,7 +151,7 @@ impl Libraries {
         if activate {
             self.select_library(library_id, cx);
         }
-        session.update(cx, |session, cx| session.show_operation_dialog(view, width, activate, window, cx));
+        session.update(cx, |session, cx| session.show_operation_dialog(view, width_rem, activate, window, cx));
         if activate {
             cx.emit(LibraryDialogOpened { library_id, selection_epoch: self.selection_epoch.get() });
         }
@@ -162,7 +163,7 @@ impl Libraries {
         // added folder. It must not switch us back to the default library.
         let epoch = self.selection_epoch.get().wrapping_add(1);
         self.selection_epoch.set(epoch);
-        if self.selected_id == Some(library_id) && self.sessions.contains_key(&library_id) {
+        if self.selected_id() == Some(library_id) && self.sessions.contains_key(&library_id) {
             return;
         }
         if self.contains(&library_id) {
@@ -303,7 +304,6 @@ impl Libraries {
                 let library_id = *entry.library_id();
                 let name = entry.library_name();
                 let result = async { backend.management.library(library_id)?.import_directory(ROOT_DIR_ID, directory, false).await }.await;
-                #[cfg(not(target_arch = "wasm32"))]
                 match result {
                     Ok(failures) if !failures.is_empty() => {
                         let _ = sessions.update_in(cx, |_, window, cx| notify_warning("library-import-warning", import_failure_summary(&failures), window, cx));
@@ -314,8 +314,6 @@ impl Libraries {
                     }
                     _ => {}
                 }
-                #[cfg(target_arch = "wasm32")]
-                let _ = (result, name); // Coordinator notifications own the outcome.
             }
         })
         .detach();
@@ -336,14 +334,14 @@ impl Libraries {
     fn reconcile(&mut self, libraries: Vec<LibraryEntry>, preferred_library_id: Option<LibraryId>, cx: &mut Context<Self>) {
         let library_ids = libraries.iter().map(|entry| *entry.library_id()).collect::<Vec<_>>();
         self.sessions.retain(|library_id, _| library_ids.contains(library_id));
-        let library_id = selected_library_id(&libraries, self.selected_id, preferred_library_id);
-        let changed = library_id != self.selected_id;
+        let library_id = selected_library_id(&libraries, self.selected_id(), preferred_library_id);
+        let changed = library_id != self.selected_id();
         self.entries = libraries;
         if changed || library_id.is_some_and(|id| !self.sessions.contains_key(&id) && library_ids.contains(&id)) {
             match library_id {
                 Some(id) => self.set_selected_library(id, cx),
                 None => {
-                    self.selected_id = None;
+                    self.page_navigation.library_id.set(None);
                     self.selected_error = None;
                 }
             }
@@ -358,7 +356,7 @@ impl Libraries {
                 self.selected_error = Some(error);
             }
         }
-        self.selected_id = Some(library_id);
+        self.page_navigation.library_id.set(Some(library_id));
         cx.notify();
     }
 
@@ -367,7 +365,7 @@ impl Libraries {
             return Ok(session.clone());
         }
         let library = self.backend.management.library(library_id)?;
-        let session = cx.new(|cx| LibrarySession::with_now_playing(self.backend.management.clone(), self.open_book.clone(), library, self.now_playing.clone(), cx));
+        let session = cx.new(|cx| LibrarySession::with_now_playing(self.backend.management.clone(), self.open_book.clone(), library, self.now_playing.clone(), self.page_navigation.clone(), cx));
         self.sessions.insert(library_id, session.clone());
         Ok(session)
     }

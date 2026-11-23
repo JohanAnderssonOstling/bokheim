@@ -1,4 +1,4 @@
-use crate::{Database, DatabaseError};
+use crate::{Database, DatabaseError, OwnerSql};
 use rusqlite::OptionalExtension;
 use sync_common::storage::LibraryStorage;
 
@@ -8,7 +8,7 @@ impl Database {
         if let Some(json) = json {
             return serde_json::from_str(&json).map_err(DatabaseError::operation);
         }
-        Ok(if self.sync_metadata("cloud_storage_enabled")?.as_deref() == Some("0") { LibraryStorage::Local } else { LibraryStorage::Bokheim })
+        Ok(if self.connection.owner_cloud_storage_enabled(|row| row.get::<_, Option<bool>>(0))? == Some(false) { LibraryStorage::Local } else { LibraryStorage::Bokheim })
     }
 }
 

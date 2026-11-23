@@ -9,7 +9,11 @@ mod frontlight;
 pub mod natural_light;
 #[cfg(target_os = "linux")]
 pub mod power;
+#[cfg(target_os = "linux")]
+pub mod process;
 pub mod profile;
+#[cfg(target_os = "linux")]
+mod radio;
 #[cfg(target_os = "linux")]
 mod rtc;
 pub mod settings;

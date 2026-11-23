@@ -7,16 +7,17 @@ mod package;
 
 pub use host::{Host, UpdateError};
 
-pub use update_client::UpdateError as OperationError;
 use fs2::FileExt;
 pub use kobo_package::Release;
 use kobo_package::{APP, RELEASE_API, installed_profile, newer_release_for_model};
+use linux_update_host::TaxonomyHost;
 use reqwest::blocking::Client;
 use semver::Version;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+pub use update_client::UpdateError as OperationError;
 use update_protocol::{stage_verified, verify_file};
 
 const SPACE_MARGIN: u64 = 16 * 1024 * 1024;
@@ -27,16 +28,36 @@ static INSTALLATION: OnceLock<Installation> = OnceLock::new();
 pub struct Installation {
     root: PathBuf,
     pub version: Version,
+    taxonomy: Arc<Mutex<Option<TaxonomyHost>>>,
 }
 
 /// Set by the Kobo executable, whose version is the application release version.
 pub fn initialize(root: PathBuf, version: &str) -> Result<(), OperationError> {
-    let installation = Installation { root, version: Version::parse(version).map_err(OperationError::operation)? };
+    let installation = Installation { root, version: Version::parse(version).map_err(OperationError::operation)?, taxonomy: Arc::new(Mutex::new(None)) };
     INSTALLATION.set(installation).map_err(|_| OperationError::from("Kobo updater was already initialized"))
 }
 
 pub fn installation() -> Result<&'static Installation, OperationError> {
     INSTALLATION.get().ok_or_else(|| OperationError::from("Kobo updater is unavailable in this launcher"))
+}
+
+/// Select the same immutable reference as native hosts before any library opens.
+/// Reference files live in the application-data directory protected by the installer.
+pub fn initialize_taxonomy(data: &Path) -> Result<(), OperationError> {
+    let installation = installation()?;
+    let data = data.join("taxonomy");
+    let config = match update_client::DiscoveryConfig::bundled() {
+        Ok(config) => config,
+        Err(error) => {
+            if data.join("updates/active-taxonomy.json").exists() {
+                return Err(error);
+            }
+            return Ok(());
+        }
+    };
+    let host = TaxonomyHost::open(&data, &installation.version.to_string(), config)?;
+    *installation.taxonomy.lock().map_err(|_| "taxonomy update lock is poisoned")? = Some(host);
+    Ok(())
 }
 
 fn client() -> Result<Client, OperationError> {
