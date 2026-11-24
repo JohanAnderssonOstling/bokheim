@@ -42,5 +42,5 @@ where
 
 /// Preserve the playback object's JSON representation without a text round trip.
 pub fn playback_config(config: &impl Serialize) -> Result<JsValue, OperationError> {
-    config.serialize(&serde_wasm_bindgen::Serializer::json_compatible()).map_err(OperationError::operation)
+    config.serialize(&serde_wasm_bindgen::Serializer::json_compatible()).map_err(|error| OperationError::from(JsValue::from(error)))
 }
