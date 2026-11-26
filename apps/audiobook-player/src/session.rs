@@ -1033,9 +1033,13 @@ impl PlaybackSession {
         match audio.toggle() {
             Ok(()) => {
                 #[cfg(target_os = "android")]
-                { self.playback_requested = audio.playback_requested(); }
+                {
+                    self.playback_requested = audio.playback_requested();
+                }
                 #[cfg(not(target_os = "android"))]
-                self.playback_requested = audio.is_playing() || audio.is_buffering();
+                {
+                    self.playback_requested = audio.is_playing() || audio.is_buffering();
+                }
                 self.error = None;
                 self.persist_position(true);
             }
