@@ -412,7 +412,7 @@ impl ReaderView {
                     let swipe = gpui::point(swipe.x + travel.x, swipe.y + travel.y);
                     // A swipe from the bottom edge is the system's.
                     let from_edge = std::mem::take(&mut self.touch_swipe_from_edge);
-                    match components::swipe_turns_forward(swipe, window).filter(|_| !from_edge) {
+                    match components::swipe_turns_forward(swipe).filter(|_| !from_edge) {
                         Some(forward) => {
                             self.advance_from_gesture(forward, swipe.y.abs() >= swipe.x.abs(), window, cx);
                         }

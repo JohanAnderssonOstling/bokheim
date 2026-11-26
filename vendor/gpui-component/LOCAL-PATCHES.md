@@ -68,3 +68,5 @@ The component text view now displays literal text through `TextView::plain` and 
 - Library tables can reserve a uniform body row height separately from typography and header height. Non-selectable column headers sort across their full hit area, using ascending/descending toggles; sort-icon clicks stop propagation to avoid sorting twice.
 - Visible-range callbacks include a single visible row, so tall book rows continue paging on small viewports.
 - Table cells vertically center their contents. Row and cell selection fills paint behind the content; the selection border remains above it so opaque theme colors cannot cover text or controls.
+
+- Touch scroll masks pass the view captured during painting to the scroll handle. Input dispatch has no currently rendering view, so touch invalidation must use that retained owner.

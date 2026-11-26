@@ -82,9 +82,6 @@ type ContextMenuHandler = dyn Fn(Option<SharedString>, Point<Pixels>, &mut Windo
 const MARQUEE_THRESHOLD: f32 = 4.0;
 const SWIPE_AXIS_LOCK_DISTANCE: f32 = 12.0;
 const SWIPE_AXIS_DOMINANCE: f32 = 1.25;
-const SWIPE_VIEWPORT_FRACTION: f32 = 0.12;
-const SWIPE_MINIMUM_DISTANCE: f32 = 48.0;
-const SWIPE_MAXIMUM_DISTANCE: f32 = 120.0;
 
 #[derive(Default)]
 struct PaginatorSwipe {
@@ -1245,12 +1242,11 @@ impl Paginator {
                     return;
                 };
 
-                let (distance, viewport_extent) = match axis {
-                    PaginatorAxis::Horizontal => (swipe.x, f32::from(window.viewport_size().width)),
-                    PaginatorAxis::Vertical => (swipe.y, f32::from(window.viewport_size().height)),
+                let distance = match axis {
+                    PaginatorAxis::Horizontal => swipe.x,
+                    PaginatorAxis::Vertical => swipe.y,
                 };
-                let threshold = (viewport_extent * SWIPE_VIEWPORT_FRACTION).clamp(SWIPE_MINIMUM_DISTANCE, SWIPE_MAXIMUM_DISTANCE);
-                self.finish_swipe(axis, (distance.abs() >= threshold).then_some(distance), true, window, cx);
+                self.finish_swipe(axis, (distance.is_finite() && distance != 0.0).then_some(distance), true, window, cx);
             }
             TouchPhase::Cancelled => {
                 self.swipe_preview.settle();

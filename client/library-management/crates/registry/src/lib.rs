@@ -511,7 +511,7 @@ mod platform {
         let metadata = root.join(METADATA_DIRECTORY);
         match fs::create_dir(&metadata) {
             Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::AlreadyExists && metadata.is_dir() => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists && fs::is_dir(&metadata) => {}
             Err(error) => return Err(error.into()),
         }
         write_manifest_file(entry, &root.join(METADATA_DIRECTORY).join("library.json"))?;

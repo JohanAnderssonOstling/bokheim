@@ -1775,7 +1775,7 @@ impl PdfView {
                 }
                 TouchPhase::Ended if self.touch_swipe.is_active() => {
                     self.touch_swipe.push(travel.x, travel.y);
-                    let forward = self.touch_swipe.finish().and_then(|(dx, dy)| components::swipe_turns_forward_with_direction(point(dx, dy), window, self.right_to_left));
+                    let forward = self.touch_swipe.finish().and_then(|(dx, dy)| components::swipe_turns_forward_with_direction(point(dx, dy), self.right_to_left));
                     match forward {
                         Some(forward) => {
                             if forward {
