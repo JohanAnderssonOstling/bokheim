@@ -22,6 +22,10 @@ public final class LibrarySetupActivity extends Activity {
     private boolean busy;
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        if (DocumentStorage.hasDefault(getApplicationContext())) {
+            enterApp();
+            return;
+        }
         pickerOpen = state != null && state.getBoolean("pickerOpen");
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -42,18 +46,7 @@ public final class LibrarySetupActivity extends Activity {
         choose.setOnClickListener(view -> selectFolder());
         content.addView(choose, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         setContentView(content);
-        busy = true;
-        choose.setEnabled(false);
-        worker.execute(() -> {
-            boolean ready = DocumentStorage.hasDefault(getApplicationContext());
-            runOnUiThread(() -> {
-                if (isFinishing() || isDestroyed()) return;
-                busy = false;
-                choose.setEnabled(true);
-                if (ready) enterApp();
-                else if (state == null) selectFolder();
-            });
-        });
+        if (state == null) selectFolder();
     }
     private void selectFolder() {
         if (pickerOpen || busy) return;

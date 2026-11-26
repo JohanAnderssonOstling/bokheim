@@ -61,10 +61,16 @@ impl AppBackend {
     pub async fn new(context: BackendContext) -> Result<Arc<Self>, BackendError> {
         let account = DeviceAccountSession::load(SessionStorage::new(context.registry.clone()), crate::api_server_url()).map_err(BackendError::operation)?;
         let core = Self::with_account(context, account).await?;
-        core.library_service.open_registered().await?;
-        core.library_service.start_pending_local_purges();
-        core.account_wake.send_replace(());
+        #[cfg(not(target_os = "android"))]
+        core.open_startup_libraries().await?;
         Ok(core)
+    }
+
+    pub(crate) async fn open_startup_libraries(&self) -> Result<(), BackendError> {
+        self.library_service.open_registered().await?;
+        self.library_service.start_pending_local_purges();
+        self.account_wake.send_replace(());
+        Ok(())
     }
 
     pub(crate) async fn with_account(context: BackendContext, account: DeviceAccountSession) -> Result<Arc<Self>, BackendError> {

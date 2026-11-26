@@ -70,6 +70,8 @@ struct Status {
     sleep_finished: bool,
     remote_seek: Option<Duration>,
     initial_seek: Option<Duration>,
+    /// Shown while the service acknowledges a seek; never used as a durable position.
+    seek_target: Option<Duration>,
     requested: bool,
     sleep_reset: Option<(Option<web_time::Instant>, Option<Duration>)>,
 }
@@ -224,7 +226,8 @@ impl AudioEngine {
         dispatch(json!({"command":"artwork", "id":self.id, "coverBase64":STANDARD.encode(cover)}))
     }
     pub fn position(&self) -> Duration {
-        lock_state(&self.session.status).position
+        let status = lock_state(&self.session.status);
+        status.seek_target.or(status.initial_seek).unwrap_or(status.position)
     }
     pub fn position_snapshot(&self) -> PositionSnapshot {
         PositionSnapshot(self.session.status.clone())
@@ -268,8 +271,9 @@ impl AudioEngine {
         Ok(())
     }
     pub fn seek_to(&self, position: Duration) -> Result<(), PlaybackError> {
+        let position = position.min(self.session.duration);
         if !self.started.load(Ordering::Acquire) {
-            lock_state(&self.session.status).initial_seek = Some(position.min(self.session.duration));
+            lock_state(&self.session.status).initial_seek = Some(position);
             return Ok(());
         }
         let sequence = {
@@ -277,9 +281,17 @@ impl AudioEngine {
             s.sequence += 1;
             s.remote_seek = None;
             s.confirmed = false;
+            s.seek_target = Some(position);
             s.sequence
         };
-        dispatch(json!({"command":"seek", "id":self.id, "position":position.min(self.session.duration).as_millis() as u64, "sequence":sequence}))
+        let result = dispatch(json!({"command":"seek", "id":self.id, "position":position.as_millis() as u64, "sequence":sequence}));
+        if result.is_err() {
+            let mut status = lock_state(&self.session.status);
+            if status.sequence == sequence {
+                status.seek_target = None;
+            }
+        }
+        result
     }
     pub fn set_tempo(&mut self, tempo: f32) -> Result<(), PlaybackError> {
         if !tempo.is_finite() || tempo <= 0.0 {
@@ -388,6 +400,9 @@ pub fn playback_state(event: &str) {
         let playing = event["playing"].as_bool().unwrap_or(false);
         let force = released || event["force"].as_bool().unwrap_or(false) || playing != status.playing || !status.confirmed;
         status.confirmed = event["ready"].as_bool().unwrap_or(false);
+        if status.confirmed || released || event["error"].is_string() {
+            status.seek_target = None;
+        }
         if status.confirmed {
             status.position = Duration::from_millis(event["position"].as_u64().unwrap_or(0)).min(session.duration);
         }
