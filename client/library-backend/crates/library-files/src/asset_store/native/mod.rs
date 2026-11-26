@@ -173,12 +173,13 @@ pub(crate) fn m4b_sidecar_cover(handle: &Handle, paths: &[RelativeBookPath]) -> 
 
 pub(crate) fn content_matches(path: &Path, hash: &BookId) -> Result<bool, AssetStoreError> {
     let mut proofs = Vec::new();
+    // Nested library markers may have no proof for this globally identified
+    // book. Retain matching proofs from enclosing libraries as well.
     for ancestor in path.ancestors().skip(1) {
         let metadata = ancestor.join(APP_HIDDEN_DIR);
         if fs::is_file(&metadata.join("storage-identity")) {
             let proof = metadata.join("assets").join("local-proofs").join(hash.to_hex());
-            proofs = read_local_proof(&proof)?.lines().take(64).filter_map(|line| line.parse::<ContentHash>().ok()).collect();
-            break;
+            proofs.extend(read_local_proof(&proof)?.lines().take(64).filter_map(|line| line.parse::<ContentHash>().ok()));
         }
     }
     let matches = |actual: ContentHash| hash.content_hash() == Some(actual) || proofs.contains(&actual);

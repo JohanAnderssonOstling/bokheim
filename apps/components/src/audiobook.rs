@@ -61,8 +61,6 @@ pub enum TransportLayout {
     Player,
     /// A book's detail page.
     Inline,
-    /// The compact audiobook bar on phones.
-    MiniPlayer,
     /// The dock along the bottom of a window: audiobooks and narration.
     Dock,
 }
@@ -89,16 +87,10 @@ pub fn playback_transport_buttons(id: &str, playing: bool, layout: TransportLayo
     buttons
 }
 
-/// Play, or pause while playing: a plain icon in the mini-player, and an
-/// accent-filled circle in the other transports.
+/// Play or pause uses the same accent-filled circle in every transport.
 pub fn playback_play_button(id: impl Into<ElementId>, playing: bool, layout: TransportLayout, theme: BrowserTheme) -> Button {
     let button = transport_button(id, if playing { text!(common::pause) } else { text!(common::play) }, play_pause_icon(playing), TransportControl::Play, layout, theme);
-    if layout == TransportLayout::MiniPlayer { button } else { crate::selectable_button(button, true, theme) }
-}
-
-/// The mini-player's quick forward action, sharing the transport's skip styling.
-pub fn playback_skip_forward_button(id: impl Into<ElementId>, layout: TransportLayout, theme: BrowserTheme) -> Button {
-    transport_button(id, text!(common::forward_30_seconds), skip_forward_icon(), TransportControl::Skip, layout, theme)
+    crate::selectable_button(button, true, theme)
 }
 
 impl TransportControl {
@@ -110,12 +102,9 @@ impl TransportControl {
             (TransportControl::Chapter | TransportControl::Skip, TransportLayout::Inline) => (PLAYBACK_SECONDARY_SIZE_REM, INLINE_GLYPH_REM),
             (TransportControl::Play, TransportLayout::Player | TransportLayout::Inline) => (4.5, 1.875),
             (TransportControl::Chapter | TransportControl::Skip, TransportLayout::Dock) => (PLAYBACK_SECONDARY_SIZE_REM, 1.25),
-            (TransportControl::Chapter | TransportControl::Skip, TransportLayout::MiniPlayer) => (PLAYBACK_SECONDARY_SIZE_REM, INLINE_GLYPH_REM),
-            (TransportControl::Play, TransportLayout::MiniPlayer) => (3.0, 1.5),
             (TransportControl::Play, TransportLayout::Dock) => (4.0, 2.0),
         };
         let (size, icon_size) = match (self, layout, touch_ui()) {
-            (Self::Play, TransportLayout::MiniPlayer, _) => (size, icon_size),
             (Self::Play, TransportLayout::Dock, false) => (DESKTOP_DOCK_PLAY_SIZE_REM, DESKTOP_DOCK_PLAY_ICON_SIZE_REM),
             (Self::Play, _, false) => (DESKTOP_PLAY_SIZE_REM, icon_size),
             _ => (size, icon_size),
@@ -160,32 +149,9 @@ pub fn now_playing_inline_controls() -> Div {
     div().w_full().min_w_0().flex().items_center().justify_between().mt(rems(SPACE_XXS / 16.0))
 }
 
-/// Speed beside the detail page's transport: the rate set as large as the
-/// glyphs beside it, in the text colour until it holds a choice of the
-/// reader's (a speed other than 1×), then accent.
-pub fn now_playing_speed_button(id: impl Into<ElementId>, rate: impl Into<SharedString>, set: bool, theme: BrowserTheme) -> Button {
-    inline_secondary_button(id, text!(common::playback_speed), set, theme).child(div().text_size(rems(TEXT_SM)).child(rate.into()))
-}
-
-/// Sleep beside the detail page's transport: the alarm glyph, or the time
-/// left in accent once a timer is running.
-pub fn now_playing_sleep_button(id: impl Into<ElementId>, running: Option<SharedString>, theme: BrowserTheme) -> Button {
-    let button = inline_secondary_button(id, text!(common::sleep_timer), running.is_some(), theme);
-    match running {
-        Some(left) => button.child(div().text_size(rems(TEXT_SM)).whitespace_nowrap().child(left)),
-        None => button.child(Icon::empty().path("icons/alarm.svg").size(rems(INLINE_GLYPH_REM))),
-    }
-}
-
-/// Give icon and value controls the same fixed square, without extra padding.
+/// Give icon controls the same fixed square, without extra padding.
 pub fn playback_secondary_button(button: Button) -> Button {
     button.p_0().flex_none().size(rems(playback_secondary_size_rem()))
-}
-
-/// Compact speed and sleep controls with no hover fill around their contents.
-fn inline_secondary_button(id: impl Into<ElementId>, tooltip: impl Into<SharedString>, set: bool, theme: BrowserTheme) -> Button {
-    let target = if touch_ui() { crate::TOUCH_TARGET_REM } else { 2.0 };
-    crate::base_button(id).ghost().no_fill().flex_none().p_0().h(rems(target)).min_w(rems(target)).px(px(SPACE_XXS)).when(set, |button| button.text_color(theme.text_accent)).tooltip(tooltip)
 }
 
 /// The page itself, covering the window and everything on it.
@@ -239,22 +205,19 @@ pub fn now_playing_transport() -> Div {
     crate::row(0.0).w_full().flex_none().justify_evenly().mt(px(SPACE_XXS))
 }
 
-/// One transport control; `playback_play_button` accents play outside the
-/// mini-player. In the phone player chapter skip is muted. Every secondary
-/// control has the same square hit area.
+/// One transport control; `playback_play_button` supplies play's accent.
+/// In the phone player chapter skip is muted. Secondary targets share a size.
 fn transport_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: impl Into<Icon>, control: TransportControl, layout: TransportLayout, theme: BrowserTheme) -> Button {
     let (size, icon_size) = control.size(layout);
     let color = match (control, layout) {
-        (TransportControl::Play, TransportLayout::MiniPlayer) => Some(theme.accent),
         (TransportControl::Chapter, TransportLayout::Player) => Some(theme.text_muted),
         _ => None,
     };
     // Set both dimensions and prevent flex shrinking to preserve a square icon.
     let icon = icon.into().size(rems(icon_size)).flex_none();
     let button = crate::base_button(id).ghost().when_some(color, |button, color| button.text_color(color)).p_0().flex_none().size(rems(size)).tooltip(label).child(icon);
-    match (control, layout) {
-        (TransportControl::Play, TransportLayout::MiniPlayer) => button,
-        (TransportControl::Play, _) => button.rounded_full().when(!touch_ui(), |button| button.min_w(px(DESKTOP_PLAY_MIN_SIZE_PX)).min_h(px(DESKTOP_PLAY_MIN_SIZE_PX)).max_w(px(DESKTOP_PLAY_MAX_SIZE_PX)).max_h(px(DESKTOP_PLAY_MAX_SIZE_PX))),
+    match control {
+        TransportControl::Play => button.rounded_full().when(!touch_ui(), |button| button.min_w(px(DESKTOP_PLAY_MIN_SIZE_PX)).min_h(px(DESKTOP_PLAY_MIN_SIZE_PX)).max_w(px(DESKTOP_PLAY_MAX_SIZE_PX)).max_h(px(DESKTOP_PLAY_MAX_SIZE_PX))),
         _ => button,
     }
 }
@@ -264,14 +227,15 @@ pub fn now_playing_tools() -> Div {
     crate::row(0.0).w_full().flex_none().justify_evenly().mt(px(SPACE_LG))
 }
 
-/// A text control on the bottom tier: normal text at its default, accent once
-/// it holds a choice of the reader's (a speed other than 1×, a running timer).
-pub fn now_playing_tool_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: Option<Icon>, set: bool, theme: BrowserTheme) -> Button {
+/// Shared playback tool: normal text by default, accent for a changed speed
+/// or running timer. Labels can grow beyond the square icon target.
+pub fn playback_tool_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: Option<Icon>, set: bool, theme: BrowserTheme) -> Button {
     let label = label.into();
-    let button = playback_secondary_button(crate::base_button(id).ghost()).text_color(if set { theme.text_accent } else { theme.text }).tooltip(label.clone());
+    let size = rems(playback_secondary_size_rem());
+    let button = crate::base_button(id).ghost().flex_none().h(size).min_w(size).px(rems(SPACE_SM / 16.0)).text_size(rems(TEXT_SM)).text_color(if set { theme.text_accent } else { theme.text }).tooltip(label.clone());
     match icon {
         Some(icon) if !set => button.child(icon.size(rems(1.0))),
-        _ => button.child(div().text_size(rems(TEXT_SM)).whitespace_nowrap().child(label)),
+        _ => button.child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label)),
     }
 }
 

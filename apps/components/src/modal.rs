@@ -223,17 +223,7 @@ pub fn bottom_sheet_header(title: impl Into<SharedString>, theme: BrowserTheme) 
 /// muted glyph, centred in a touch target on a phone.
 pub fn bottom_sheet_close_button(id: impl Into<ElementId>, theme: BrowserTheme) -> crate::Button {
     let tooltip = crate::shortcut_tooltip(text!(common::close), "escape");
-    crate::base_button(id)
-        .ghost()
-        .p_0()
-        .min_h_0()
-        .size(px(16.0))
-        .flex_none()
-        .text_color(theme.text_muted)
-        .aria_label(text!(common::close))
-        .tooltip(tooltip)
-        .when(crate::touch_ui(), |button| button.size(rems(crate::TOUCH_TARGET_REM)))
-        .child(Icon::new(IconName::Close).size(px(16.0)))
+    crate::outlined_icon_button(id, tooltip, Icon::new(IconName::Close).size(rems(1.0))).aria_label(text!(common::close)).text_color(theme.text_muted)
 }
 
 /// A small muted heading over a group of sheet rows.

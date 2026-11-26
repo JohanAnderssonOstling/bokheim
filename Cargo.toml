@@ -93,6 +93,13 @@ opt-level = "s"
 [profile.release.package.ui-paginator]
 opt-level = "s"
 
+# Optimized local desktop builds, without the publishing profile's full LTO.
+[profile.release-dev]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+
 [profile.web-release]
 inherits = "release"
 lto = true

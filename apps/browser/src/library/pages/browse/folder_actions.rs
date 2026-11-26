@@ -399,13 +399,7 @@ impl FolderActions {
                             let prefix = format!(text!(browse::path), path = path);
                             destinations.retain(|destination| destination.id != *folder && destination.path != path && !destination.path.starts_with(&prefix));
                         }
-                        let picker = cx.new(|cx| {
-                            let picker = FolderPicker::new(ROOT_DIR_ID, destinations, cx);
-                            match targets.source {
-                                Some(source) if placement == FolderPlacement::Move && targets.all_in_folder(source) => picker.disabling(source),
-                                _ => picker,
-                            }
-                        });
+                        let picker = cx.new(|cx| FolderPicker::new(targets.source.unwrap_or(ROOT_DIR_ID), destinations, cx));
                         let subscription = cx.subscribe(&picker, |actions, _, event, cx| actions.move_destination_selected(*event, cx));
                         actions.dialog = Some(FolderDialog::Move(MoveFolderDialog { placement, targets, picker, _subscription: subscription }));
                         cx.notify();
@@ -425,6 +419,10 @@ impl FolderActions {
             cx.notify();
             return;
         };
+        if dialog.targets.all_in_folder(destination_id) {
+            cx.notify();
+            return;
+        }
         self.place_targets(dialog.placement, dialog.targets, destination_id, None, cx);
     }
 
@@ -738,26 +736,6 @@ impl FolderActions {
         let menu = menu
             .item(components::menu_item_with_icon(text!(browse::add_book), IconName::BookOpen, move |_, _, cx| add_book_actions.update(cx, |actions, cx| actions.ui.choose_and_import_book(parent_id, cx))).disabled(busy))
             .item(components::menu_item_with_icon(text!(browse::add_folder), IconName::FolderOpen, move |_, _, cx| add_folder_actions.update(cx, |actions, cx| actions.ui.choose_and_import_folder(parent_id, cx))).disabled(busy));
-        #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        let menu = {
-            let mut menu = menu;
-            for source in [library_backend::ReaderImportSource::Readest, library_backend::ReaderImportSource::Foliate] {
-                let actions = actions.clone();
-                menu = menu.item(
-                    components::menu_item_with_icon(format!(text!(browse::import_from_source), source.name()), IconName::BookOpen, move |_, window, cx| {
-                        if actions.read(cx).ui.files_busy(cx) {
-                            return;
-                        }
-                        let session = actions.read(cx).ui.session();
-                        crate::services::after_menu_dismiss(window, cx, move |window, cx| {
-                            let _ = session.update(cx, |session, cx| session.open_reader_import(source, parent_id, window, cx));
-                        });
-                    })
-                    .disabled(busy),
-                );
-            }
-            menu
-        };
         menu
     }
 
@@ -796,7 +774,10 @@ mod tests {
         let folder = library.backend().folder_destinations().await.unwrap().into_iter().find(|folder| folder.label == "Before").unwrap().id;
         let actions = cx.new(|_| FolderActions::new(library.clone()));
         let rename = cx.update(|cx| {
-            let items = [BrowseItem::Child { row: library_model::BrowseRow { id: BrowseLocation::Folder(folder), name: "Before".into(), path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None }, parent: None }];
+            let items = [BrowseItem::Child {
+                row: library_model::BrowseRow { id: BrowseLocation::Folder(folder), name: "Before".into(), path: None, book_count: 0, downloaded_book_count: 0, requested_book_count: None, size_bytes: None },
+                parent: None,
+            }];
             let targets = FolderTargets::from_items(&items, ROOT_DIR_ID, cx).unwrap();
             FolderActions::selection_actions(actions.clone(), targets, &items, cx).into_iter().find(|action| action.id == "rename").unwrap()
         });

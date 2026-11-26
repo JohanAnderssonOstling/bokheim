@@ -82,16 +82,12 @@ async fn ingest_file_inner(
     cached: impl AsyncFnOnce(BookId) -> io::Result<Option<InspectedBook>>,
 ) -> io::Result<IngestedFile> {
     let format = BookFormat::from_file_name(&name).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unsupported book format"))?;
-    let waiting = ProfileSpan::new("inspection_permit_wait", &name);
-    let permit = executor::inspection_permit().await;
-    drop(waiting);
     let queued = ProfileSpan::new("file_worker_queue", &name);
     let profile_name = name.clone();
     let (book_id, size_bytes, fingerprint, reader) = executor::run_blocking({
         let path = path.clone();
         move || -> io::Result<_> {
             drop(queued);
-            let _permit = permit;
             let fingerprint = {
                 let _profile = ProfileSpan::new("file_fingerprint", &profile_name);
                 fingerprint(&path)?
@@ -102,7 +98,7 @@ async fn ingest_file_inner(
             };
             let (checksum, size_bytes) = match copied {
                 Some((checksum, size, revision)) => {
-                    if revision != fingerprint {
+                    if revision != library_files::filesystem::fingerprint(&path)? {
                         return Err(io::Error::new(io::ErrorKind::Interrupted, "copied book changed before inspection"));
                     }
                     (checksum, size)
@@ -179,16 +175,12 @@ async fn ingest_file_inner(
 /// Hash original members once, then inspect MP3s directly. ZIP CRCs and byte
 /// checksums are deferred until a transfer actually needs an archive.
 pub async fn ingest_audiobook_folder(path: PathBuf, name: String) -> io::Result<IngestedFile> {
-    let waiting = ProfileSpan::new("inspection_permit_wait", &name);
-    let permit = executor::inspection_permit().await;
-    drop(waiting);
     let queued = ProfileSpan::new("file_worker_queue", &name);
     let profile_name = name.clone();
     let (book_id, size_bytes, fingerprint, inspection) = executor::run_blocking({
         let path = path.clone();
         move || -> io::Result<_> {
             drop(queued);
-            let _permit = permit;
             let tracks = {
                 let _profile = ProfileSpan::new("audio_track_discovery", &profile_name);
                 audiobook_folder::discover(&path)?
@@ -248,7 +240,8 @@ fn require_unchanged(path: &Path, fingerprint: u64) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn fingerprint(path: &Path) -> std::io::Result<u64> {
+/// Revision used by ingestion and scanning, including M4B sibling artwork.
+pub fn fingerprint(path: &Path) -> std::io::Result<u64> {
     let audio = library_files::filesystem::fingerprint(path)?;
     if !path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("m4b")) {
         return Ok(audio);

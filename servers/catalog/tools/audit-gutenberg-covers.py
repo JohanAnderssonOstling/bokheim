@@ -654,7 +654,7 @@ def probe(catalog, output, origin, limit, openlibrary=False, google_books=False,
                 if result['candidate_attempts'] and not url:
                     result['error'] = 'All matching Open Library covers failed validation or download'
             else:
-                facts = dict(key=row['hash'], record=row['record'], audiobook=False,
+                facts = dict(key=row['hash'], record=row['record'], needs_description=False, audiobook=False,
                              needs_cover=True, readings=[], recording=None)
                 answer = json.loads(request(urllib.parse.urljoin(origin, 'v3/books'), {'books': [facts]}))
                 result['response'] = answer

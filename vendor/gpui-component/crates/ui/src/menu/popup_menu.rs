@@ -389,7 +389,15 @@ impl PopupMenu {
         cx: &mut App,
         f: impl FnOnce(Self, &mut Window, &mut Context<PopupMenu>) -> Self,
     ) -> Entity<Self> {
-        cx.new(|cx| f(Self::new(cx), window, cx))
+        let previous_focus = window.focused(cx);
+        cx.new(|cx| {
+            let mut menu = f(Self::new(cx), window, cx);
+            // Explicit action contexts retain their existing restoration target.
+            if menu.previous_focus_handle.is_none() && menu.action_context.is_none() {
+                menu.set_previous_focus(previous_focus, cx);
+            }
+            menu
+        })
     }
 
     /// Set the focus handle of Entity to handle actions.

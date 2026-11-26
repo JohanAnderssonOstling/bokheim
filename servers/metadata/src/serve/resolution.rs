@@ -4,7 +4,7 @@ use book_model::BookSubject;
 use metadata_contract::matching::author_match_keys;
 use metadata_contract::{ClassificationMethod, ClassificationProvider, ClassificationScheme, ClassificationSource, EditionIdentityQuery, LookupStatus, RichWorkMetadataMatch, SiblingSubjectConsensus};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use subject_projection::{EDITION_SUBTREE_CONSENSUS_SOURCE, UNIFIED_SYSTEM_ID, unified_concept_exists, unified_concept_id};
+use subject_projection::{unified_concept_exists, unified_concept_id, EDITION_SUBTREE_CONSENSUS_SOURCE, UNIFIED_SYSTEM_ID};
 
 pub fn merge_rich_matches(matches: &[RichWorkMetadataMatch]) -> RichWorkMetadataMatch {
     metadata_contract::merge_rich_work_matches(matches, classification_similarity_keys)
@@ -106,7 +106,8 @@ pub(crate) fn sibling_consensus_subjects(consensus: &SiblingSubjectConsensus) ->
         let code = format!("concept:{concept_id}");
         let label = supported.path.rsplit(" / ").next().unwrap_or(&supported.path);
         let fallback = if consensus.used_highest_support_fallback { "; highest support fallback" } else { "" };
-        let name = format!("{label} (weighted edition support: {:.2}%; {}/{} editions{fallback})", supported.support_fraction * 100.0, supported.supporting_editions, consensus.classified_editions);
+        let scope = if consensus.sample.as_ref().is_some_and(|sample| sample.truncated) { "edition sample" } else { "edition" };
+        let name = format!("{label} (weighted {scope} support: {:.2}%; {}/{} editions{fallback})", supported.support_fraction * 100.0, supported.supporting_editions, consensus.classified_editions);
         let donors = supported.evidence.iter().map(|e| format!("https://openlibrary.org/books/{}", e.open_library_edition_id)).collect::<BTreeSet<_>>();
         for donor in donors {
             subjects.push(BookSubject::new(Some(donor), &name, EDITION_SUBTREE_CONSENSUS_SOURCE, Some(UNIFIED_SYSTEM_ID.into()), Some(code.clone())).map_err(|error| MetadataError(error.to_string()))?);

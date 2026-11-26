@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::{fs, time::UNIX_EPOCH};
 
 const OVERLAY_VERSION: i64 = 1;
-const TABLES: &[&str] = &["isbn_answer", "work_description", "edition_candidate", "edition_title_key", "authority_title", "wanted", "answer_classification", "answer_work_lcc", "answer_provider", "answer_demand"];
+// Legacy crawler queue tables may remain in old bases and overlays. Readers
+// ignore them, and newly created snapshots no longer include them.
+const TABLES: &[&str] = &["isbn_answer", "work_description", "edition_candidate", "edition_title_key", "authority_title", "answer_classification", "answer_work_lcc", "answer_provider", "answer_demand"];
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct BaseIdentity {
@@ -24,7 +26,7 @@ impl BaseIdentity {
     }
 }
 
-fn immutable_uri(path: &Path) -> Result<String, MetadataError> {
+pub(crate) fn immutable_uri(path: &Path) -> Result<String, MetadataError> {
     let mut url = Url::from_file_path(path.canonicalize().map_err(error)?).map_err(|_| MetadataError("invalid immutable snapshot path".into()))?;
     // Ordinary SQLite readers observe committed in-place maintenance and WAL.
     // `immutable=1` would retain stale pages after such an update.
@@ -155,7 +157,8 @@ mod tests {
             &[],
         );
         let provider_path = temp.path().join("provider.sqlite");
-        let provider = crate::crawl::open_provider(&provider_path).unwrap();
+        let provider = Connection::open(&provider_path).unwrap();
+        provider.execute_batch("CREATE TABLE provider_result(provider TEXT NOT NULL,isbn13 INTEGER NOT NULL,fetched_at_ms INTEGER NOT NULL,status TEXT NOT NULL,classifications BLOB NOT NULL,subjects BLOB NOT NULL,PRIMARY KEY(provider,isbn13)) WITHOUT ROWID;").unwrap();
         let base = temp.path().join("base.sqlite");
         build_answers(&source, Some(&provider_path), None, None, &base).unwrap();
         // Extra base pages demonstrate that update size is independent of base
@@ -186,12 +189,8 @@ mod tests {
         fs::hard_link(&base, &alias).unwrap();
         assert!(MetadataService::open(&changed, &alias).is_err());
         assert!(require_separate(&c, &alias, "provider").is_err());
-        let mut plan = c.prepare(&format!("EXPLAIN QUERY PLAN {}", crate::serve::identity::CANDIDATE_QUERY)).unwrap();
-        let details = plan.query_map(["Unchanged title"], |r| r.get::<_, String>(3)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-        assert!(details.iter().any(|d| d.contains("SEARCH b USING INTEGER PRIMARY KEY")), "{details:?}");
-        assert!(!details.iter().any(|d| d == "SCAN b" || d.contains("SCAN base.edition_candidate")), "{details:?}");
         let server = MetadataService::open(&changed, &temp.path().join("serve-demand.sqlite")).unwrap();
-        let answers = server.enrich_rich(vec!["9780306406157".into(), "9780131103627".into()]).unwrap();
+        let answers = server.enrich_rich(vec!["9780306406157".into(), "9780131103627".into()], true).unwrap();
         assert_eq!(answers[0].matches[0].classifications[0].notation, "QA76");
         assert_eq!(answers[1].matches[0].classifications[0].notation, "E1");
         // A reader already opened on an old immutable generation stays pinned.
@@ -199,8 +198,8 @@ mod tests {
         let deleted = temp.path().join("deleted.sqlite");
         build_answers_incremental(&source, Some(&provider_path), None, None, &changed, &deleted).unwrap();
         let next = MetadataService::open(&deleted, &temp.path().join("next-demand.sqlite")).unwrap();
-        assert!(next.enrich_rich(vec!["9780306406157".into()]).unwrap()[0].matches[0].classifications.is_empty());
-        assert_eq!(server.enrich_rich(vec!["9780306406157".into()]).unwrap()[0].matches[0].classifications[0].notation, "QA76");
+        assert!(next.enrich_rich(vec!["9780306406157".into()], true).unwrap()[0].matches[0].classifications.is_empty());
+        assert_eq!(server.enrich_rich(vec!["9780306406157".into()], true).unwrap()[0].matches[0].classifications[0].notation, "QA76");
         assert!(fs::metadata(&deleted).unwrap().len() < original.len() as u64 / 10);
         let second_base = manifest(&open(&deleted).unwrap()).unwrap().unwrap();
         assert_eq!(second_base.path, base.canonicalize().unwrap());

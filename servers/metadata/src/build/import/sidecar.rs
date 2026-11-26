@@ -62,6 +62,17 @@ pub(super) struct SidecarSpec {
 }
 
 impl SidecarSpec {
+    pub(super) fn edition_descriptions() -> Self {
+        Self {
+            name: "edition description",
+            input_name: "editions",
+            builder_version: crate::build::edition_descriptions::VERSION,
+            setting_table: "description_import_setting",
+            input_table: "description_import_input",
+            schema: crate::build::edition_descriptions::SCHEMA,
+        }
+    }
+
     pub(super) fn description(builder_version: i64) -> Self {
         Self { name: "description", input_name: "works", builder_version, setting_table: "description_import_setting", input_table: "description_import_input", schema: DESCRIPTION_SCHEMA }
     }

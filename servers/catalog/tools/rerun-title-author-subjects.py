@@ -136,7 +136,7 @@ def prepare(catalog, output, without_manual=False, selection_from=None):
                 clean['description'] = ''
                 identity = table + ':' + key
                 selected.append({'table': table, 'key': key, 'title': record['title'], 'record_sha256': hashlib.sha256(raw.encode()).hexdigest(), 'removed_subjects': removed})
-                books.append({'key': identity, 'record': clean, 'audiobook': False, 'needs_cover': False, 'readings': [], 'recording': None})
+                books.append({'key': identity, 'record': clean, 'needs_description': False, 'audiobook': False, 'needs_cover': False, 'readings': [], 'recording': None})
     write_json(output / 'selection.json', {'entries': selected, 'count': len(selected), 'source_catalog': str(catalog.resolve()), 'without_manual': without_manual})
     write_json(output / 'manual-assignments.json', protected)
     with (output / 'manual-assignments.csv').open('w', newline='') as stream:

@@ -604,7 +604,7 @@ impl BookCardView {
             cx.default_global::<BrowseCovers>().insert(self.cover_cache_key(), &cover, resolution);
         }
         self.cover = CoverState::Loaded(Arc::downgrade(&cover), resolution);
-        self.cover_loaded_at.get_or_insert_with(Instant::now);
+        self.cover_loaded_at.get_or_insert_with(|| if replace_cache { Instant::now() } else { Instant::now() - COVER_FADE_DURATION });
     }
 
     pub(crate) fn prepare(&mut self, resolution: ThumbnailResolution, cx: &mut Context<Self>) {
@@ -621,7 +621,8 @@ impl BookCardView {
         if let Some((image, resolution)) = cx.default_global::<BrowseCovers>().get(&self.cover_cache_key()) {
             track_image(&image, cx);
             self.cover = CoverState::Loaded(Arc::downgrade(&image), resolution);
-            self.cover_loaded_at.get_or_insert_with(Instant::now);
+            // Reusing decoded artwork should not restart its arrival fade.
+            self.cover_loaded_at.get_or_insert_with(|| Instant::now() - COVER_FADE_DURATION);
             self.cover_updates.take();
         } else if let CoverState::Loaded(image, _) = &self.cover {
             // A painted frame or detail can still own this image. Keep using
@@ -866,9 +867,9 @@ impl BookCardView {
         match command {
             OverlayCommand::Open => {
                 let icon: Icon = if audiobook { components::Headphones.into() } else { IconName::BookOpen.into() };
-                components::primary_action_button(id, if audiobook { text!(browse::listen) } else { text!(browse::read) }, icon, false)
+                components::action_button(id, if audiobook { text!(browse::listen) } else { text!(browse::read) }).primary().icon(icon)
             }
-            OverlayCommand::Add => components::primary_action_button(id, if self.add_task.is_some() { text!(browse::adding) } else { text!(browse::add_to_library) }, components::download_glyph(), self.add_task.is_some()),
+            OverlayCommand::Add => components::action_button(id, if self.add_task.is_some() { text!(browse::adding) } else { text!(browse::add_to_library) }).primary().icon(components::download_glyph()).disabled(self.add_task.is_some()),
             OverlayCommand::NewWindow => components::book_overlay_command(id, text!(browse::new_window), IconName::ExternalLink, theme),
             OverlayCommand::CopyToFolder => components::book_overlay_command(id, text!(browse::copy_to_folder), IconName::Copy, theme),
             OverlayCommand::MoveToFolder => components::book_overlay_command(id, text!(browse::move_to_folder), IconName::FolderOpen, theme),
@@ -1244,10 +1245,7 @@ impl BookCardView {
                 if let Some(frame) = &frame { frame(card, cx) } else { card }
             }
         };
-        let cell = components::book_card_cell();
-        #[cfg(all(feature = "graph", not(feature = "kobo")))]
-        let cell = cell.when(presentation == BookCardPresentation::GraphCover, |cell| cell.justify_start());
-        cell.child(card).into_any_element()
+        components::book_card_cell().child(card).into_any_element()
     }
 
     /// The overlay: beside the card where the window has room — right, else

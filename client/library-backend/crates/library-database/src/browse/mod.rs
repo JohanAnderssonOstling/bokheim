@@ -1,7 +1,6 @@
 //! Library browse pages, hierarchy projections, home, and authors.
 
 use crate::DatabaseError;
-use crate::SqlParam;
 use content_address::BookId;
 mod author_query;
 mod books;
@@ -28,7 +27,7 @@ pub(crate) mod text;
 
 use include_sqlite_sql::include_sql;
 
-use library_model::{BrowsePageRequest, BrowsePageState, BrowseRow};
+use library_model::{BrowseHierarchy, BrowseLocation, BrowsePageRequest, BrowsePageState, BrowseRow, LibraryBrowseQuery};
 
 /// Complete library-owned browse projection returned to any UI transport.
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -49,6 +48,18 @@ pub struct LibraryBrowseData {
 }
 
 impl crate::Database {
+    /// Complete packed navigation, without preparing or hydrating book cards.
+    pub fn browse_hierarchy(&self, query: &LibraryBrowseQuery, downloaded_only: bool) -> Result<BrowseHierarchy, DatabaseError> {
+        let mut options = BrowseOptions::from_query(query, downloaded_only);
+        options.search.clear();
+        match query.location {
+            BrowseLocation::Subject(_) => self.with_browse_snapshot(|| self.subject_snapshot(subjects::Books::Library, None, Some(&options)).map(|snapshot| snapshot.hierarchy)),
+            BrowseLocation::Catalog(_) => crate::catalog::read_snapshot(|catalog, _| self.with_browse_snapshot(|| self.subject_snapshot(subjects::Books::Catalog, Some(catalog), Some(&options)).map(|snapshot| snapshot.hierarchy))),
+            BrowseLocation::Folder(root) => self.with_browse_snapshot(|| self.folder_hierarchy(root, &options)),
+            _ => Err(DatabaseError::message("browse location has no hierarchy")),
+        }
+    }
+
     /// Complete projection and paged UI reads share the same selection semantics.
     pub fn browse(&self, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<LibraryBrowseData, DatabaseError> {
         self.browse_result_complete(query, downloaded_only, true)
@@ -89,6 +100,10 @@ impl crate::Database {
 
 // Complete browse requests execute inside one database owner.
 database_methods! {
+    fn browse_hierarchy(query: &LibraryBrowseQuery, downloaded_only: bool) -> BrowseHierarchy;
+    arguments (LibraryBrowseQuery, bool) = (query.clone(), downloaded_only);
+    execute database, arguments => database.browse_hierarchy(&arguments.0, arguments.1);
+
     fn browse(query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> LibraryBrowseData;
     arguments (library_model::LibraryBrowseQuery, bool) = (query.clone(), downloaded_only);
     execute database, arguments => database.browse(&arguments.0, arguments.1);

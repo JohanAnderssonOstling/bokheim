@@ -10,8 +10,9 @@ use client_platform_runtime::filesystem::temporary;
 use client_platform_runtime::filesystem::walk;
 use client_platform_runtime::filesystem::{self as fs, File};
 use std::ffi::OsStr;
-use std::io::{self, Error, ErrorKind};
+use std::io::{self, Error, ErrorKind, Read};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub struct DirectoryWalk {
     entries: walk::IntoIter,
@@ -130,19 +131,25 @@ pub fn place_into_directory(source: &Path, directory: &Path, occupied: &[String]
     place_into_directory_with_intent(source, directory, occupied, moving, |_| Ok(()))
 }
 
+/// Report total bytes for the source file or folder, including nested files.
+/// Renames have no transfer work to report.
+pub fn place_into_directory_with_progress(source: &Path, directory: &Path, occupied: &[String], moving: bool, progress: &mut dyn FnMut(&Path, u64, u64)) -> io::Result<PathBuf> {
+    place_entry(source, directory, occupied, moving, true, &mut |_| Ok(()), progress)
+}
+
 /// Records each candidate destination before publishing it, so an owner can
 /// recover a move interrupted between the rename and its database acknowledgement.
 pub fn place_into_directory_with_intent(source: &Path, directory: &Path, occupied: &[String], moving: bool, mut before_publish: impl FnMut(&Path) -> io::Result<()>) -> io::Result<PathBuf> {
-    place_entry(source, directory, occupied, moving, true, &mut before_publish)
+    place_entry(source, directory, occupied, moving, true, &mut before_publish, &mut |_, _, _| {})
 }
 
 /// A same-filesystem move only. Never silently turn a failed rename into
 /// copying and deleting the caller's source.
 pub fn rename_into_directory_with_intent(source: &Path, directory: &Path, occupied: &[String], mut before_publish: impl FnMut(&Path) -> io::Result<()>) -> io::Result<PathBuf> {
-    place_entry(source, directory, occupied, true, false, &mut before_publish)
+    place_entry(source, directory, occupied, true, false, &mut before_publish, &mut |_, _, _| {})
 }
 
-fn place_entry(source: &Path, directory: &Path, occupied: &[String], moving: bool, copy_fallback: bool, before_publish: &mut dyn FnMut(&Path) -> io::Result<()>) -> io::Result<PathBuf> {
+fn place_entry(source: &Path, directory: &Path, occupied: &[String], moving: bool, copy_fallback: bool, before_publish: &mut dyn FnMut(&Path) -> io::Result<()>, progress: &mut dyn FnMut(&Path, u64, u64)) -> io::Result<PathBuf> {
     let metadata = fs::symlink_metadata(source)?;
     if !metadata.is_file() && !metadata.is_dir() {
         return Err(Error::other("only regular files and folders can be added to a library"));
@@ -181,7 +188,22 @@ fn place_entry(source: &Path, directory: &Path, occupied: &[String], moving: boo
             Some(temporary) => temporary,
             vacant @ None => {
                 let temporary = temporary::Builder::new().prefix(".bokheim-copy-").tempdir_in(&directory)?;
-                copy_entry(&source, &temporary.path().join("contents"))?;
+                let mut total = if metadata.is_file() { metadata.len() } else { 0 };
+                if metadata.is_dir() {
+                    let mut entries = walk(&source);
+                    while let Some(entry) = entries.next() {
+                        let entry = entry?;
+                        if entry.is_file() {
+                            total += entry.length().ok_or_else(|| Error::other("could not determine source file size"))?;
+                        }
+                    }
+                }
+                let mut copied = 0;
+                progress(&source, copied, total);
+                copy_entry_with_progress(&source, &temporary.path().join("contents"), &mut |bytes| {
+                    copied += bytes;
+                    progress(&source, copied, total);
+                })?;
                 vacant.insert(temporary)
             }
         };
@@ -220,20 +242,55 @@ pub(crate) fn rename_entry(source: &Path, destination: &Path) -> io::Result<()> 
 }
 
 pub(crate) fn copy_entry(source: &Path, destination: &Path) -> io::Result<()> {
+    copy_entry_with_progress(source, destination, &mut |_| {})
+}
+
+fn copy_entry_with_progress(source: &Path, destination: &Path, progress: &mut dyn FnMut(u64)) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     if metadata.is_dir() {
         fs::create_dir(destination)?;
         for entry in fs::read_dir(source)? {
             let entry = entry?;
-            copy_entry(&entry.path(), &destination.join(entry.file_name()))?;
+            copy_entry_with_progress(&entry.path(), &destination.join(entry.file_name()), progress)?;
         }
     } else if metadata.is_file() {
-        let mut reader = fs::open(source)?;
-        let mut writer = fs::OpenOptions::new().write(true).create_new(true).open(destination)?;
-        io::copy(&mut reader, &mut writer)?;
-        fs::set_permissions(destination, metadata.permissions())?;
+        let mut reported = 0;
+        copy_file_with_progress(source, destination, &mut |copied, _| {
+            progress(copied - reported);
+            reported = copied;
+        })?;
     } else {
         return Err(Error::other("cannot copy symbolic links or special files"));
     }
+    Ok(())
+}
+
+/// Copy into private staging, flushing the complete file before publication.
+/// Throttle observations so a fast disk cannot flood the presentation queue.
+pub fn copy_file_with_progress(source: &Path, destination: &Path, progress: &mut dyn FnMut(u64, u64)) -> io::Result<()> {
+    let mut reader = fs::open(source)?;
+    let metadata = reader.metadata()?;
+    let total = metadata.len();
+    let mut writer = fs::OpenOptions::new().write(true).create_new(true).open(destination)?;
+    let mut copied = 0;
+    let mut reported = Instant::now();
+    progress(0, total);
+    loop {
+        let count = io::copy(&mut reader.by_ref().take(1024 * 1024), &mut writer)?;
+        if count == 0 {
+            break;
+        }
+        copied += count;
+        if reported.elapsed() >= Duration::from_millis(100) {
+            progress(copied, total);
+            reported = Instant::now();
+        }
+    }
+    if copied != total {
+        return Err(Error::other("source size changed while copying"));
+    }
+    fs::set_permissions(destination, metadata.permissions())?;
+    writer.sync_all()?;
+    progress(copied, total);
     Ok(())
 }

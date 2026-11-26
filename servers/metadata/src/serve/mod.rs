@@ -4,7 +4,7 @@
 use crate::build::tests::snapshot_from;
 use crate::schema::{self, now_ms};
 use crate::*;
-use metadata_contract::{AuthoritySubjectMatch, ClassificationEvidence, ClassificationMethod, authority_subjects::OPEN_LIBRARY_WORK_PROVIDER};
+use metadata_contract::{authority_subjects::OPEN_LIBRARY_WORK_PROVIDER, AuthoritySubjectMatch, ClassificationEvidence, ClassificationMethod};
 
 /// Older answer files may already contain a union of work and sibling codes.
 /// Apply the same source priority while reading them; exact LCC remains first.
@@ -51,7 +51,6 @@ use std::sync::Mutex;
 pub(crate) mod alternatives;
 pub(crate) mod audible;
 pub(crate) mod books;
-mod candidate_subjects;
 pub(crate) mod covers;
 pub(crate) mod http;
 pub(crate) mod identity;
@@ -60,6 +59,9 @@ pub(crate) mod resolution;
 mod sibling_subjects;
 mod source_subjects;
 mod subject_identity;
+mod work_editions;
+mod works;
+pub use works::WorkLookup;
 
 #[derive(Clone)]
 pub struct MetadataService {
@@ -68,7 +70,9 @@ pub struct MetadataService {
 pub(crate) struct ServiceState {
     pub(crate) database: PathBuf,
     pub(crate) pool: Pool<SqliteConnectionManager>,
-    pub(crate) demand: Mutex<Connection>,
+    pub(crate) works: Option<WorkLookup>,
+    pub(crate) demand: Arc<Mutex<Connection>>,
+    pub(crate) audible: audible::AudibleClient,
     pub(crate) snapshot: SnapshotDescription,
     pub(crate) schema_version: i64,
     pub(crate) descriptions_available: bool,
@@ -92,6 +96,10 @@ impl MetadataService {
     }
 
     pub fn open(answers: &Path, demand: &Path) -> Result<Self, MetadataError> {
+        Self::open_with_work_lookup(answers, demand, None)
+    }
+
+    pub fn open_with_work_lookup(answers: &Path, demand: &Path, works: Option<&Path>) -> Result<Self, MetadataError> {
         let answers = answers.canonicalize().map_err(error)?;
         let pool = crate::snapshot::pool(&answers)?;
         let c = pool.get().map_err(error)?;
@@ -111,16 +119,30 @@ impl MetadataService {
             c.prepare(sql).map_err(error)?;
         }
         let descriptions_available = true;
+        let works = works.map(WorkLookup::open).transpose()?;
+        if works.as_ref().is_some_and(|works| works.dump_date != date) {
+            return Err(MetadataError("work lookup dump date does not match the answer snapshot".into()));
+        }
+        if let Some(works) = &works {
+            works.require_separate(demand)?;
+        }
         drop(c);
         let d = Connection::open(demand).map_err(error)?;
         d.busy_timeout(Duration::from_secs(5)).map_err(error)?;
         d.execute_batch(schema::DEMAND).map_err(error)?;
-        d.execute_batch("CREATE TABLE IF NOT EXISTS resolved_cover(id TEXT PRIMARY KEY NOT NULL, bytes BLOB NOT NULL)").map_err(error)?;
+        d.execute_batch("CREATE TABLE IF NOT EXISTS resolved_cover(id TEXT PRIMARY KEY NOT NULL, bytes BLOB NOT NULL); CREATE TABLE IF NOT EXISTS cover_miss(id TEXT PRIMARY KEY NOT NULL,retry_after_ms INTEGER NOT NULL)").map_err(error)?;
+        if works.is_some() {
+            sibling_subjects::prepare_taxonomy();
+        }
+        let demand = Arc::new(Mutex::new(d));
+        let audible = audible::AudibleClient::with_persistent_cache(demand.clone());
         Ok(Self {
             state: Arc::new(ServiceState {
                 database: answers,
                 pool,
-                demand: Mutex::new(d),
+                works,
+                demand,
+                audible,
                 snapshot: SnapshotDescription { dump_date: date, imported_at_ms: u64::try_from(built).map_err(error)? },
                 schema_version: version,
                 descriptions_available,
@@ -131,11 +153,11 @@ impl MetadataService {
             }),
         })
     }
-    pub(crate) fn enrich_rich(&self, isbns: Vec<String>) -> Result<Vec<RichIsbnMetadataResult>, MetadataError> {
+    pub(crate) fn enrich_rich(&self, isbns: Vec<String>, needs_description: bool) -> Result<Vec<RichIsbnMetadataResult>, MetadataError> {
         crate::serve::http::validate_isbn_count(isbns.len())?;
         let c = self.state.pool.get().map_err(error)?;
         let mut q = c.prepare_cached("SELECT answer FROM isbn_answer WHERE isbn13=?1").map_err(error)?;
-        let mut descriptions = c.prepare_cached("SELECT text FROM work_description WHERE work_id=?1").map_err(error)?;
+        let mut descriptions = needs_description.then(|| c.prepare_cached("SELECT text FROM work_description WHERE work_id=?1")).transpose().map_err(error)?;
         let mut results = Vec::with_capacity(isbns.len());
         for requested in isbns {
             let isbn = Isbn13::parse(&requested);
@@ -147,8 +169,12 @@ impl MetadataService {
                     return Err(MetadataError("answer has invalid description references".into()));
                 }
                 for (m, work) in answer.matches.iter_mut().zip(stored.description_works) {
-                    if let Some(work) = work {
-                        m.description = Some(descriptions.query_row([work], |r| r.get(0)).map_err(error)?);
+                    if let Some(descriptions) = descriptions.as_mut() {
+                        if let Some(work) = work {
+                            m.description = Some(descriptions.query_row([work], |r| r.get(0)).map_err(error)?);
+                        }
+                    } else {
+                        m.description = None;
                     }
                 }
                 answer
@@ -173,7 +199,18 @@ impl MetadataService {
         if queries.is_empty() || queries.len() > MAX_EDITION_QUERIES_PER_REQUEST {
             return Err(MetadataError(format!("between 1 and {MAX_EDITION_QUERIES_PER_REQUEST} edition queries are required")));
         }
-        identity::resolve(&*self.state.pool.get().map_err(error)?, queries)
+        // Resolved works own both the declared-code and bounded edition paths.
+        // Unresolved works can use independent authorities, never a broad edition search.
+        let mut results = Vec::with_capacity(queries.len());
+        for query in queries {
+            identity::validate_query(&query)?;
+            if let Some(result) = self.state.works.as_ref().map(|index| index.resolve_subjects(&query, &self.state.pool)).transpose()?.flatten() {
+                results.push(result);
+                continue;
+            }
+            results.push(identity::resolve_authority(&*self.state.pool.get().map_err(error)?, &query)?);
+        }
+        Ok(results)
     }
 }
 
@@ -199,7 +236,7 @@ mod snapshot_tests {
         assert_eq!(stored.description_works, vec![Some(10)]);
         let server = MetadataService::open(&answers, &dir.path().join("demand.sqlite")).unwrap();
         std::fs::remove_file(source).unwrap();
-        let results = server.enrich_rich(vec!["0-306-40615-2".into(), "9780131103627".into()]).unwrap();
+        let results = server.enrich_rich(vec!["0-306-40615-2".into(), "9780131103627".into()], true).unwrap();
         assert_eq!(results[0].requested_isbn, "0-306-40615-2");
         assert_eq!(results[0].canonical_isbn13.as_deref(), Some("9780306406157"));
         assert!(results.iter().all(|r| r.matches[0].description.as_deref() == Some("One shared description.")));

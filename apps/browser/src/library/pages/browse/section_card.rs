@@ -17,7 +17,7 @@ use std::{
 
 use app_preferences::CoverText;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Bounds, Context, Entity, IntoElement, Pixels, Render, SharedString, Subscription, Task, WeakEntity, Window, div, px};
+use gpui::{AnyElement, App, Bounds, Context, Entity, IntoElement, MouseDownEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Subscription, Task, WeakEntity, Window, div, px};
 use gpui_component::IconName;
 use sync_common::DirId;
 use ui_components as components;
@@ -88,6 +88,13 @@ impl SectionCard {
             new_paginator(format!("{id}-contents"), groups).flow_axis(PaginatorAxis::Horizontal).horizontal_only().select_on_drag().next_page_preview_in_remaining_space().on_context_menu(move |id, position, window, cx| {
                 let Some(card) = owner.upgrade() else { return };
                 let card = card.read(cx);
+                if id.is_none() {
+                    if let Some(folder) = card.section.parent.id.folder() {
+                        menu_events(CardEvent::FolderContentsMenu(folder, position), window, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
                 let flow = card.flow.read(cx);
                 let ids = id.map(|id| flow.target_ids(&id)).unwrap_or_else(|| flow.selection().iter().filter_map(|&index| flow.child_id(index).cloned()).collect());
                 let items = resolve_items(&ids, &section_items(&card.id, &card.section, &card.loaded_books));
@@ -197,7 +204,7 @@ impl SectionCard {
 
     /// Turns the shared strip through entry columns and then book covers.
     fn turn_page(&mut self, next: bool, cx: &mut Context<Self>) {
-        if self.request.is_some() || !self.flow.read(cx).page_turn_ready() {
+        if self.request.is_some() || self.pending_turn.is_some() || !self.flow.read(cx).page_turn_ready() {
             return;
         }
         self.request_failed = false;
@@ -373,14 +380,14 @@ mod tests {
         let library_id = *library.backend().id();
         let listing = BrowseListing::new(library.clone(), BrowseKind::Folder, Rc::new(|_, _, _| {}), false);
         let navigator = cx.new(|cx| BrowseNavigator::new(library, BrowseKind::Folder, listing, cx));
-        let row = |id| BrowseRow { id: BrowseLocation::Folder(Uuid::from_u128(id)), name: format!("Folder {id}"), path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None };
+        let row = |id| BrowseRow { id: BrowseLocation::Folder(Uuid::from_u128(id)), name: format!("Folder {id}"), path: None, book_count: 0, downloaded_book_count: 0, requested_book_count: None, size_bytes: None };
         let section = BrowseSection { parent: row(1), children: (2..6).map(row).collect(), books: Vec::new(), book_count: Some(0) };
         let menus = Rc::new(RefCell::new(Vec::new()));
         let recorded = menus.clone();
-        let events: CardEvents = Rc::new(move |event, _, _| {
-            if let CardEvent::ItemsMenu(items, _) = event {
-                recorded.borrow_mut().push(items.iter().filter_map(|item| item.child().map(|row| row.id)).collect::<Vec<_>>());
-            }
+        let events: CardEvents = Rc::new(move |event, _, _| match event {
+            CardEvent::ItemsMenu(items, _) => recorded.borrow_mut().push((false, items.iter().filter_map(|item| item.child().map(|row| row.id)).collect::<Vec<_>>())),
+            CardEvent::FolderContentsMenu(folder, _) => recorded.borrow_mut().push((true, vec![BrowseLocation::Folder(folder)])),
+            _ => {}
         });
         let card = cx.new(|cx| SectionCard::new(events.clone(), library_id, "menu-card".into(), BrowseKind::Folder, &section, navigator, 0, cx));
         let inner = card.read_with(cx, |card, _| card.flow.clone());
@@ -398,11 +405,11 @@ mod tests {
         let bounds = visual.update(|_, cx| outer.read(cx).child_bounds(0).unwrap());
         let header = bounds.origin + point(px(40.0), px(20.0));
         let empty_body = point(bounds.center().x, bounds.bottom() - px(30.0));
-        for (position, expected) in [(entry, section.children[0].id), (header, parent), (empty_body, parent)] {
+        for (position, contents, expected) in [(entry, false, section.children[0].id), (header, false, parent), (empty_body, true, parent)] {
             visual.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
             visual.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
             visual.run_until_parked();
-            assert_eq!(menus.borrow_mut().drain(..).collect::<Vec<_>>(), vec![vec![expected]], "right-click at {position:?} must open exactly one menu for the clicked entry or container");
+            assert_eq!(menus.borrow_mut().drain(..).collect::<Vec<_>>(), vec![(contents, vec![expected])], "right-click at {position:?} must open exactly one menu for the clicked entry or container");
             assert_eq!(page_menus.get(), 0, "a folder menu must suppress the page's generic menu");
         }
         visual.update(|_, cx| {
@@ -413,11 +420,11 @@ mod tests {
         });
         visual.run_until_parked();
         assert_eq!(visual.update(|_, cx| inner.read(cx).selection().iter().copied().collect::<Vec<_>>()), vec![0, 1]);
-        for position in [entry, empty_body] {
+        for (position, expected) in [(entry, (false, vec![section.children[0].id, section.children[1].id])), (empty_body, (true, vec![parent]))] {
             visual.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
             visual.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
             visual.run_until_parked();
-            assert_eq!(menus.borrow_mut().drain(..).collect::<Vec<_>>(), vec![vec![section.children[0].id, section.children[1].id]], "right-click must preserve the nested selection and open its menu once");
+            assert_eq!(menus.borrow_mut().drain(..).collect::<Vec<_>>(), vec![expected], "right-click must target selected entries or the empty folder body once");
             assert_eq!(page_menus.get(), 0, "a nested selection menu must suppress the page's generic menu");
         }
     }
@@ -435,7 +442,7 @@ mod tests {
         let library_id = *library.backend().id();
         let listing = BrowseListing::new(library.clone(), BrowseKind::Folder, Rc::new(|_, _, _| {}), false);
         let navigator = cx.new(|cx| BrowseNavigator::new(library, BrowseKind::Folder, listing, cx));
-        let row = |id| BrowseRow { id: BrowseLocation::Folder(Uuid::from_u128(id)), name: format!("Folder {id}"), path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None };
+        let row = |id| BrowseRow { id: BrowseLocation::Folder(Uuid::from_u128(id)), name: format!("Folder {id}"), path: None, book_count: 0, downloaded_book_count: 0, requested_book_count: None, size_bytes: None };
         let section = BrowseSection { parent: row(1), children: (2..6).map(row).collect(), books: Vec::new(), book_count: Some(0) };
         let events: CardEvents = Rc::new(|_, _, _| {});
         let card = cx.new(|cx| SectionCard::new(events.clone(), library_id, "test-card".into(), BrowseKind::Folder, &section, navigator, 0, cx));
@@ -500,7 +507,7 @@ mod tests {
         use std::cell::RefCell;
 
         cx.update(gpui_component::init);
-        let row = |id| BrowseRow { id: BrowseLocation::Folder(Uuid::from_u128(id)), name: format!("Folder {id}"), path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None };
+        let row = |id| BrowseRow { id: BrowseLocation::Folder(Uuid::from_u128(id)), name: format!("Folder {id}"), path: None, book_count: 0, downloaded_book_count: 0, requested_book_count: None, size_bytes: None };
         let section = BrowseSection { parent: row(1), children: (2..6).map(row).collect(), books: Vec::new(), book_count: Some(0) };
         let received = Rc::new(RefCell::new(Vec::new()));
         let recorded = received.clone();
@@ -563,7 +570,7 @@ mod tests {
         use std::cell::RefCell;
 
         cx.update(gpui_component::init);
-        let row = |id| BrowseRow { id: BrowseLocation::Folder(Uuid::from_u128(id)), name: format!("Folder {id}"), path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None };
+        let row = |id| BrowseRow { id: BrowseLocation::Folder(Uuid::from_u128(id)), name: format!("Folder {id}"), path: None, book_count: 0, downloaded_book_count: 0, requested_book_count: None, size_bytes: None };
         let section = BrowseSection { parent: row(1), children: (2..6).map(row).collect(), books: Vec::new(), book_count: Some(0) };
         let received = Rc::new(RefCell::new(Vec::new()));
         let recorded = received.clone();
@@ -605,7 +612,7 @@ mod tests {
     fn mixed_cards_paint_covers_beside_selectable_entry_rows(cx: &mut TestAppContext) {
         use gpui::{VisualTestContext, size};
         cx.update(gpui_component::init);
-        let row = |id| BrowseRow { id: BrowseLocation::Folder(Uuid::from_u128(id)), name: format!("Folder {id}"), path: None, book_count: 20, downloaded_book_count: 0, size_bytes: None };
+        let row = |id| BrowseRow { id: BrowseLocation::Folder(Uuid::from_u128(id)), name: format!("Folder {id}"), path: None, book_count: 20, downloaded_book_count: 0, requested_book_count: None, size_bytes: None };
         let section = BrowseSection { parent: row(1), children: (2..6).map(row).collect(), books: Vec::new(), book_count: Some(20) };
         for width in [160.0, 332.0, 664.0] {
             let window = cx.open_window(size(px(width), px(220.0)), |_, cx| {
@@ -656,7 +663,7 @@ mod tests {
 
     #[gpui::test]
     fn containers_page_children_followed_by_book_slots_on_every_platform(cx: &mut TestAppContext) {
-        let row = |id| BrowseRow { id: BrowseLocation::Folder(Uuid::from_u128(id)), name: format!("Category {id}"), path: None, book_count: 20, downloaded_book_count: 0, size_bytes: None };
+        let row = |id| BrowseRow { id: BrowseLocation::Folder(Uuid::from_u128(id)), name: format!("Category {id}"), path: None, book_count: 20, downloaded_book_count: 0, requested_book_count: None, size_bytes: None };
         let section = BrowseSection { parent: row(1), children: (2..35).map(row).collect(), books: Vec::new(), book_count: Some(20) };
         let events: CardEvents = Rc::new(|_, _, _| {});
         cx.update(|cx| {
@@ -711,6 +718,17 @@ impl gpui::View for SectionCardElement {
 }
 
 impl SectionCard {
+    fn open_body_menu(&self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let flow = self.flow.read(cx);
+        if flow.visible_child_range().into_iter().flatten().any(|index| flow.child_bounds(index).is_some_and(|bounds| bounds.contains(&position))) {
+            return;
+        }
+        if let Some(folder) = self.section.parent.id.folder() {
+            (self.events)(CardEvent::FolderContentsMenu(folder, position), window, cx);
+            cx.stop_propagation();
+        }
+    }
+
     fn render_card(&mut self, focused: bool, selected: bool, marquee: bool, header_drag: Option<DragSource>, preview: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let layout = SectionLayout { rem_size: window.rem_size(), cover_text: crate::stores::current_cover_text(cx) };
         if !preview && self.layout != layout {
@@ -738,8 +756,8 @@ impl SectionCard {
             .gap(gpui::px(4.0))
             .text_size(gpui::rems(0.875))
             .text_color(gpui::rgb(0xf2efe8))
-            .child(arrow("previous-contents", text!(browse::previous_entries), IconName::ArrowLeft, flow.has_previous() && self.request.is_none() && self.pending_turn.is_none(), false))
-            .child(arrow("next-contents", text!(browse::next_entries), IconName::ArrowRight, flow.has_next() && self.request.is_none() && self.pending_turn.is_none(), true));
+            .child(arrow("previous-contents", text!(browse::previous_entries), IconName::ArrowLeft, flow.has_previous(), false))
+            .child(arrow("next-contents", text!(browse::next_entries), IconName::ArrowRight, flow.has_next(), true));
         // A shelf of Home is a row of the page, not a place to go.
         let parent = &self.section.parent;
         let author = is_author_heading(parent.id);
@@ -791,6 +809,24 @@ impl SectionCard {
                         .mx(px(if author { if cfg!(feature = "kobo") { 0.0 } else { -1.0 } } else { -components::BOOK_CARD_PADDING }))
                         .when(container_section(&self.section) && self.section.book_count.unwrap_or(self.section.books.len()) == 0, |body| body.py(px(components::BOOK_CARD_PADDING)))
                         .child(contents)
+                        .when(!preview, |body| {
+                            body.on_mouse_down(
+                                gpui::MouseButton::Right,
+                                cx.listener(|card, event: &MouseDownEvent, window, cx| {
+                                    if !components::uses_mobile_navigation(window) {
+                                        card.open_body_menu(event.position, window, cx);
+                                    }
+                                }),
+                            )
+                            .on_mouse_up(
+                                gpui::MouseButton::Right,
+                                cx.listener(|card, event: &MouseUpEvent, window, cx| {
+                                    if components::uses_mobile_navigation(window) {
+                                        card.open_body_menu(event.position, window, cx);
+                                    }
+                                }),
+                            )
+                        })
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(|_, _, cx| cx.stop_propagation()),
                 ),

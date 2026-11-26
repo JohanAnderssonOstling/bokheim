@@ -1,4 +1,4 @@
-//! Playback keys take precedence over document and library navigation.
+//! Playback shortcuts preserve text editing, overlays and graph navigation.
 
 use gpui::{Context, Modifiers, Window};
 use gpui_component::WindowExt;
@@ -15,6 +15,7 @@ impl ApplicationPane {
                 if window.window_handle() != handle
                     || key.modifiers != Modifiers::default()
                     || !matches!(key.key.as_str(), "space" | "left" | "right")
+                    || matches!(key.key.as_str(), "left" | "right") && event.context_stack.iter().any(|context| context.contains("BrowseGraph"))
                     || window.is_text_input_active()
                     || window.has_active_dialog(cx)
                     || window.has_active_sheet(cx)

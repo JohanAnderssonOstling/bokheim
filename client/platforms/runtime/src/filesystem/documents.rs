@@ -259,6 +259,13 @@ pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
 pub fn rename_noclobber(from: &Path, to: &Path) -> io::Result<()> {
     move_path(from, to, true)
 }
+pub fn hard_link(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
+    let (from, to) = (from.as_ref(), to.as_ref());
+    if is_document_path(from) || is_document_path(to) {
+        return Err(io::Error::new(ErrorKind::Unsupported, "document storage does not support hard links"));
+    }
+    std::fs::hard_link(from, to)
+}
 fn move_path(from: &Path, to: &Path, exclusive: bool) -> io::Result<()> {
     let (from, to) = (from, to);
     if is_document_path(from) != is_document_path(to) {

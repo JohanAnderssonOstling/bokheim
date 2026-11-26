@@ -12,11 +12,10 @@ impl Database {
             BrowseLocation::Home(shelf) => return self.prepare_home_selection(shelf, options),
             _ => {}
         }
-        let source = if catalog.is_some() { Books::Catalog } else { Books::Library };
         let mut metadata = LibraryBrowseData::default();
         let mut sections = Vec::new();
         let searched = !options.search.is_empty();
-        let (matching, direct) = match location {
+        match location {
             BrowseLocation::Author(author) | BrowseLocation::CatalogAuthor(author) => {
                 let author_query = self.author_query(catalog, options)?;
                 if author.is_none() {
@@ -40,36 +39,7 @@ impl Database {
                 };
                 return Ok(Selection { sections, metadata, books: SelectedBooks::Ordered { direct: direct_order.into_iter().map(Item::from).collect(), section_orders: Orders::new() } });
             }
-            BrowseLocation::Subject(route) | BrowseLocation::Catalog(route) => {
-                let nodes = match catalog {
-                    Some(catalog) => self.catalog_subject_tree(catalog)?,
-                    None => self.subject_tree_for(Books::Library)?,
-                };
-                let empty = BTreeSet::new();
-                let matching = self.result_matching(catalog, nodes.get(&route).map_or(&empty, |node| &node.members), options)?;
-                metadata.contents.children = Self::subject_children(source, route, &nodes, &matching, options);
-                let direct = Self::subject_selected_books(route, &nodes, &matching, options);
-                if !searched {
-                    for parent in &metadata.contents.children {
-                        let (BrowseLocation::Subject(child) | BrowseLocation::Catalog(child)) = parent.id else { continue };
-                        let children = Self::subject_children(source, child, &nodes, &matching, options);
-                        let books = Self::subject_selected_books(child, &nodes, &matching, options);
-                        if !children.is_empty() || !books.is_empty() {
-                            sections.push(SectionSelection { parent: parent.clone(), children, books });
-                        }
-                    }
-                }
-                metadata.path = crate::browse::subjects::subject_path(source, route, &nodes);
-                if let Some((_, above)) = metadata.path.split_last() {
-                    let unsearched = BrowseOptions { search: String::new(), ..options.clone() };
-                    let root_matching = self.result_matching(catalog, nodes.get(&0).map_or(&empty, |node| &node.members), &unsearched)?;
-                    for location in std::iter::once(source.location(0)).chain(above.iter().map(|row| row.id)) {
-                        let (BrowseLocation::Subject(route) | BrowseLocation::Catalog(route)) = location else { continue };
-                        metadata.ancestors.push((location, Self::subject_children(source, route, &nodes, &root_matching, &unsearched)));
-                    }
-                }
-                (matching, direct)
-            }
+            BrowseLocation::Subject(route) | BrowseLocation::Catalog(route) => self.prepare_subject_selection(route, options, catalog),
             BrowseLocation::Notebook(sort) => {
                 let direct = self.notebook_book_ids(options, sort)?.into_iter().map(Item::from).collect();
                 return Ok(Selection { sections, metadata, books: SelectedBooks::Ordered { direct, section_orders: Orders::new() } });
@@ -84,14 +54,47 @@ impl Database {
                 (metadata.language_counts, metadata.format_counts) = self.library_facets(options)?;
                 return Ok(Selection { sections, metadata, books: SelectedBooks::Ordered { direct: direct_order, section_orders: Orders::new() } });
             }
-            _ => return Err(DatabaseError::message("unsupported browse result scope")),
-        };
-        let _facets_stage = Stage::new("global facets");
+            _ => Err(DatabaseError::message("unsupported browse result scope")),
+        }
+    }
+
+    fn prepare_subject_selection(&self, route: i64, options: &BrowseOptions, catalog: Option<&Connection>) -> Result<Selection, DatabaseError> {
+        let source = if catalog.is_some() { Books::Catalog } else { Books::Library };
+        let snapshot = self.subject_snapshot(source, catalog, Some(options))?;
+        let mut metadata = LibraryBrowseData::default();
+        let mut sections = Vec::new();
+        let mut eligible = BTreeSet::new();
+        let mut direct = BTreeSet::new();
+        if let Some(index) = snapshot.index(route) {
+            metadata.contents.children = snapshot.children(index, options, catalog.is_some());
+            eligible = snapshot.members(index).intersection(&snapshot.matching.books).copied().collect();
+            direct = snapshot.selected(index, !options.search.is_empty());
+            if options.search.is_empty() {
+                for parent in &metadata.contents.children {
+                    let (BrowseLocation::Subject(route) | BrowseLocation::Catalog(route)) = parent.id else { continue };
+                    let index = snapshot.index(route).expect("listed subject belongs to the snapshot");
+                    let children = snapshot.children(index, options, catalog.is_some());
+                    let books = snapshot.selected(index, false);
+                    if !children.is_empty() || !books.is_empty() {
+                        sections.push(SectionSelection { parent: parent.clone(), children, books });
+                    }
+                }
+            }
+            metadata.path = snapshot.hierarchy.path(index);
+            if let Some((_, above)) = metadata.path.split_last() {
+                let unsearched = BrowseOptions { search: String::new(), ..options.clone() };
+                for location in std::iter::once(source.location(0)).chain(above.iter().map(|row| row.id)) {
+                    let (BrowseLocation::Subject(route) | BrowseLocation::Catalog(route)) = location else { continue };
+                    let index = snapshot.index(route).expect("ancestor belongs to the snapshot");
+                    metadata.ancestors.push((location, snapshot.children(index, &unsearched, catalog.is_some())));
+                }
+            }
+        }
         (metadata.language_counts, metadata.format_counts) = match catalog {
             Some(catalog) => self.catalog_facets(catalog, options)?,
             None => self.library_facets(options)?,
         };
-        Ok(Selection { sections, metadata, books: SelectedBooks::Membership { eligible: matching.books, direct } })
+        Ok(Selection { sections, metadata, books: SelectedBooks::Membership { eligible, direct } })
     }
 
     fn prepare_home_selection(&self, shelf: Option<HomeShelf>, options: &BrowseOptions) -> Result<Selection, DatabaseError> {
@@ -109,6 +112,7 @@ impl Database {
                         path: None,
                         book_count: found.books.len(),
                         downloaded_book_count: found.books.iter().filter(|id| prepared.matching.downloaded.contains(id)).count(),
+                        requested_book_count: None,
                         size_bytes: None,
                     };
                     metadata.contents.children.push(parent.clone());

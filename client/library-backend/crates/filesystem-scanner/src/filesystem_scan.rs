@@ -6,10 +6,10 @@
 pub use crate::discovery::is_audiobook_folder;
 use crate::discovery::{audiobook_member, audiobook_tracks, next_book_entry};
 use crate::ingestion::fingerprint as book_fingerprint;
-use crate::ingestion::{READER_EPUB_METADATA_VERSION, READER_PDF_METADATA_VERSION, ingest_audiobook_folder};
+use crate::ingestion::{ingest_audiobook_folder, READER_EPUB_METADATA_VERSION, READER_PDF_METADATA_VERSION};
 #[cfg(not(target_arch = "wasm32"))]
 use client_platform_runtime::filesystem as fs;
-use futures_util::StreamExt;
+use futures_util::future::join_all;
 use library_files::asset_store::import_in_progress;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -22,7 +22,6 @@ use library_database::{FilesystemScan, InspectedFilesystemScan, ScanDirectoryObs
 use sync_common::{DirId, ROOT_DIR_ID};
 
 pub const PUBLISH_BATCH_SIZE: usize = 32;
-const MAX_CONCURRENT_INSPECTIONS: usize = 2;
 
 /// Placement lookup for the immutable book inventory captured at scan startup.
 /// Batch publication updates the snapshot's write guards, not its book inventory.
@@ -330,8 +329,8 @@ pub async fn inspect_files(root: impl Into<PathBuf>, files: &[ScanFileObservatio
             }
         })
         .collect();
-    let mut inspections = futures_util::stream::iter(inspections).buffered(MAX_CONCURRENT_INSPECTIONS);
-    while let Some(inspection) = inspections.next().await {
+    // Inspect the batch concurrently and retain discovery order for publication.
+    for inspection in join_all(inspections).await {
         match inspection {
             Ok(book) => result.books.push(book),
             Err((path, error)) => {

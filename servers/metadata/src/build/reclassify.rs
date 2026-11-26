@@ -18,7 +18,7 @@ fn lcc(m: &RichWorkMetadataMatch) -> Vec<Classification> {
 }
 
 /// Reclassification requires the recorded immutable inputs and current recipe.
-/// Only work LCC and dependent search/queue entries are changed, together with
+/// Only work LCC and dependent search entries are changed, together with
 /// pending provider/demand evidence. Readers must use ordinary SQLite reads.
 pub fn reclassify_answers(snapshot: &Path, providers: Option<&Path>, demand: Option<&Path>, descriptions: Option<&Path>, answers: &Path) -> Result<BuildReport, MetadataError> {
     let started = Instant::now();
@@ -219,8 +219,8 @@ pub fn reclassify_answers(snapshot: &Path, providers: Option<&Path>, demand: Opt
                         Ok((r.get(0)?, r.get(1)?))
                     })
                     .map_err(error)?;
-                // A surviving answer or candidate already closes the queue.
-                // Recount when evidence was removed or the work may reopen.
+                // A surviving classification keeps the work summary valid.
+                // Recount when evidence was removed or classification is absent.
                 if removed || !classified {
                     recount.insert(work);
                 }
@@ -228,8 +228,6 @@ pub fn reclassify_answers(snapshot: &Path, providers: Option<&Path>, demand: Opt
             if !recount.is_empty() {
                 refresh_work_state(&source, &out, &recount)?;
             }
-            let sql = format!("DELETE FROM wanted WHERE work_id IN ({}) AND (work_id IN (SELECT work_id FROM answer_work_lcc) OR EXISTS(SELECT 1 FROM edition_candidate c WHERE c.work_id=wanted.work_id))", sql_placeholders(works.len()));
-            out.execute(&sql, params_from_iter(&works)).map_err(error)?;
         }
         drop(rows);
         drop(q);
@@ -258,7 +256,6 @@ pub fn reclassify_answers(snapshot: &Path, providers: Option<&Path>, demand: Opt
             write_seconds: 0.0,
             edition_index_seconds: 0.0,
             authority_index_seconds: 0.0,
-            queue_seconds: 0.0,
         })
     })();
     if result.is_err() {
@@ -300,11 +297,10 @@ fn refresh_inputs(
                 removed += 1;
             }
             if incremental::included(source, provider, demand, isbn)? {
-                let requests = demand.map(|c| c.query_row("SELECT requests FROM demand WHERE isbn13=?1", [isbn], |r| r.get::<_, i64>(0)).optional().map_err(error)).transpose()?.flatten().unwrap_or(0);
-                rows.push((isbn, requests));
+                rows.push(isbn);
             }
         }
-        let mut response = resolver.enrich_build_batch_cached(rows.iter().map(|(isbn, _)| format!("{isbn:013}")).collect(), cache)?;
+        let mut response = resolver.enrich_build_batch_cached(rows.iter().map(|isbn| format!("{isbn:013}")).collect(), cache)?;
         if let Some(c) = provider {
             providers::apply_many(c, &mut response)?;
         }
@@ -323,11 +319,6 @@ fn refresh_inputs(
         out.execute("INSERT OR IGNORE INTO changed_work VALUES(?1)", [work]).map_err(error)?;
     }
     incremental::sync_inputs(out, provider, demand, &changes)?;
-    for &isbn in &demand_updates {
-        let requests = out.query_row("SELECT requests FROM answer_demand WHERE isbn13=?1", [isbn], |r| r.get::<_, i64>(0)).optional().map_err(error)?.unwrap_or(0);
-        let rank = if requests > 0 { (-1_000_000_000_000_i64).saturating_sub(requests) } else { 0 };
-        out.execute("UPDATE wanted SET rank=?1 WHERE isbn13=?2", params![rank, isbn]).map_err(error)?;
-    }
     Ok((resolved, removed))
 }
 
@@ -348,11 +339,6 @@ fn refresh_work_state(source: &Connection, out: &Connection, works: &BTreeSet<i6
             for work in classified_works(&stored.result) {
                 out.execute("INSERT OR IGNORE INTO answer_work_lcc VALUES(?1)", [work]).map_err(error)?;
             }
-        } else {
-            let work = stored.result.matches.first().filter(|_| stored.result.matches.len() == 1).and_then(|m| m.open_library_work_id.as_deref()).and_then(|id| open_library_id(id, 'W'));
-            let requests = out.query_row("SELECT requests FROM answer_demand WHERE isbn13=?1", [isbn], |r| r.get::<_, i64>(0)).optional().map_err(error)?.unwrap_or(0);
-            let rank = if requests > 0 { (-1_000_000_000_000_i64).saturating_sub(requests) } else { 0 };
-            out.execute("INSERT OR IGNORE INTO wanted VALUES(?1,?2,?3)", params![isbn, rank, work]).map_err(error)?;
         }
     }
     Ok(())

@@ -532,7 +532,6 @@ mod tests {
                 let theme = BrowserTheme::from_palette(crate::theme::palette(palette, appearance));
                 let buttons = [
                     crate::settings_choice_button("choice", "Choice", true, theme),
-                    crate::browser_settings_header_button("action", "Action", true, theme),
                     crate::nav_rail_item("rail", IconName::Settings, "Settings", true, theme),
                     crate::bottom_navigation_item("bottom", IconName::Settings, "Settings", true, theme),
                     crate::library_switcher_item("library", "Library", true, false, theme),

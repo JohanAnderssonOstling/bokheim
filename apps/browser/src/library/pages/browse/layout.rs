@@ -384,7 +384,7 @@ mod heading_tests {
         let selected = Rc::new(Cell::new(false));
         let child_selected = selected.clone();
         let child = PaginatorChild::new(move |_, _, cx| {
-            let row = BrowseRow { id: BrowseLocation::Folder(DirId::from_u128(1)), name: "Folder".into(), path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None };
+            let row = BrowseRow { id: BrowseLocation::Folder(DirId::from_u128(1)), name: "Folder".into(), path: None, book_count: 0, downloaded_book_count: 0, requested_book_count: None, size_bytes: None };
             child_frame(
                 div().size_full(),
                 &row,
@@ -485,7 +485,7 @@ mod heading_tests {
         row.source = BookSource::Library { book_id: hash };
         let library_book = BookCardView::create_in_grid(row, library.clone(), Rc::new(|_, _, _| {}), false, false, cx);
         let folder_id = DirId::from_u128(778);
-        let folder = BrowseItem::Child { row: BrowseRow { id: BrowseLocation::Folder(folder_id), name: "Folder".into(), path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None }, parent: None };
+        let folder = BrowseItem::Child { row: BrowseRow { id: BrowseLocation::Folder(folder_id), name: "Folder".into(), path: None, book_count: 0, downloaded_book_count: 0, requested_book_count: None, size_bytes: None }, parent: None };
         cx.update(|cx| {
             let selection = [folder.clone(), BrowseItem::Book(library_book.clone())];
             let icon = BrowseKind::Folder.child_icon();
@@ -571,8 +571,8 @@ mod heading_tests {
 
     #[test]
     fn sparse_author_headings_preserve_distant_positions_and_leave_other_chips_first() {
-        let row = |id| BrowseRow { id: BrowseLocation::CatalogAuthor(Some(uuid::Uuid::from_u128(id))), name: format!("Writer {id}"), path: None, book_count: 2, downloaded_book_count: 0, size_bytes: None };
-        let catalog = BrowseRow { id: BrowseLocation::Catalog(library_model::ROOT_SUBJECT_ROUTE_ID), name: "Catalog".into(), path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None };
+        let row = |id| BrowseRow { id: BrowseLocation::CatalogAuthor(Some(uuid::Uuid::from_u128(id))), name: format!("Writer {id}"), path: None, book_count: 2, downloaded_book_count: 0, requested_book_count: None, size_bytes: None };
+        let catalog = BrowseRow { id: BrowseLocation::Catalog(library_model::ROOT_SUBJECT_ROUTE_ID), name: "Catalog".into(), path: None, book_count: 0, downloaded_book_count: 0, requested_book_count: None, size_bytes: None };
         let first = row(1);
         let distant = row(28);
         let loaded = BTreeMap::from([(0, first.clone()), (27, distant.clone())]);

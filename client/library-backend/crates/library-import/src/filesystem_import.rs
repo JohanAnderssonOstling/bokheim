@@ -1,7 +1,7 @@
 //! Native file and folder imports from filesystem paths or picker entries.
 //! Place external files on disk, then import them in place.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, Error};
 use std::path::{Path, PathBuf};
@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use book_model::BookFormat;
 use filesystem_scanner::discovery::{audiobook_member, is_audiobook_folder, next_book_entry, supported};
 use filesystem_scanner::ingestion::{ingest_audiobook_folder, ingest_file};
-use library_files::filesystem::{place_into_directory, walk};
-use library_model::PublishedStagedBook;
+use library_files::filesystem::{fingerprint, place_into_directory_with_progress, walk};
+use library_model::{ImportProgress, LibraryUpdate, PublishedStagedBook};
 use sync_common::DirId;
 
 use client_platform_runtime::executor::run_blocking;
@@ -128,6 +128,11 @@ impl LibraryImport<'_> {
                 if let Err(error) = self.move_book_from_path(parent, &path).await {
                     move_failures.push(failure(&path, &error));
                 }
+            } else if moving && path.is_dir() && !already_here {
+                match self.move_folder_from_path(parent, &path).await {
+                    Ok(failures) => move_failures.extend(failures),
+                    Err(error) => move_failures.push(failure(&path, &error)),
+                }
             } else {
                 remaining.push(path);
             }
@@ -139,6 +144,36 @@ impl LibraryImport<'_> {
         self.place_and_import_paths(parent, paths, moving, move_failures).await
     }
 
+    /// Keep the external folder until every book has been registered. A failed
+    /// import or a changed source leaves the original available for retry.
+    async fn move_folder_from_path(&self, parent: DirId, source: &Path) -> Result<Vec<ImportFailure>, BackendError> {
+        let source = source.to_owned();
+        let revision = run_blocking({
+            let source = source.clone();
+            move || folder_revision(&source)
+        })
+        .await
+        .map_err(BackendError::operation)??;
+        let mut failures = self.place_and_import_paths(parent, vec![source.clone()], false, Vec::new()).await?;
+        if failures.is_empty() {
+            let cleanup = run_blocking({
+                let source = source.clone();
+                move || {
+                    if folder_revision(&source)? != revision {
+                        return Err(Error::other("source folder changed during import; original folder retained"));
+                    }
+                    fs::remove_dir_all(source)
+                }
+            })
+            .await
+            .map_err(BackendError::operation)?;
+            if let Err(error) = cleanup {
+                failures.push(failure(&source, &BackendError::from(error)));
+            }
+        }
+        Ok(failures)
+    }
+
     /// Publish completed picker copies before inspection so failed books remain
     /// available for retry, while external file moves keep their rollback path.
     async fn place_and_import_paths(&self, parent: DirId, paths: Vec<PathBuf>, moving: bool, prior_failures: Vec<ImportFailure>) -> Result<Vec<ImportFailure>, BackendError> {
@@ -147,11 +182,18 @@ impl LibraryImport<'_> {
         let destination_relative = destination.strip_prefix(&root).map_err(BackendError::operation)?.to_owned();
         let occupied = self.storage.database().shared_occupied_file_names(&parent).await?;
         // Place the complete selection on disk before inspecting any books.
+        let updates = self.events.updates.clone();
         let (placed, mut failures) = run_blocking(move || {
             let mut placed = Vec::new();
             let mut failures = Vec::new();
             for path in paths {
-                let result = if path.is_dir() || supported(&path) { place_into_directory(&path, &destination, &occupied, moving) } else { Err(io::Error::other("not a supported book or folder")) };
+                let result = if path.is_dir() || supported(&path) {
+                    place_into_directory_with_progress(&path, &destination, &occupied, moving, &mut |path, copied_bytes, total_bytes| {
+                        updates.publish(LibraryUpdate::ImportProgress(ImportProgress::Copying { name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), copied_bytes, total_bytes }));
+                    })
+                } else {
+                    Err(io::Error::other("not a supported book or folder"))
+                };
                 match result {
                     Ok(path) => placed.push(path),
                     Err(error) => failures.push(failure(&path, &BackendError::from(error))),
@@ -218,6 +260,7 @@ impl LibraryImport<'_> {
 
     async fn import_file_in_place(&self, parent: DirId, root: &Path, relative: &Path) -> Result<(), BackendError> {
         let name = file_name(relative)?;
+        self.report_importing(name);
         let path = root.join(relative);
         let (import, ingested) = if path.is_dir() {
             validate_import_destination(self.storage.database(), &parent).await?;
@@ -253,6 +296,22 @@ struct Inventory {
     directories: Vec<PathBuf>,
     files: Vec<PathBuf>,
     failures: Vec<(PathBuf, String)>,
+}
+
+fn folder_revision(root: &Path) -> io::Result<BTreeMap<PathBuf, Option<u64>>> {
+    if !fs::symlink_metadata(root)?.is_dir() {
+        return Err(Error::other("source is not a regular folder"));
+    }
+    let mut revision = BTreeMap::new();
+    let mut entries = walk(root);
+    while let Some(entry) = entries.next() {
+        let entry = entry?;
+        if entry.is_symlink() || !(entry.is_dir() || entry.is_file()) {
+            return Err(Error::other("cannot move symbolic links or special files"));
+        }
+        revision.insert(entry.path().to_owned(), if entry.is_file() { Some(fingerprint(entry.path())?) } else { None });
+    }
+    Ok(revision)
 }
 
 fn inventory(root: &Path, placed: &[PathBuf]) -> Result<Inventory, BackendError> {

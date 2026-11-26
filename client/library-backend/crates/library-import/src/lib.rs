@@ -6,9 +6,10 @@
 //! The operation scheduler (see `library-backend`) batches contents
 //! notifications until the admitted import completes.
 
-use std::sync::Arc;
 use cpu_contract::CpuHost;
+use std::sync::Arc;
 
+use library_model::{ImportProgress, LibraryUpdate};
 use library_placement::LibraryState;
 use library_services::events::LibraryEventRouter;
 
@@ -64,6 +65,11 @@ impl<'a> LibraryImport<'a> {
             root: storage.assets().native_library_root().to_path_buf(),
             cpu,
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn report_importing(&self, name: &str) {
+        self.events.updates.publish(LibraryUpdate::ImportProgress(ImportProgress::Importing { name: name.to_owned() }));
     }
 }
 

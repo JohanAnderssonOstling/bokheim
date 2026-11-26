@@ -38,7 +38,7 @@ impl SyncPage {
             .child(Input::new(&form.confirmation))
             .child(
                 components::action_row()
-                    .child(components::base_button("confirm-delete-account").label(text!(account::permanently_delete_account)).danger().on_click(move |_, window, cx| {
+                    .child(components::action_button("confirm-delete-account", text!(account::permanently_delete_account)).danger().on_click(move |_, window, cx| {
                         submit.update(cx, |page, cx| page.start_account_deletion(window, cx));
                     }))
                     .child(components::dialog_cancel_button("cancel-delete-account", text!(common::cancel)).on_click(move |_, _, cx| {

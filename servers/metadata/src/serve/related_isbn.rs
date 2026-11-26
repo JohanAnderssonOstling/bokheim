@@ -1,7 +1,7 @@
 //! Pure verification policy; callers perform ISBN requests without uploading book bytes.
 use metadata_contract::{
+    matching::{author_match_keys, matching_author_count, NormalizedTitle},
     Classification, ClassificationEvidence, ClassificationMethod, ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, RichWorkMetadataMatch,
-    matching::{NormalizedTitle, author_match_keys, matching_author_count},
 };
 
 /// All checksum-valid ISBN references identified as a candidate edition of this

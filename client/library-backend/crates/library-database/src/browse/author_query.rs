@@ -168,7 +168,7 @@ impl AuthorQuery<'_> {
             }
             let id = self.identity(row, 0)?;
             let location = if self.catalog { BrowseLocation::CatalogAuthor(Some(id)) } else { BrowseLocation::Author(Some(id)) };
-            rows.push(BrowseRow { id: location, name, path: None, book_count: count(row, 2)?, downloaded_book_count: count(row, 3)?, size_bytes: None });
+            rows.push(BrowseRow { id: location, name, path: None, book_count: count(row, 2)?, downloaded_book_count: count(row, 3)?, requested_book_count: None, size_bytes: None });
             priorities.insert(location, row.get::<_, u8>(4)?);
             Ok(())
         })?;

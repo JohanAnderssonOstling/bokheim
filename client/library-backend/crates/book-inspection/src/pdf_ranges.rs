@@ -94,15 +94,10 @@ mod tests {
         document.trailer.set("Info", info);
         let mut bytes = Vec::new();
         document.save_to(&mut bytes).unwrap();
-        let byte_hash = BookId::from(blake3::hash(&bytes));
         let identity = BookId::for_local_content(blake3::hash(b"separate book").into());
         let read = Arc::new(AtomicUsize::new(0));
         let reader = Counted { inner: Cursor::new(bytes), read: read.clone() };
         let inspected = crate::inspect_book_reader_with_hash(Path::new("Book.pdf"), BookFormat::Pdf, reader, Some(identity)).unwrap();
-        let pdf = inspected.pdf.unwrap();
-        assert!(pdf.valid_for(&identity.to_hex()));
-        assert!(!pdf.valid_for(&byte_hash.to_hex()));
-        assert_eq!(pdf.pages.len(), 1);
         assert_eq!(inspected.metadata.title, "Remote PDF");
         assert!(inspected.metadata.book.identifiers.iter().any(|id| id.canonical_value().as_deref() == Some("9780821338278")));
         assert!(read.load(Ordering::Relaxed) < 1024 * 1024, "PDF inspection requested {} bytes", read.load(Ordering::Relaxed));

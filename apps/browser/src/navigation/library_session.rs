@@ -24,7 +24,7 @@ use crate::library::{BrowseKind, BrowsePage, LibraryContext, LibraryFileActionsC
 use crate::{BrowsePageSession, PaneRequest};
 
 #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-mod reader_import;
+pub(super) mod reader_import;
 
 pub(crate) struct LibrarySession {
     operation_dialog: Option<LibraryDialog>,
@@ -419,10 +419,10 @@ impl Render for LibrarySession {
                 .justify_center()
                 .when(ui_components::uses_mobile_navigation(window), |actions| actions.flex_col())
                 .gap(px(ui_components::SPACE_SM))
-                .child(ui_components::primary_action_button("empty-library-add-book", text!(browse::add_book_from_device), IconName::Plus, false).on_click(move |_, _, cx| {
+                .child(ui_components::action_button("empty-library-add-book", text!(browse::add_book_from_device)).primary().icon(IconName::Plus).on_click(move |_, _, cx| {
                     session.update(cx, |session, cx| session.library.choose_and_import_book(ROOT_DIR_ID, cx));
                 }))
-                .child(ui_components::secondary_action_button("empty-library-catalog", text!(browse::go_to_catalog), IconName::BookOpen, false).on_click(|_, window, cx| {
+                .child(ui_components::action_button("empty-library-catalog", text!(browse::go_to_catalog)).icon(IconName::BookOpen).on_click(|_, window, cx| {
                     window.dispatch_action(Box::new(crate::OpenLibraryView(LibraryRoute::Catalog)), cx);
                 }));
             // The browse page's own heading, which an empty view still needs to

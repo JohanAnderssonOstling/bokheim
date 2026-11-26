@@ -172,7 +172,7 @@ pub fn annotation_editor_controls<C: AnnotationEditorTarget>(id_prefix: &'static
     }
     let colors = colors.when(!current.is_external_pdf_annotation(), |colors| {
         let target = target.clone();
-        colors.child(components::delete_icon_button(SharedString::from(format!("{id_prefix}-delete")), text!(common::delete_annotation), theme).debug_selector(|| "reader-annotation-editor-delete".into()).on_click(move |_, window, cx| {
+        colors.child(components::delete_icon_button(SharedString::from(format!("{id_prefix}-delete")), text!(common::delete_annotation)).debug_selector(|| "reader-annotation-editor-delete".into()).on_click(move |_, window, cx| {
             cx.stop_propagation();
             target.update(cx, |this, cx| this.delete_edited_annotation(window, cx));
         }))

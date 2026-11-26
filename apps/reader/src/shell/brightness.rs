@@ -210,7 +210,7 @@ impl Render for LightControl {
         if let Some(error) = self.error.clone() {
             panel = panel
                 .child(gpui::div().text_color(theme.text_muted).child(error))
-                .child(components::topbar_action_button("brightness-retry", text!(common::retry), IconName::Redo2, theme).disabled(self.busy).on_click(cx.listener(|panel, _, window, cx| panel.request(None, window, cx))));
+                .child(components::action_button("brightness-retry", text!(common::retry)).icon(IconName::Redo2).disabled(self.busy).on_click(cx.listener(|panel, _, window, cx| panel.request(None, window, cx))));
         }
         panel
     }

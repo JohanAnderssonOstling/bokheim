@@ -28,7 +28,7 @@ pub(super) fn index_rows(authors: &BTreeMap<AuthorId, Author>, matching: &Matchi
         }
         let book_count = found.books.intersection(&matching.books).count();
         if book_count > 0 {
-            rows.push(BrowseRow { id: location(*id), name: found.name.clone(), path: None, book_count, downloaded_book_count: found.books.intersection(&matching.downloaded).count(), size_bytes: None });
+            rows.push(BrowseRow { id: location(*id), name: found.name.clone(), path: None, book_count, downloaded_book_count: found.books.intersection(&matching.downloaded).count(), requested_book_count: None, size_bytes: None });
         }
     }
     super::ordering::sort_rows(&mut rows, options.chip_sort);

@@ -8,6 +8,7 @@ use gpui_component::spinner::Spinner;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Disableable, Icon, Selectable, Sizable, Size, StyledExt};
 
+use crate::tokens::selected_surface;
 use crate::{TEXT_SM, TEXT_XS, browser_theme};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -17,6 +18,7 @@ enum Variant {
     Primary,
     Danger,
     Ghost,
+    DangerGhost,
 }
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -78,12 +80,18 @@ impl Button {
     }
 
     pub fn danger(mut self) -> Self {
-        self.variant = Variant::Danger;
+        self.variant = match self.variant {
+            Variant::Ghost | Variant::DangerGhost => Variant::DangerGhost,
+            _ => Variant::Danger,
+        };
         self
     }
 
     pub fn ghost(mut self) -> Self {
-        self.variant = Variant::Ghost;
+        self.variant = match self.variant {
+            Variant::Danger | Variant::DangerGhost => Variant::DangerGhost,
+            _ => Variant::Ghost,
+        };
         self
     }
 
@@ -212,13 +220,13 @@ impl RenderOnce for Button {
         let focused = !unavailable && focus.is_focused(window);
         let semantic = matches!(self.variant, Variant::Primary | Variant::Danger);
         let filled = self.fill && semantic && !cfg!(feature = "kobo");
-        let danger = self.variant == Variant::Danger;
+        let danger = matches!(self.variant, Variant::Danger | Variant::DangerGhost);
         let on_accent = self.selection_surface == Some(true) && !cfg!(feature = "kobo");
         let background = if !self.fill {
             transparent_black()
         } else if filled {
             if danger { theme.danger } else { theme.accent }
-        } else if self.variant == Variant::Ghost {
+        } else if matches!(self.variant, Variant::Ghost | Variant::DangerGhost) {
             transparent_black()
         } else {
             theme.page_bg
@@ -282,8 +290,7 @@ impl RenderOnce for Button {
             .text_color(foreground)
             .when(icon_only, |button| button.w(height).p_0())
             .when(self.variant == Variant::Default || (semantic && cfg!(feature = "kobo")), |button| button.border_1().border_color(if semantic { if danger { theme.danger } else { theme.accent } } else { theme.rule }))
-            .when(self.selected && self.fill && !cfg!(feature = "kobo"), |button| button.bg(theme.accent).text_color(theme.accent_text))
-            .when(self.selected && self.fill && cfg!(feature = "kobo"), |button| button.bg(theme.page_bg).text_color(theme.text).border_2().border_color(theme.accent))
+            .when(self.selected && self.fill, |button| selected_surface(button, theme))
             .refine_style(&self.style)
             .when(self.selection_surface.is_some(), |button| button.bg(transparent_black()).text_color(if on_accent { theme.accent_text } else { theme.text }))
             .when(!unavailable, |button| {
@@ -323,7 +330,7 @@ impl RenderOnce for Button {
             .when_some(self.icon, |button, icon| button.child(if self.loading { Spinner::new().with_size(icon_size).into_any_element() } else { icon.with_size(icon_size).into_any_element() }))
             .children(self.label)
             .children(self.children)
-            .when(focused, |button| button.child(div().absolute().inset_0().border_1().border_color(if self.fill { theme.accent.opacity(0.4) } else { theme.rule })));
+            .when(focused && window.last_input_was_keyboard(), |button| button.child(div().absolute().inset_0().border_1().border_color(if self.fill { theme.accent.opacity(0.4) } else { theme.rule })));
         if let Some(tooltip) = self.tooltip {
             button = button.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx));
         }

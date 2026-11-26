@@ -7,6 +7,7 @@ pub fn app(service: MetadataService) -> Router {
         .route("/health/descriptions", get(description_capability))
         .route("/internal/operations", get(operational_stats))
         .route("/v3/books", post(books).layer::<_, std::convert::Infallible>(DefaultBodyLimit::max(metadata_contract::books::MAX_BOOKS_REQUEST_BYTES)).layer(public_cors()))
+        .route("/v3/works", post(works).layer(public_cors()))
         .route("/v3/covers/:id", get(resolved_cover).layer(public_cors()))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(middleware::from_fn_with_state(service.clone(), record_request_metrics))
@@ -14,7 +15,11 @@ pub fn app(service: MetadataService) -> Router {
 }
 
 async fn description_capability(State(service): State<MetadataService>) -> (StatusCode, &'static str) {
-    if service.state.descriptions_available { (StatusCode::OK, "available") } else { (StatusCode::SERVICE_UNAVAILABLE, "snapshot has no descriptions") }
+    if service.state.descriptions_available {
+        (StatusCode::OK, "available")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "snapshot has no descriptions")
+    }
 }
 
 async fn record_request_metrics(State(service): State<MetadataService>, request: Request, next: Next) -> Response {
@@ -59,6 +64,9 @@ fn load_operational_stats(state: &ServiceState) -> Result<serde_json::Value, Met
         "schema_version":state.schema_version,"dump_date":state.snapshot.dump_date,
         "built_at_ms":state.snapshot.imported_at_ms,"database_bytes":fs::metadata(&state.database).map_err(error)?.len(),
         "pool_connections":pool.connections,"pool_idle_connections":pool.idle_connections,
+        "work_lookup_available":state.works.is_some(),
+        "work_title_author_indexed":state.works.is_some(),
+        "work_editions_indexed":state.works.as_ref().is_some_and(|works| works.editions_indexed()),
         "processed_items":state.processed_items.load(Ordering::Relaxed),
         "item_processing_duration_ms":state.item_processing_duration_ms.load(Ordering::Relaxed),
         "endpoint_metrics":{"books":endpoint_metrics_snapshot(&state.books)}
@@ -87,6 +95,17 @@ async fn books(State(service): State<MetadataService>, axum::Json(request): axum
             axum::Json(response).into_response()
         }
         Err(error) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+async fn works(State(service): State<MetadataService>, axum::Json(request): axum::Json<metadata_contract::works::WorkLookupRequest>) -> Response {
+    let Some(index) = service.state.works.clone() else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "work identity lookup requires BOKHEIM_METADATA_WORKS");
+    };
+    match tokio::task::spawn_blocking(move || index.resolve(request.queries)).await {
+        Ok(Ok(results)) => axum::Json(metadata_contract::works::WorkLookupResponse { results }).into_response(),
+        Ok(Err(error)) => api_error(StatusCode::BAD_REQUEST, &error.to_string()),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("work lookup worker failed: {error}")),
     }
 }
 

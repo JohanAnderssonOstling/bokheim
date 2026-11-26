@@ -54,6 +54,20 @@ CREATE TABLE snapshot(
                 work_id INTEGER PRIMARY KEY,
                 description TEXT NOT NULL
              ) STRICT;
+             CREATE TABLE edition_description(
+                edition_id INTEGER PRIMARY KEY,
+                description TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE edition_description_work(
+                work_id INTEGER NOT NULL,
+                edition_id INTEGER NOT NULL,
+                PRIMARY KEY(work_id,edition_id)
+             ) WITHOUT ROWID;
+             CREATE TABLE edition_description_isbn(
+                isbn13 INTEGER NOT NULL,
+                edition_id INTEGER NOT NULL,
+                PRIMARY KEY(isbn13,edition_id)
+             ) WITHOUT ROWID;
              CREATE TABLE edition_publisher(
                 edition_id INTEGER NOT NULL,
                 position INTEGER NOT NULL,
@@ -140,7 +154,7 @@ CREATE TABLE snapshot(
              CREATE TABLE work_author_stage(work_id INTEGER NOT NULL, position INTEGER NOT NULL, author_id INTEGER NOT NULL);
              CREATE TABLE author_stage(author_id INTEGER NOT NULL, name TEXT);
              CREATE TABLE author_identifier_stage(author_id INTEGER NOT NULL, authority TEXT NOT NULL, external_id TEXT NOT NULL);
-             INSERT INTO metadata_metric(name,value) VALUES('builder_schema_version',10);
+             INSERT INTO metadata_metric(name,value) VALUES('builder_schema_version',11);
 
 -- Optional subtitle indexes preserve compatibility with older query snapshots.
 CREATE TABLE IF NOT EXISTS edition_subtitle(edition_id INTEGER PRIMARY KEY, subtitle TEXT NOT NULL, normalized_title TEXT NOT NULL);

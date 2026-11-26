@@ -11,7 +11,7 @@ use book_model::{AUTHOR_MARC_RELATOR_CODE, BookFormat, BookRecord, BookSubject, 
 use client_platform_runtime::executor::run_blocking;
 use client_protocol::BackendError;
 use content_address::ContentHash;
-use filesystem_scanner::ingestion::{IngestedFile, READER_EPUB_METADATA_VERSION, READER_PDF_METADATA_VERSION, ingest_file_with_inspection_caches, ingest_reader_file_with_cached_inspection};
+use filesystem_scanner::ingestion::{IngestedFile, READER_EPUB_METADATA_VERSION, READER_PDF_METADATA_VERSION, fingerprint as ingestion_fingerprint, ingest_file_with_inspection_caches, ingest_reader_file_with_cached_inspection};
 use library_database::transfer::BookTransferState;
 use library_replica::{BookAddition, BookFacts, EnrichmentResult};
 use serde_json::Value;
@@ -171,7 +171,7 @@ async fn import_batched_copy(importer: &LibraryImport<'_>, parent: DirId, source
     let (state, warnings) = run_blocking(move || {
         let mut warnings = Vec::new();
         let state = prepare.prepare(&ingested, &prepared_path, &mut warnings)?;
-        if library_files::filesystem::fingerprint(&prepared_path)? != ingested.fingerprint || library_files::filesystem::fingerprint(&check_source)? != revision {
+        if ingestion_fingerprint(&prepared_path)? != ingested.fingerprint || library_files::filesystem::fingerprint(&check_source)? != revision {
             return Err(BackendError::message("reader source changed during preparation"));
         }
         Ok::<_, BackendError>((state, warnings))

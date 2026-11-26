@@ -4,68 +4,16 @@ use std::sync::OnceLock;
 
 use crate::theme::BrowserTheme;
 
-/// The interaction ladder, defined once.
-///
-/// A call site says what a thing *is* — current or not — and never names a
-/// colour. That is the point: the treatment was previously spelled out at each
-/// site, so the same state drifted into meaning `accent_wash` in some places
-/// and a solid accent in others, and pages picked palette values directly.
-///
-///   rest      untouched
-///   hover     `theme.hover` — the light wash under the pointer; translucent,
-///             correct over any surface
-///   keyboard  `accent_wash` — the keyboard cursor and the selection, which
-///             is transient however it was made. The value chosen in a
-///             settings control is marked separately with the current tier.
-///   current   `accent` with `accent_text` on it — state the app holds: the
-///             place you are, a mode that is on, a filter narrowing the
-///             content. Menu and sheet choices share this solid accent and a
-///             trailing checkmark through `gpui_component::menu::choice_row`.
-///
-/// Nothing is drawn as an outline for hover or the cursor. The pointer on a
-/// keyboard item steps it to `accent_wash_hover`; the pointer or the cursor on
-/// a current item steps it to `accent_hover`. `contents_row` lays out all of
-/// them together. Book cards keep their own selection and cursor marks — see
-/// `book_card`.
-///
-/// This trait covers rest, hover and current; the keyboard tier is the call
-/// site's, because only it knows where the cursor is.
-///
-/// Do not call this on an element that already sets its own `hover`: gpui
-/// asserts a hover style is only set once. Use [`selectable_button`] for the
-/// application's `Button`, which owns its interaction styles.
-pub trait Interactive: Styled + gpui::InteractiveElement + Sized {
-    fn selectable(self, current: bool, theme: BrowserTheme) -> Self {
-        // On Kobo nothing is filled: current is a black border on the page.
-        if cfg!(feature = "kobo") {
-            let element = self.hover(move |style| style.bg(theme.hover));
-            return if current { element.border_2().border_color(theme.accent) } else { element };
-        }
-        // A current surface is already the accent, so a wash laid over it
-        // would be invisible. It darkens instead — the same distinction
-        // `accent_hover` exists for.
-        let hovered = if current { theme.accent_hover } else { theme.hover };
-        let element = self.hover(move |style| style.bg(hovered));
-        if current { element.bg(theme.accent).text_color(theme.accent_text) } else { element }
-    }
+/// Selected buttons and composite segments use the same palette and Kobo outline.
+pub(crate) fn selected_surface<T: Styled>(surface: T, theme: BrowserTheme) -> T {
+    if cfg!(feature = "kobo") { surface.bg(theme.page_bg).text_color(theme.text).border_2().border_color(theme.accent) } else { surface.bg(theme.accent).text_color(theme.accent_text) }
 }
 
-impl<T: Styled + gpui::InteractiveElement + Sized> Interactive for T {}
-
-/// Shared current-state styling for the application's `Button`.
-///
-/// Selected buttons keep the heavy accent and contrasting text. Unselected
-/// buttons take their light accent hover from the application button component.
+/// Apply the shared selection treatment while retaining Button's interaction feedback.
 pub fn selectable_button(button: Button, selected: bool, theme: BrowserTheme) -> Button {
     use gpui_component::Selectable;
-    if !selected {
-        return button;
-    }
-    // On Kobo nothing is filled: current is a black border on the page.
-    if cfg!(feature = "kobo") {
-        return button.selected(true).bg(theme.page_bg).text_color(theme.text).border_2().border_color(theme.accent);
-    }
-    button.selected(true).bg(theme.accent).text_color(theme.accent_text).hover(move |style| style.bg(theme.accent_hover))
+    let button = button.selected(selected);
+    if selected { selected_surface(button, theme) } else { button }
 }
 
 /// Text that reports a failure. A page says the text is an error; the palette
@@ -332,13 +280,11 @@ pub fn topbar_height_rem() -> f32 {
 pub fn topbar_action_height_rem() -> f32 {
     if touch_ui() && !cfg!(feature = "kobo") { TOUCH_TARGET_REM } else { 2.0 }
 }
-pub const TOPBAR_ACTION_LABEL_WEIGHT: FontWeight = FontWeight::NORMAL;
 /// Touch-sized icon buttons already carry their spacing as padding around the
 /// glyph, and a row of them must still fit a phone's width beside the title.
 pub fn topbar_action_gap() -> f32 {
     if touch_ui() { 0.0 } else { SPACE_SM }
 }
-pub const TOPBAR_ACTION_HORIZONTAL_PADDING: f32 = SPACE_SM;
 
 /// The switcher and the compact "More" sheet are one row height throughout —
 /// library rows, their delete buttons, the add button and the header all sit on

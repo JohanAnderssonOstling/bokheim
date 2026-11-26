@@ -6,14 +6,15 @@ use std::path::{Path, PathBuf};
 use client_platform_runtime::executor::run_blocking;
 use client_protocol::BackendError;
 use content_address::hash_file;
+use filesystem_scanner::ingestion::fingerprint as ingestion_fingerprint;
 use library_files::filesystem::fingerprint;
 use library_files::import_move::ImportMove;
-use library_model::PublishedStagedBook;
+use library_model::{ImportProgress, LibraryUpdate, PublishedStagedBook};
 use sync_common::{BookId, DirId};
 
-use crate::LibraryImport;
 use crate::import::ValidatedImport;
-use crate::reader_transfer::{ImportMetadata, ReaderPreparation, ingest_import_file, reader_inspection_version};
+use crate::reader_transfer::{ingest_import_file, reader_inspection_version, ImportMetadata, ReaderPreparation};
+use crate::LibraryImport;
 
 #[derive(Debug)]
 pub struct NativeMoveResult {
@@ -45,13 +46,19 @@ impl LibraryImport<'_> {
         let claimed = run_blocking({
             let destination = destination.clone();
             let root = PathBuf::from(&self.root);
-            move || ImportMove::claim_in_library(&source, &destination, &root)
+            let updates = self.events.updates.clone();
+            let name = name.clone();
+            move || {
+                ImportMove::claim_in_library_with_progress(&source, &destination, &root, &mut |copied_bytes, total_bytes| {
+                    updates.publish(LibraryUpdate::ImportProgress(ImportProgress::Copying { name: name.clone(), copied_bytes, total_bytes }));
+                })
+            }
         })
         .await
-        .map_err(BackendError::operation)?
-        .map_err(|error| if error.kind() == std::io::ErrorKind::CrossesDevices { BackendError::operation(error).context("source and destination are on different volumes; use copy mode") } else { BackendError::operation(error) })?;
+        .map_err(BackendError::operation)??;
 
         let mut claimed = Some(claimed);
+        self.report_importing(&name);
         let operation = async {
             // Admit the inode we actually claimed, never bytes read from a
             // pathname that can be replaced before the move.
@@ -108,7 +115,7 @@ impl LibraryImport<'_> {
             let publish_destination = destination.clone();
             let (claim, publication) = run_blocking(move || {
                 let publication = (|| -> Result<(PathBuf, u64), BackendError> {
-                    if fingerprint(claim.path())? != ingested_fingerprint {
+                    if ingestion_fingerprint(claim.path())? != ingested_fingerprint {
                         return Err(BackendError::message("source changed after import inspection; retry the import"));
                     }
                     let path = match reuse {

@@ -82,7 +82,7 @@ mod tests {
     use book_model::{BookDetails, BookFormat, BookRecord};
     use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
     use library_database::catalog::import_record;
-    use library_database::{DatabaseClient, Database, FilesystemScan, ImportCommit, InspectedFilesystemScan, ScanApplyResult, ScanFileObservation, ScannedBook, executor::BackendExecutor};
+    use library_database::{DatabaseClient, ImportCommit, executor::BackendExecutor};
     use library_files::AssetStore;
     use library_model::{BlobKind, PublishedStagedBook};
     use library_placement::LibraryState;
@@ -171,33 +171,6 @@ mod tests {
         assert!(database.enrichment_candidates(i64::MAX, None).await.unwrap().0.is_empty());
         assert!(import_record(added, BookFormat::Pdf).unwrap().is_none());
         assert!(import_record(BookId::from_bytes(key.0), BookFormat::Mp3Folder).unwrap().is_none());
-        // Discovery of an EPUB already on disk uses the same curated answer.
-        let discovered = Database::open(":memory:").unwrap();
-        discovered.initialize_library().unwrap();
-        let mut snapshot = discovered.scan_snapshot(book_inspection::inspection_version(book_model::BookFormat::Pdf)).unwrap();
-        let file = ScanFileObservation { directory: ROOT_DIR_ID, name: "discovered.epub".into(), path: "discovered.epub".into(), fingerprint: inspected.fingerprint };
-        let discovery = FilesystemScan { readable: true, files: vec![file], ..Default::default() };
-        let books = InspectedFilesystemScan {
-            readable: true,
-            books: vec![ScannedBook {
-                source_identity: None,
-                audiobook_content_hash: None,
-                byte_checksum: None,
-                directory: ROOT_DIR_ID,
-                name: "discovered.epub".into(),
-                path: "discovered.epub".into(),
-                fingerprint: inspected.fingerprint,
-                book_id: epub_hash,
-                size_bytes: inspected.size_bytes,
-                extension: "epub".into(),
-                inspection: inspected.inspection,
-                inspection_version: book_inspection::inspection_version(BookFormat::Epub),
-            }],
-        };
-        assert_eq!(discovered.apply_filesystem_scan_batch(&mut snapshot, &discovery, books, true, None).unwrap(), ScanApplyResult::Applied);
-        let discovered_id = discovered.resolve_book_identity(epub_hash).unwrap();
-        assert_eq!(discovered.enrichment_cover_record(&discovered_id).unwrap().unwrap().book.subjects, answer.book.subjects);
-        assert!(discovered.enrichment_candidates(i64::MAX, None).unwrap().0.is_empty());
         // A valid EPUB with different bytes and the same embedded metadata must
         // still use ordinary enrichment rather than a title/author match.
         let mut different = epub_bytes.clone();

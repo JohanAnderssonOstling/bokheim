@@ -6,6 +6,7 @@ use crate::invalidation::notify;
 use book_model::{AnnotationStyle, RecurringScope};
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, IntoElement, Window, px};
+use gpui_component::IconName;
 use std::collections::HashSet;
 use ui_components as components;
 
@@ -134,7 +135,16 @@ impl ReaderView {
         let mut insets = window.insets().effective();
         insets.bottom = (insets.bottom - px(dock_height)).max(px(0.0));
         let toolbar_height = if mobile { 0.0 } else { components::reader_toolbar_size_px(window) };
-        let geometry = annotation_editor::geometry(passage, f32::from(viewport.width), f32::from(viewport.height) - dock_height, sidebar_width, toolbar_height, column_count.max(1), insets, f32::from(window.rem_size()) * components::ANNOTATION_EDITOR_WIDTH_REM);
+        let geometry = annotation_editor::geometry(
+            passage,
+            f32::from(viewport.width),
+            f32::from(viewport.height) - dock_height,
+            sidebar_width,
+            toolbar_height,
+            column_count.max(1),
+            insets,
+            f32::from(window.rem_size()) * components::ANNOTATION_EDITOR_WIDTH_REM,
+        );
         if annotation.is_bookmark() {
             return Some(annotation_editor::bookmark_editor(entity, geometry, &self.annotation_note_input, components::browser_theme(cx), cx));
         }
@@ -168,14 +178,12 @@ impl ReaderView {
         }
         Some(
             panel
-                .child(
-                    components::action_row()
-                        .child(components::topbar_action_button("reader-footnote-open", text!(reader::go_to_note), gpui_component::IconName::ArrowRight, theme).on_click(cx.listener(|this, _, _, cx| this.navigate_from_footnote(cx))))
-                        .child(components::topbar_action_button("reader-footnote-close", text!(common::close), gpui_component::IconName::Close, theme).on_click(cx.listener(|this, _, _, cx| {
-                            this.footnote = None;
-                            notify(cx, Component::ReaderShell, "footnote_closed");
-                        }))),
-                )
+                .child(components::action_row().child(components::action_button("reader-footnote-open", text!(reader::go_to_note)).icon(IconName::ArrowRight).on_click(cx.listener(|this, _, _, cx| this.navigate_from_footnote(cx)))).child(
+                    components::action_button("reader-footnote-close", text!(common::close)).icon(IconName::Close).on_click(cx.listener(|this, _, _, cx| {
+                        this.footnote = None;
+                        notify(cx, Component::ReaderShell, "footnote_closed");
+                    })),
+                ))
                 .into_any_element(),
         )
     }

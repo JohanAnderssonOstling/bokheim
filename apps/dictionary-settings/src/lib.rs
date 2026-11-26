@@ -13,11 +13,7 @@ use ui_components as components;
 use ui_components::{Classified, Failure};
 
 fn error_message(error: &OperationError, fallback: &'static str) -> &'static str {
-    if error.failure() == Some(Failure::StorageFull) {
-        text!(dictionary::disk_full)
-    } else {
-        components::user_facing_error(error, fallback)
-    }
+    if error.failure() == Some(Failure::StorageFull) { text!(dictionary::disk_full) } else { components::user_facing_error(error, fallback) }
 }
 
 struct DictionaryService(Rc<dyn Client>);
@@ -155,7 +151,7 @@ impl DictionarySettings {
             return;
         }
         let selection = cx.prompt_for_files_with_filters(
-            PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some(text!(dictionary::import_stardict_dictionary).into()) },
+            PathPromptOptions { directory: None, files: true, directories: false, multiple: true, prompt: Some(text!(dictionary::import_stardict_dictionary).into()) },
             vec![FileDialogFilter { name: text!(dictionary::dictionary_files_or_zip).into(), extensions: ["ifo", "idx", "gz", "dict", "dz", "syn", "search", "data", "json", "zip"].map(str::to_owned).to_vec() }],
         );
         self.operation = Some(Operation::Import);
@@ -287,7 +283,10 @@ impl DictionarySettings {
         let content = List::new(list).search_placeholder(text!(dictionary::filter_dictionaries)).search_prefix(move |_, _| {
             let owner = owner.clone();
             components::back_text_button("dictionary-picker-back", text!(common::back))
-                .on_click(move |_, window, cx| { let _ = owner.update(cx, |settings, cx| settings.close_picker(window, cx)); }).into_any_element()
+                .on_click(move |_, window, cx| {
+                    let _ = owner.update(cx, |settings, cx| settings.close_picker(window, cx));
+                })
+                .into_any_element()
         });
         let details = self.download_details.as_deref().and_then(|id| downloads.available.iter().find(|spec| spec.id == id)).map(|spec| {
             let source_url = spec.source_url.clone();
@@ -323,10 +322,13 @@ impl DictionarySettings {
                 let available = window.viewport_size().height - safe.top - safe.bottom;
                 panel.w_full().h((px(48.0) * rows as f32 + window.rem_size() * components::settings_control_size_rem()).min(available * 0.8))
             })
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, window, cx| {
-                this.close_picker(window, cx);
-                cx.stop_propagation();
-            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, window, cx| {
+                    this.close_picker(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .track_focus(&self.picker_focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
@@ -338,10 +340,13 @@ impl DictionarySettings {
             .children(details);
         let panel = components::contain_modal_focus(panel, &self.picker_focus, "Dialog ModalFocus", cx);
         let scrim = components::modal_scrim("dictionary-picker-scrim", theme)
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, window, cx| {
-                this.close_picker(window, cx);
-                cx.stop_propagation();
-            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, window, cx| {
+                    this.close_picker(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .on_click(cx.listener(|this, _, window, cx| this.close_picker(window, cx)));
         let overlay = if components::touch_ui() { components::anchor_to_window(components::bottom_sheet_overlay().child(scrim).child(panel), window) } else { components::centered_modal(scrim, panel, window) };
         Some(gpui::deferred(overlay).with_priority(20))
@@ -363,7 +368,6 @@ impl ListDelegate for DictionaryList {
         cx.notify();
         Task::ready(())
     }
-
 
     fn items_count(&self, _: usize, _: &App) -> usize {
         self.filtered.len()
@@ -393,20 +397,9 @@ impl ListDelegate for DictionaryList {
             let _ = download_owner.update(cx, |settings, cx| settings.download(id.clone(), window, cx));
         });
         let size = div().flex_none().text_size(rems(components::TEXT_XS)).text_color(theme.text_muted).child(format!(text!(dictionary::mib), spec.download_bytes() as f64 / (1024.0 * 1024.0)));
-        Some(
-            ListItem::new(spec.id.clone()).h(rems(components::settings_control_size_rem())).when(components::touch_ui(), |row| row.h(px(48.0)).px(px(components::SPACE_MD))).border_b_1().border_color(theme.rule).child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(rems(0.5))
-                    .child(div().flex_1().min_w_0().text_ellipsis().child(spec.name.clone()))
-                    .child(size)
-                    .child(div().flex_none().child(info))
-                    .child(div().flex_none().child(download)),
-            ),
-        )
+        Some(ListItem::new(spec.id.clone()).h(rems(components::settings_control_size_rem())).when(components::touch_ui(), |row| row.h(px(48.0)).px(px(components::SPACE_MD))).border_b_1().border_color(theme.rule).child(
+            div().w_full().min_w_0().flex().items_center().gap(rems(0.5)).child(div().flex_1().min_w_0().text_ellipsis().child(spec.name.clone())).child(size).child(div().flex_none().child(info)).child(div().flex_none().child(download)),
+        ))
     }
 
     fn set_selected_index(&mut self, _: Option<IndexPath>, _: &mut Window, _: &mut Context<ListState<Self>>) {}
@@ -415,13 +408,8 @@ impl ListDelegate for DictionaryList {
 impl Render for DictionarySettings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
-        let import = components::outlined_text_button("import-stardict", text!(dictionary::import))
-            .h(rems(components::settings_control_size_rem()))
-            .debug_selector(|| "import-stardict".into())
-            .disabled(self.operation.is_some())
-            .on_click(cx.listener(|this, _, _, cx| this.import(cx)));
-        let download = components::outlined_text_button("download-dictionary", text!(common::download))
-            .h(rems(components::settings_control_size_rem()))
+        let import = components::action_button("import-stardict", text!(dictionary::import)).debug_selector(|| "import-stardict".into()).disabled(self.operation.is_some()).on_click(cx.listener(|this, _, _, cx| this.import(cx)));
+        let download = components::action_button("download-dictionary", text!(common::download))
             .debug_selector(|| "download-dictionary".into())
             .disabled(self.operation == Some(Operation::Import) || self.downloads.is_none())
             .on_click(cx.listener(|this, _, window, cx| this.open_picker(window, cx)));

@@ -12,6 +12,7 @@
 # Rust compilation
 
 - Build and launch desktop applications in release mode; do not launch debug builds.
+- For local development builds, use `--profile release-dev` (release optimization, no LTO). Reserve the full-LTO `release` profile for published releases.
 - Run only one Rust compilation at a time. Before starting a Rust build, check, or test compilation, check for an existing Rust compilation and wait for it to finish. Do not start another compilation while one is running, even with a different target directory.
 - Within that compilation, use all available CPU cores by default. Do not impose a smaller Cargo job limit unless the user explicitly requests one.
 

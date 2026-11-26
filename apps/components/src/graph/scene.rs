@@ -3,10 +3,10 @@
 
 use std::sync::Arc;
 
-use gpui::{AnyElement, App, BorderStyle, Bounds, Entity, IntoElement, ParentElement, PathBuilder, Styled, canvas, div, point, px, quad, size};
+use gpui::{AnyElement, App, Bounds, Entity, IntoElement, ParentElement, PathBuilder, Styled, canvas, div, point, px, size};
 
-use ui_graph_layout::{GraphEdge, GraphLayout, GraphLayoutKind, PlacedNode};
 use crate::{BrowserTheme, InfiniteCanvas, InfiniteCanvasView, browser_theme, infinite_canvas};
+use ui_graph_layout::{GraphEdge, GraphLayout, PlacedNode};
 
 /// The graph on `canvas`. `departing` is a layout fading out, drawn beneath at
 /// its opacity. `node` draws one node, told whether it is from the departing
@@ -31,7 +31,7 @@ pub fn graph_canvas(canvas: &Entity<InfiniteCanvas>, layout: Arc<GraphLayout>, d
 }
 
 /// Both column Bezier control points lie within the endpoint rectangle, so this
-/// is a conservative bound for curves as well as radial and straight edges.
+/// is a conservative bound for curved and straight edges.
 /// Check the connector itself: it can cross the viewport with both nodes offscreen.
 fn edge_visible(edge: &GraphEdge, viewport: Bounds<f32>) -> bool {
     edge.opacity > 0.0 && viewport.intersects(&Bounds::new(point(edge.start.x.min(edge.end.x), edge.start.y.min(edge.end.y)), size((edge.end.x - edge.start.x).abs(), (edge.end.y - edge.start.y).abs())))
@@ -40,7 +40,6 @@ fn edge_visible(edge: &GraphEdge, viewport: Bounds<f32>) -> bool {
 /// Curved connectors that keep their screen width at any zoom.
 fn edges(layout: &GraphLayout, theme: BrowserTheme, zoom: f32, opacity: f32, viewport: Bounds<f32>) -> impl IntoElement {
     let edges = layout.shared_edges();
-    let radial = layout.kind() == GraphLayoutKind::AdaptiveRadial;
     let (width, path_width): (f32, f32) = (1.0, 1.5);
     canvas(
         |_, _, _| {},
@@ -48,27 +47,14 @@ fn edges(layout: &GraphLayout, theme: BrowserTheme, zoom: f32, opacity: f32, vie
             for edge in edges.iter().filter(|edge| edge_visible(edge, viewport)) {
                 let (stroke, color) = if edge.on_path { (path_width, theme.text_muted) } else { (width, theme.rule) };
                 let color = color.opacity(edge.opacity * opacity);
-                if radial {
-                    let mut builder = PathBuilder::stroke(px(stroke / zoom));
-                    builder.move_to(bounds.origin + point(px(edge.start.x), px(edge.start.y)));
-                    builder.line_to(bounds.origin + point(px(edge.end.x), px(edge.end.y)));
-                    if let Ok(path) = builder.build() {
-                        window.paint_path(path, color);
-                    }
-                    continue;
-                }
-                if (edge.end.y - edge.start.y).abs() <= 0.5 {
-                    let left = edge.start.x.min(edge.end.x);
-                    let right = edge.start.x.max(edge.end.x);
-                    let thickness = stroke.max(1.0_f32) / zoom;
-                    let bar = gpui::Bounds::new(bounds.origin + point(px(left), px(edge.start.y - thickness / 2.0)), size(px(right - left), px(thickness)));
-                    window.paint_quad(quad(bar, px(0.0), color, px(0.0), color, BorderStyle::Solid));
-                    continue;
-                }
                 let mut builder = PathBuilder::stroke(px(stroke / zoom));
                 builder.move_to(bounds.origin + point(px(edge.start.x), px(edge.start.y)));
-                let middle = (edge.start.x + edge.end.x) / 2.0;
-                builder.cubic_bezier_to(bounds.origin + point(px(edge.end.x), px(edge.end.y)), bounds.origin + point(px(middle), px(edge.start.y)), bounds.origin + point(px(middle), px(edge.end.y)));
+                if (edge.end.y - edge.start.y).abs() <= 0.5 {
+                    builder.line_to(bounds.origin + point(px(edge.end.x), px(edge.end.y)));
+                } else {
+                    let middle = (edge.start.x + edge.end.x) / 2.0;
+                    builder.cubic_bezier_to(bounds.origin + point(px(edge.end.x), px(edge.end.y)), bounds.origin + point(px(middle), px(edge.start.y)), bounds.origin + point(px(middle), px(edge.end.y)));
+                }
                 if let Ok(path) = builder.build() {
                     window.paint_path(path, color);
                 }
@@ -122,7 +108,7 @@ mod tests {
     fn graph_culls_before_building_nodes_using_current_bounds_camera_and_ghost_pose(cx: &mut TestAppContext) {
         let camera = cx.new(|_| InfiniteCanvas::new(0.1, 4.0));
         let tree = GraphTree::new(vec![None, Some(0), Some(0)]).unwrap();
-        let layout = graph_layout(GraphLayoutKind::Columns, &tree, 0, &|_, _| size(20.0, 20.0), &LayoutParams::desktop()).unwrap();
+        let layout = graph_layout(&tree, 0, &[true, false], &|_, _| size(20.0, 20.0), &LayoutParams::desktop()).unwrap();
         let centers = [point(50.0, 50.0), point(250.0, 50.0), point(650.0, 50.0)];
         let layout = Arc::new(layout.posed(|node| Some((centers[node.node], 1.0))));
         let departing = Arc::new(layout.posed(|node| Some(([point(-200.0, 50.0), point(75.0, 50.0), point(800.0, 50.0)][node.node], 1.0))));

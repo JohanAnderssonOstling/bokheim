@@ -1,7 +1,7 @@
 //! Local import commits: inspection projections, placements, observations.
 
 use crate::SqlParam;
-use crate::contributors::{ContributorNameMatcher, resolve_credits};
+use crate::contributors::{ContributorNameMatcher, ContributorResolver, resolve_credits};
 use crate::placements::directory_relative_path;
 use crate::query_methods::{first_column, query_rows};
 use crate::shared_sql::SharedSql;
@@ -28,7 +28,7 @@ use crate::books::audiobook::navigation_from_chapters;
 include_sql!("src/import/sql/import_commit.sql");
 use book_model::{BookRecord, BookTocDocument};
 use library_replica::{BookAddition, BookFacts, LibraryStateEntry};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use sync_common::{BookId, DirId, StateKey};
 
 /// Snapshot in for one import commit. All filesystem truth (book
@@ -235,8 +235,39 @@ fn commit_one_with_transfer(tx: &Transaction<'_>, import: ImportCommit, prepared
     Ok(created)
 }
 
+/// Validated folders and contributor identities shared within one scan
+/// transaction. Construct after directory updates; book admission does not
+/// change directory liveness.
+#[derive(Default)]
+pub(crate) struct ImportContext {
+    directories: HashMap<DirId, bool>,
+    pub(crate) contributors: ContributorResolver,
+}
+
+impl ImportContext {
+    pub(crate) fn directory_is_live(&mut self, tx: &Transaction<'_>, directory: &DirId) -> Result<bool, DatabaseError> {
+        if let Some(live) = self.directories.get(directory) {
+            return Ok(*live);
+        }
+        let live = directory_relative_path(tx, directory)?.is_some();
+        self.directories.insert(*directory, live);
+        Ok(live)
+    }
+}
+
+#[cfg(feature = "scanner")]
+pub(crate) fn admit_scanned_import(tx: &Transaction<'_>, import: ImportCommit, prepared: PreparedInspection, matcher: Option<ContributorNameMatcher>, context: &mut ImportContext) -> Result<ImportObservation, DatabaseError> {
+    admit_import_with_context(tx, import, Some(prepared), matcher, None, Some(context)).map(|(_, observation)| observation)
+}
+
 /// Admit canonical state without rebuilding derived rows after every book.
 pub(crate) fn admit_import(tx: &Transaction<'_>, import: ImportCommit, prepared: Option<PreparedInspection>, matcher: Option<ContributorNameMatcher>, transfer: Option<BookTransferState>) -> Result<(bool, ImportObservation), DatabaseError> {
+    admit_import_with_context(tx, import, prepared, matcher, transfer, None)
+}
+
+fn admit_import_with_context(
+    tx: &Transaction<'_>, import: ImportCommit, prepared: Option<PreparedInspection>, matcher: Option<ContributorNameMatcher>, transfer: Option<BookTransferState>, mut context: Option<&mut ImportContext>,
+) -> Result<(bool, ImportObservation), DatabaseError> {
     let ImportCommit { source_identity, byte_checksum, audiobook_content_hash, parent_id, file_name: _file_name, format, book_id, size_bytes, inspection_version, inspection: _inspection, published, request_thumbnail, restore_paths } =
         import;
     let hash = &book_id;
@@ -246,17 +277,24 @@ pub(crate) fn admit_import(tx: &Transaction<'_>, import: ImportCommit, prepared:
     if book_id.is_local() && byte_checksum.is_none() && audiobook_content_hash.is_none() {
         return Err(DatabaseError::message("a local book identity requires a verified content checksum"));
     }
-    if directory_relative_path(tx, &parent_id)?.is_none() {
+    let live_directory = match context.as_deref_mut() {
+        Some(context) => context.directory_is_live(tx, &parent_id)?,
+        None => directory_relative_path(tx, &parent_id)?.is_some(),
+    };
+    if !live_directory {
         return Err(DatabaseError::message(format!("library folder does not exist: {parent_id}")));
     }
     if prepared.is_none() && transfer.is_none() && !tx.has_import_inspection_select(hash, format as i64, inspection_version, |row| row.get::<_, bool>(0)).map_err(DatabaseError::operation)? {
         return Err(DatabaseError::message("book changed during import; retry the import"));
     }
-    let placement_created = tx.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE bd.dir_id=?1 AND b.content_hash=?2 AND bd.deleted_at IS NULL AND b.deleted_at IS NULL)",
-        rusqlite::params![parent_id.to_string(), hash],
-        |row| row.get::<_, bool>(0),
-    )?;
+    // Scans discard this result; explicit imports use it to report newly
+    // created memberships, including transfers of an existing book.
+    let placement_created = context.is_none()
+        && tx.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE bd.dir_id=?1 AND b.content_hash=?2 AND bd.deleted_at IS NULL AND b.deleted_at IS NULL)",
+            rusqlite::params![parent_id.to_string(), hash],
+            |row| row.get::<_, bool>(0),
+        )?;
     if let Some(mut source) = transfer {
         crate::transfer::reconcile_reader_annotations(tx, &mut source)?;
         let BookTransferState { book_id: source_hash, addition, reading, chapter_read, annotations, .. } = source;
@@ -284,7 +322,11 @@ pub(crate) fn admit_import(tx: &Transaction<'_>, import: ImportCommit, prepared:
         // overwrite an existing record for the same file hash.
         if canonical_body(tx, "book_add", &StateKey::Book(*hash), "")?.is_none() {
             let mut metadata = metadata;
-            metadata.contributors = resolve_credits(tx, &metadata.contributors, matcher)?.into_iter().map(|(_, credit)| credit).collect();
+            let credits = match context.as_deref_mut() {
+                Some(context) => context.contributors.resolve_credits(tx, &metadata.contributors, matcher)?,
+                None => resolve_credits(tx, &metadata.contributors, matcher)?,
+            };
+            metadata.contributors = credits.into_iter().map(|(_, credit)| credit).collect();
             record_local(
                 tx,
                 LibraryStateEntry::BookAdd {

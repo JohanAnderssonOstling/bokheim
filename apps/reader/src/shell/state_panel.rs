@@ -239,7 +239,7 @@ pub(crate) fn reader_annotation_card<C: AnnotationSidebarTarget>(target: &Entity
     let actions = if editable {
         let delete_target = target.clone();
         let delete_id = annotation.id.clone();
-        Some(components::delete_icon_button(("reader-state-annotation-delete", index), text!(common::delete_annotation), theme).debug_selector(move || format!("reader-annotation-delete-{index}")).on_click(move |_, _, cx| {
+        Some(components::delete_icon_button(("reader-state-annotation-delete", index), text!(common::delete_annotation)).debug_selector(move || format!("reader-annotation-delete-{index}")).on_click(move |_, _, cx| {
             cx.stop_propagation();
             delete_target.update(cx, |this, cx| this.delete_sidebar_annotation(delete_id.clone(), cx));
         }))

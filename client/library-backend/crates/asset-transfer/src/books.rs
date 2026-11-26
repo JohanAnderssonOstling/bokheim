@@ -57,10 +57,6 @@ impl AssetExecutor {
         if planned != intent {
             return Err(TransferError::retryable("upload intent changed during transfer"));
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        let format = self.database.local_book_info(book_id).await?.format;
-        #[cfg(target_arch = "wasm32")]
-        let canonical_pdf = self.database.pdf_metadata(book_id).await?;
         let file_name = snapshot.paths.first().map(|path| path.file_name()).unwrap_or("unknown file");
         let Some(book) = assets.verified_book_reader_with_checksum(*book_id, snapshot.paths.clone(), intent.byte_checksum).await? else {
             #[cfg(not(target_arch = "wasm32"))]
@@ -76,14 +72,6 @@ impl AssetExecutor {
             self.refresh_local_upload(snapshot, intent).await?;
             return Err(TransferError::retryable("local bytes do not match queued book version"));
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        let (book, canonical_pdf) = if format == book_model::BookFormat::Pdf {
-            let identity = book_id.to_hex();
-            let (book, pdf, _) = client_platform_runtime::executor::run_blocking(move || pdf_reader_core::inspect_reader_metadata_with_identity(book, identity)).await.map_err(TransferError::retryable)?.map_err(TransferError::retryable)?;
-            (book, Some(pdf))
-        } else {
-            (book, None)
-        };
         let uploaded_size = book.length;
         let uploaded_checksum = book.book_id.content_hash().ok_or_else(|| TransferError::rejected("verified book checksum is unavailable"))?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -111,7 +99,7 @@ impl AssetExecutor {
         }
         #[cfg(target_arch = "wasm32")]
         drop(book);
-        self.database.confirm_uploaded_content_with_pdf(*book_id, uploaded_checksum, Some(uploaded_size), canonical_pdf).await?;
+        self.database.confirm_uploaded_content_with_pdf(*book_id, uploaded_checksum, Some(uploaded_size), None).await?;
         Ok(())
     }
 

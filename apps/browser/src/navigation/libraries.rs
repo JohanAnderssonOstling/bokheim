@@ -4,9 +4,13 @@ use ui_text::text;
 
 use crate::services::{import_failure_message, notify_warning};
 use library_backend::{ImportFailure, ROOT_DIR_ID};
+#[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+use library_backend::{ReaderImportOptions, ReaderImportSource};
 use library_management::management::ManagementClient;
 use std::cell::Cell;
 use std::collections::HashMap;
+#[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
+use std::path::Path;
 use std::rc::Rc;
 
 use app::{AppClient, LibraryEntry, LibraryFolderError, LibraryFolderStep};
@@ -188,7 +192,7 @@ impl Libraries {
         .detach();
     }
 
-    pub(crate) fn save_library_name(&self, library_id: Option<LibraryId>, name: String, asset_storage_enabled: bool) -> impl std::future::Future<Output = Result<Option<LibraryId>, app::BackendError>> + use<> {
+    pub(crate) fn save_library_name(&self, library_id: Option<LibraryId>, name: String, asset_storage_enabled: bool) -> impl std::future::Future<Output = Result<Option<LibraryEntry>, app::BackendError>> + use<> {
         let backend = self.backend.clone();
         async move {
             if let Some(id) = library_id {
@@ -196,13 +200,30 @@ impl Libraries {
                 Ok(None)
             } else {
                 // No locator means the configured default library location.
-                backend.management.create_library_with_asset_storage(name, asset_storage_enabled).await.map(|entry| Some(*entry.library_id()))
+                backend.management.create_library_with_asset_storage(name, asset_storage_enabled).await.map(Some)
             }
         }
     }
 
+    pub(super) fn finish_library_creation(&mut self, entry: LibraryEntry, selection_epoch: u64, cx: &mut Context<Self>) {
+        let activate = self.selection_epoch.get() == selection_epoch;
+        let id = *entry.library_id();
+        // Keep list reads begun before creation from evicting its import session.
+        self.selection_epoch.set(self.selection_epoch.get().wrapping_add(1));
+        if !self.contains(&id) {
+            self.entries.push(entry);
+        }
+        if activate {
+            self.select_library(id, cx);
+        }
+        cx.notify();
+    }
+
     #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
     pub(crate) fn move_library(&mut self, library_id: LibraryId, destination: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.entries.iter().any(|library| *library.library_id() == library_id && Path::new(library.storage_locator()) == Path::new(&destination)) {
+            return;
+        }
         let Ok(guard) = crate::services::library_removal::begin_library_removal(library_id, cx) else { return };
         let preparation = crate::services::library_removal::prepare_library_removal(library_id, cx);
         let backend = self.backend.clone();
@@ -358,6 +379,14 @@ impl Libraries {
         }
         self.page_navigation.library_id.set(Some(library_id));
         cx.notify();
+    }
+
+    #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    pub(super) fn start_reader_import(&mut self, library_id: LibraryId, source: ReaderImportSource, options: ReaderImportOptions, window: &mut Window, cx: &mut Context<Self>) {
+        match self.ensure_session(library_id, cx) {
+            Ok(session) => session.update(cx, |session, cx| session.start_reader_import(source, options, cx)),
+            Err(error) => self.notify_error(error, window, cx),
+        }
     }
 
     fn ensure_session(&mut self, library_id: LibraryId, cx: &mut Context<Self>) -> Result<Entity<LibrarySession>, app::BackendError> {

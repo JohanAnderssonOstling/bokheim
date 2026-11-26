@@ -5,7 +5,7 @@ pub(crate) use crate::{DatabaseError, import::ImportCommitSql, sync::SyncApplySq
 use book_model::{AgentId, Contributor};
 use metadata_contract::matching::author_match_keys;
 use rusqlite::Transaction;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 pub(crate) type Identity = (i64, AgentId);
 pub(crate) type StoredCredit = (i64, Contributor);
@@ -172,14 +172,32 @@ mod tests {
     }
 }
 
-pub(crate) fn resolve_credits(tx: &Transaction<'_>, credits: &[Contributor], matcher: Option<ContributorNameMatcher>) -> Result<Vec<StoredCredit>, DatabaseError> {
-    let mut stored = Vec::new();
-    for credit in credits {
-        let identity = resolve_identity(tx, credit.agent_id(), credit.name(), matcher)?;
-        let credit = Contributor::with_id(identity.1, credit.name(), credit.role_code()).map_err(|e| DatabaseError::message(format!("contributor credit is not writable: {e}")))?;
-        stored.push((identity.0, credit));
+/// Reuse exact identities while admitting and projecting one transaction.
+/// Cache only the resolved stable ID: a name match must not turn the supplied
+/// provisional ID into an exact match on a later lookup with another rule.
+#[derive(Default)]
+pub(crate) struct ContributorResolver {
+    identities: HashMap<AgentId, Identity>,
+}
+
+impl ContributorResolver {
+    pub(crate) fn resolve_credits(&mut self, tx: &Transaction<'_>, credits: &[Contributor], matcher: Option<ContributorNameMatcher>) -> Result<Vec<StoredCredit>, DatabaseError> {
+        let mut stored = Vec::with_capacity(credits.len());
+        for credit in credits {
+            let identity = match self.identities.get(&credit.agent_id()) {
+                Some(identity) => *identity,
+                None => resolve_identity(tx, credit.agent_id(), credit.name(), matcher)?,
+            };
+            self.identities.insert(identity.1, identity);
+            let credit = Contributor::with_id(identity.1, credit.name(), credit.role_code()).map_err(|e| DatabaseError::message(format!("contributor credit is not writable: {e}")))?;
+            stored.push((identity.0, credit));
+        }
+        Ok(stored)
     }
-    Ok(stored)
+}
+
+pub(crate) fn resolve_credits(tx: &Transaction<'_>, credits: &[Contributor], matcher: Option<ContributorNameMatcher>) -> Result<Vec<StoredCredit>, DatabaseError> {
+    ContributorResolver::default().resolve_credits(tx, credits, matcher)
 }
 
 include_sqlite_sql::include_sql!("src/sql/contributors.sql");

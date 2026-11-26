@@ -5,14 +5,6 @@
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
-use tokio::sync::{Semaphore, SemaphorePermit};
-
-static HEAVY_INSPECTIONS: Semaphore = Semaphore::const_new(2);
-
-/// Shared by every library and CPU host in this process.
-pub async fn inspection_permit() -> SemaphorePermit<'static> {
-    HEAVY_INSPECTIONS.acquire().await.expect("inspection semaphore is never closed")
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackendExecutorError(String);

@@ -14,7 +14,7 @@ use client_platform_native::filesystem::{rename_noclobber, sync_directory};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
-use crate::filesystem::{fingerprint, rename_into_directory_with_intent};
+use crate::filesystem::{copy_file_with_progress, fingerprint, rename_into_directory_with_intent};
 
 #[derive(Deserialize, Serialize)]
 struct Intent {
@@ -23,6 +23,15 @@ struct Intent {
     destination: Option<PathBuf>,
     #[serde(default)]
     identity: Option<[u64; 2]>,
+    #[serde(default)]
+    copied_source: Option<CopiedSource>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct CopiedSource {
+    path: PathBuf,
+    identity: [u64; 2],
+    fingerprint: Option<u64>,
 }
 
 /// Cancellation or an error restores the source without replacing a file
@@ -40,16 +49,20 @@ pub struct ImportMove {
 
 impl ImportMove {
     pub fn claim(source: &Path, destination_directory: &Path) -> io::Result<Self> {
-        Self::claim_inner(source, destination_directory, None)
+        Self::claim_inner(source, destination_directory, None, &mut |_, _| {})
     }
 
     /// Register before the source rename so normal startup only visits pending
     /// journals, including claims in nested destination folders or mounts.
     pub fn claim_in_library(source: &Path, destination_directory: &Path, root: &Path) -> io::Result<Self> {
-        Self::claim_inner(source, destination_directory, Some(root))
+        Self::claim_in_library_with_progress(source, destination_directory, root, &mut |_, _| {})
     }
 
-    fn claim_inner(source: &Path, destination_directory: &Path, root: Option<&Path>) -> io::Result<Self> {
+    pub fn claim_in_library_with_progress(source: &Path, destination_directory: &Path, root: &Path, progress: &mut dyn FnMut(u64, u64)) -> io::Result<Self> {
+        Self::claim_inner(source, destination_directory, Some(root), progress)
+    }
+
+    fn claim_inner(source: &Path, destination_directory: &Path, root: Option<&Path>, progress: &mut dyn FnMut(u64, u64)) -> io::Result<Self> {
         if !fs::symlink_metadata(source)?.is_file() {
             return Err(io::Error::other("only regular files can be moved into a library"));
         }
@@ -59,7 +72,7 @@ impl ImportMove {
         let destination_directory = fs::canonicalize(&destination_directory)?;
         let name = source.file_name().ok_or_else(|| io::Error::other("source has no filename"))?;
         let directory = temporary::Builder::new().prefix(".bokheim-import-move-").tempdir_in(&destination_directory)?;
-        let intent = Intent { source: source.clone(), staged: directory.path().join(name), destination: None, identity: Some(file_identity(&source)?) };
+        let intent = Intent { source: source.clone(), staged: directory.path().join(name), destination: None, identity: Some(file_identity(&source)?), copied_source: None };
         let lease = OpenOptions::new().read(true).write(true).create_new(true).open(directory.path().join("recovery.lock"))?;
         FileExt::try_lock_exclusive(&lease)?;
         let mut claimed = Self { intent, directory: directory.keep(), published: None, published_fingerprint: None, committed: false, lease: Some(lease), registration: None };
@@ -69,9 +82,35 @@ impl ImportMove {
         if let Some(root) = root {
             claimed.registration = Some(register_move(&fs::canonicalize(&root)?, &fs::canonicalize(&claimed.directory)?)?);
         }
-        // EXDEV is deliberately returned with the source untouched. Copy mode
-        // remains available when the two locations are on different volumes.
-        rename_noclobber(&source, &claimed.intent.staged)?;
+        // This destination is inside our newly created private directory, so
+        // regular rename cannot overwrite another file. NFS rejects NOREPLACE.
+        match fs::rename(&source, &claimed.intent.staged) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+                // Claim on the source filesystem, then copy into destination
+                // staging. The journal can restore the original after a failed
+                // copy, cancellation or crash; only commit deletes this claim.
+                let source_directory = temporary::Builder::new().prefix(".bokheim-import-source-").tempdir_in(source.parent().unwrap())?;
+                let source_path = source_directory.path().join(name);
+                claimed.intent.copied_source = Some(CopiedSource { path: source_path.clone(), identity: claimed.intent.identity.unwrap(), fingerprint: None });
+                claimed.intent.identity = None;
+                claimed.write_intent()?;
+                source_directory.keep();
+                fs::rename(&source, &source_path)?;
+                sync_directory(source.parent().unwrap())?;
+                sync_directory(source_path.parent().unwrap())?;
+                let revision = fingerprint(&source_path)?;
+                claimed.intent.copied_source.as_mut().unwrap().fingerprint = Some(revision);
+                claimed.write_intent()?;
+                copy_file_with_progress(&source_path, &claimed.intent.staged, progress)?;
+                if fingerprint(&source_path)? != revision {
+                    return Err(io::Error::other("source changed while copying; retry the move"));
+                }
+                claimed.intent.identity = Some(file_identity(&claimed.intent.staged)?);
+                claimed.write_intent()?;
+            }
+            Err(error) => return Err(error),
+        }
         sync_directory(source.parent().unwrap())?;
         sync_directory(&claimed.directory)?;
         // File identity survives rename. Rewriting the same journal would add
@@ -123,6 +162,17 @@ impl ImportMove {
     }
 
     pub fn rollback(&mut self) -> io::Result<()> {
+        if let Some(source) = &self.intent.copied_source {
+            restore_copied_source(&self.intent, source)?;
+            if let Some(path) = &self.published {
+                if self.published_fingerprint != Some(fingerprint(path)?) {
+                    return Err(io::Error::other(format!("published file changed; recover the moved book using {}", self.directory.join("recovery.json").display())));
+                }
+                fs::remove_file(path)?;
+                sync_directory(path.parent().unwrap())?;
+            }
+            return self.retire();
+        }
         let current = if fs::try_exists(&self.intent.staged)? {
             Some(self.intent.staged.as_path())
         } else if let Some(path) = &self.published {
@@ -134,14 +184,10 @@ impl ImportMove {
             None
         };
         if let Some(current) = current {
-            rename_noclobber(current, &self.intent.source).map_err(|error| io::Error::new(error.kind(), format!("could not restore moved source; recover the book using {}: {error}", self.directory.join("recovery.json").display())))?;
+            restore_claimed_file(current, &self.intent.source).map_err(|error| io::Error::new(error.kind(), format!("could not restore moved source; recover the book using {}: {error}", self.directory.join("recovery.json").display())))?;
             sync_directory(self.intent.source.parent().unwrap())?;
         }
-        self.committed = true;
-        self.lease.take();
-        fs::remove_dir_all(&self.directory)?;
-        sync_directory(self.directory.parent().unwrap())?;
-        self.remove_registration()
+        self.retire()
     }
 
     /// Disable rollback synchronously at the database commit point, before
@@ -162,10 +208,69 @@ impl ImportMove {
     /// that owned path without touching anything at the old source pathname.
     pub fn commit(mut self) -> io::Result<()> {
         self.committed = true;
+        if let Some(source) = &self.intent.copied_source {
+            delete_copied_source(source)?;
+        }
+        self.retire()
+    }
+
+    fn retire(&mut self) -> io::Result<()> {
+        self.committed = true;
         self.lease.take();
         fs::remove_dir_all(&self.directory).map_err(|error| io::Error::new(error.kind(), format!("could not clean private import staging {}: {error}", self.directory.display())))?;
         sync_directory(self.directory.parent().unwrap())?;
         self.remove_registration()
+    }
+}
+
+/// The source is privately owned. Linking restores its original name without
+/// replacement on filesystems that reject exclusive rename, including NFS.
+fn restore_claimed_file(source: &Path, destination: &Path) -> io::Result<()> {
+    match rename_noclobber(source, destination) {
+        #[cfg(unix)]
+        Err(error) if matches!(error.kind(), io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported) => {
+            match fs::hard_link(source, destination) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists && file_identity(source)? == file_identity(destination)? => {}
+                Err(error) => return Err(error),
+            }
+            sync_directory(destination.parent().unwrap())?;
+            fs::remove_file(source)
+        }
+        result => result,
+    }
+}
+
+fn restore_copied_source(intent: &Intent, source: &CopiedSource) -> io::Result<()> {
+    if fs::try_exists(&source.path)? {
+        if file_identity(&source.path)? != source.identity {
+            return Err(io::Error::other("claimed source identity changed; files retained"));
+        }
+        restore_claimed_file(&source.path, &intent.source)?;
+        sync_directory(intent.source.parent().unwrap())?;
+    } else if !fs::try_exists(&intent.source)? || file_identity(&intent.source)? != source.identity {
+        return Err(io::Error::other("original source could not be located; files retained"));
+    }
+    remove_source_directory(source)
+}
+
+fn delete_copied_source(source: &CopiedSource) -> io::Result<()> {
+    if fs::try_exists(&source.path)? {
+        if file_identity(&source.path)? != source.identity || Some(fingerprint(&source.path)?) != source.fingerprint {
+            return Err(io::Error::other(format!("import completed, but the source changed and was kept at {}", source.path.display())));
+        }
+        fs::remove_file(&source.path)?;
+        sync_directory(source.path.parent().unwrap())?;
+    }
+    remove_source_directory(source)
+}
+
+fn remove_source_directory(source: &CopiedSource) -> io::Result<()> {
+    let directory = source.path.parent().ok_or_else(|| io::Error::other("missing source staging directory"))?;
+    match fs::remove_dir(directory) {
+        Ok(()) => sync_directory(directory.parent().unwrap()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -329,6 +434,32 @@ fn recover_one(directory: &Path, is_committed: &mut impl FnMut(&Path) -> io::Res
     if !intent.source.is_absolute() || intent.source.file_name().is_none() || intent.staged != directory.join(intent.source.file_name().unwrap()) || intent.destination.as_ref().is_some_and(|path| path.parent() != Some(parent)) {
         return Err(io::Error::other("invalid move recovery paths; files retained"));
     }
+    if let Some(source) = &intent.copied_source {
+        let source_directory = source.path.parent().ok_or_else(|| io::Error::other("invalid copied source path"))?;
+        if source_directory.parent() != intent.source.parent() || !source_directory.file_name().is_some_and(|name| name.to_string_lossy().starts_with(".bokheim-import-source-")) || source.path.file_name() != intent.source.file_name() {
+            return Err(io::Error::other("invalid copied source recovery paths; files retained"));
+        }
+        let published = if !fs::try_exists(&intent.staged)? { intent.destination.as_deref().filter(|path| fs::exists(path)) } else { None };
+        if let Some(path) = published {
+            if intent.identity.is_none() || Some(file_identity(path)?) != intent.identity {
+                return Err(io::Error::other("published copy identity changed; files retained"));
+            }
+        }
+        if let Some(path) = published.filter(|_| source.fingerprint.is_some()) {
+            if is_committed(path)? {
+                delete_copied_source(source)?;
+            } else {
+                restore_copied_source(&intent, source)?;
+                fs::remove_file(path)?;
+                sync_directory(parent)?;
+            }
+        } else {
+            restore_copied_source(&intent, source)?;
+        }
+        drop(lease);
+        fs::remove_dir_all(directory)?;
+        return sync_directory(parent);
+    }
     let restore = if fs::try_exists(&intent.staged)? {
         Some(intent.staged.as_path())
     } else if let Some(destination) = intent.destination.as_deref().filter(|path| fs::exists(&path)) {
@@ -338,14 +469,18 @@ fn recover_one(directory: &Path, is_committed: &mut impl FnMut(&Path) -> io::Res
         if intent.identity.is_none() || Some(file_identity(destination)?) != intent.identity {
             return Err(io::Error::other("published file identity changed; files retained"));
         }
-        if is_committed(destination)? { None } else { Some(destination) }
+        if is_committed(destination)? {
+            None
+        } else {
+            Some(destination)
+        }
     } else if fs::try_exists(&intent.source)? && (intent.identity.is_none() || Some(file_identity(&intent.source)?) == intent.identity) {
         None // Interrupted before claim or after successful restoration.
     } else {
         return Err(io::Error::other("moved file could not be located; journal retained"));
     };
     if let Some(path) = restore {
-        rename_noclobber(path, &intent.source)?;
+        restore_claimed_file(path, &intent.source)?;
         sync_directory(intent.source.parent().unwrap())?;
         sync_directory(path.parent().unwrap())?;
     }

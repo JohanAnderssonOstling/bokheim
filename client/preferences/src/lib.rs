@@ -211,6 +211,8 @@ pub struct BrowsingPreferences {
     cover_text: CoverText,
     #[serde(default)]
     book_list_view: BookListView,
+    #[serde(default)]
+    graph_view: bool,
     /// Draw every book with its generated cover and never load cover art.
     /// Offered on Kobo, where decoding and holding cover images is the
     /// costliest part of a library page.
@@ -243,6 +245,7 @@ impl Default for BrowsingPreferences {
             custom_ui_font_enabled: false,
             cover_text: CoverText::Always,
             book_list_view: BookListView::default(),
+            graph_view: false,
             generated_covers_only: false,
             catalog_grouping: CatalogGrouping::default(),
             catalog_languages: None,
@@ -287,6 +290,10 @@ impl BrowsingPreferences {
 
     pub fn book_list_view(&self) -> BookListView {
         self.book_list_view
+    }
+
+    pub fn graph_view(&self) -> bool {
+        self.graph_view
     }
 
     pub fn generated_covers_only(&self) -> bool {
@@ -407,6 +414,7 @@ pub enum BrowsingPreferencePatch {
     CustomUiFontFamily(String),
     CoverText(CoverText),
     BookListView(BookListView),
+    GraphView(bool),
     GeneratedCoversOnly(bool),
     CatalogGrouping(CatalogGrouping),
     CatalogLanguages(Option<Vec<String>>),
@@ -434,6 +442,7 @@ impl BrowsingPreferencePatch {
             }
             Self::CoverText(value) => preferences.cover_text = value,
             Self::BookListView(value) => preferences.book_list_view = value,
+            Self::GraphView(value) => preferences.graph_view = value,
             Self::GeneratedCoversOnly(value) => preferences.generated_covers_only = value,
             Self::CatalogGrouping(value) => preferences.catalog_grouping = value,
             Self::CatalogLanguages(value) => preferences.catalog_languages = value,

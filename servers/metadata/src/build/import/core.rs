@@ -1,8 +1,8 @@
-use crate::{
-    building_path, dump_date, error, fs, open_library_id, params, valid_open_library_description, AuthorRecord, BTreeSet, Connection, EditionRecord, KeyReference, MetadataError, OptionalExtension, Path, SystemTime,
-    WorkRecord, BUILDER_SCHEMA_VERSION, IMPORT_CACHE_KIB, LCC_SCHEME, MAX_NOTATION_BYTES, SCHEMA_VERSION, UNIX_EPOCH,
-};
 use super::pipeline::read_open_library_resumable;
+use crate::{
+    building_path, dump_date, error, fs, open_library_id, params, valid_open_library_description, AuthorRecord, BTreeSet, Connection, EditionRecord, KeyReference, MetadataError, OptionalExtension, Path, SystemTime, WorkRecord,
+    BUILDER_SCHEMA_VERSION, IMPORT_CACHE_KIB, LCC_SCHEME, MAX_NOTATION_BYTES, SCHEMA_VERSION, UNIX_EPOCH,
+};
 use metadata_contract::{classification_consensus_notation, ClassificationScheme};
 
 pub fn import_snapshot(editions_path: &Path, works_path: &Path, authors_path: &Path, output_path: &Path, record_limit: Option<usize>) -> Result<(), MetadataError> {
@@ -169,6 +169,9 @@ pub(crate) fn import_editions(connection: &mut Connection, path: &Path, limit: O
 fn import_editions_mode(connection: &mut Connection, path: &Path, limit: Option<usize>, subjects_only: bool) -> Result<usize, MetadataError> {
     let count = read_open_library_resumable::<EditionRecord>(connection, path, limit, "editions", |transaction, records| {
         let mut edition_insert = transaction.prepare_cached("INSERT INTO edition_stage(edition_id,work_id) VALUES(?1,?2)").map_err(error)?;
+        let mut description_insert = transaction.prepare_cached("INSERT OR REPLACE INTO edition_description(edition_id,description) VALUES(?1,?2)").map_err(error)?;
+        let mut description_work_insert = transaction.prepare_cached("INSERT OR IGNORE INTO edition_description_work VALUES(?1,?2)").map_err(error)?;
+        let mut description_isbn_insert = transaction.prepare_cached("INSERT OR IGNORE INTO edition_description_isbn VALUES(?1,?2)").map_err(error)?;
         let mut isbn_insert = transaction.prepare_cached("INSERT INTO edition_isbn_stage(isbn13,edition_id) VALUES(?1,?2)").map_err(error)?;
         let mut bibliography_insert = transaction.prepare_cached("INSERT INTO edition_bibliography_stage(edition_id,title,normalized_title,book_year) VALUES(?1,?2,?3,?4)").map_err(error)?;
         let mut publisher_insert = transaction.prepare_cached("INSERT INTO edition_publisher_stage(edition_id,position,name,normalized_name) VALUES(?1,?2,?3,?4)").map_err(error)?;
@@ -179,6 +182,17 @@ fn import_editions_mode(connection: &mut Connection, path: &Path, limit: Option<
             let Some(edition_id) = open_library_id(&record.key, 'M') else { continue };
             let mut isbns = BTreeSet::new();
             isbns.extend(record.isbn_10.iter().chain(&record.isbn_13).filter_map(|isbn| crate::Isbn13::parse(isbn)));
+            // Description coverage is independent of ISBN/LCC admission.
+            if let Some(description) = record.description.as_deref().and_then(valid_open_library_description) {
+                description_insert.execute(params![edition_id, description]).map_err(error)?;
+                let works = record.works.iter().filter_map(|work| open_library_id(&work.key, 'W')).filter(|id| *id > 0).collect::<BTreeSet<_>>();
+                if works.len() == 1 {
+                    description_work_insert.execute(params![works.first().expect("one work"), edition_id]).map_err(error)?;
+                }
+                for isbn in &isbns {
+                    description_isbn_insert.execute(params![isbn, edition_id]).map_err(error)?;
+                }
+            }
             if subjects_only && !isbns.is_empty() {
                 continue;
             }

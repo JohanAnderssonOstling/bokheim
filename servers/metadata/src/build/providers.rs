@@ -85,12 +85,12 @@ pub(super) fn apply_one(c: &Connection, isbn: i64, answer: &mut RichIsbnMetadata
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ClassificationScheme, ClassificationSource, schema};
+    use crate::{ClassificationScheme, ClassificationSource};
 
     #[test]
     fn bulk_provider_merge_matches_individual_lookups_across_query_boundaries() {
         let connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch(schema::PROVIDERS).unwrap();
+        connection.execute_batch("CREATE TABLE provider_result(provider TEXT NOT NULL,isbn13 INTEGER NOT NULL,fetched_at_ms INTEGER NOT NULL,status TEXT NOT NULL,classifications BLOB NOT NULL,subjects BLOB NOT NULL,PRIMARY KEY(provider,isbn13)) WITHOUT ROWID;").unwrap();
         let classification = |scheme, notation: &str| Classification { scheme, notation: notation.to_owned(), source: ClassificationSource::ExactEdition, evidence: vec![] };
         let heading = SubjectHeading { source: "library_of_congress".into(), authority: "lcsh".into(), components: vec!["Example".into()], authority_uri: None };
         let mut answers = Vec::new();

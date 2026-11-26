@@ -513,7 +513,7 @@ impl Render for NotebookPage {
         if self.options_open {
             body = body.child(self.options_sheet(cx));
         }
-        with_retry_banner(body.into_any_element(), self.error.clone(), "notebook-retry", theme, cx.listener(|page, _, _, cx| page.load(None, cx)))
+        with_retry_banner(body.into_any_element(), self.error.clone(), "notebook-retry", cx.listener(|page, _, _, cx| page.load(None, cx)))
     }
 }
 

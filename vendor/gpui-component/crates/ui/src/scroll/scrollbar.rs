@@ -503,6 +503,8 @@ impl Element for Scrollbar {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut style = Style::default();
         style.position = Position::Absolute;
+        style.inset.top = px(0.).into();
+        style.inset.left = px(0.).into();
         style.flex_grow = 1.0;
         style.flex_shrink = 1.0;
         style.size.width = relative(1.).into();

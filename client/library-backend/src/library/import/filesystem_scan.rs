@@ -6,8 +6,12 @@ use crate::BackendError;
 use library_model::LibraryUpdate;
 use std::sync::atomic::Ordering;
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
+use std::sync::Arc;
+#[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
 use std::time::Instant;
 
+#[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
+use book_model::BookFormat;
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
 use client_platform_runtime::profiling::ProfileSpan;
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
@@ -16,6 +20,8 @@ use client_platform_runtime::task_scope::OnDrop;
 use filesystem_scanner::filesystem_scan::{discover, inspect_files, ScanBookIndex, PUBLISH_BATCH_SIZE};
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
 use library_database::{ContributorNameMatcher, ScanApplyResult};
+#[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
+use tokio::{sync::oneshot, task::JoinSet};
 
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
 struct ScanProfileStage {
@@ -117,16 +123,52 @@ impl LibraryResources {
         .map_err(BackendError::operation)?;
         let mut readable = discovery.readable;
         let mut needs_rescan = false;
-        let known = ScanBookIndex::new(&snapshot);
+        let known = Arc::new(ScanBookIndex::new(&snapshot));
         // Associate unchanged legacy audiobooks with their new fingerprints
         // before admitting new copies. Keep the two groups in separate batches
         // so identity lookups can see those committed aliases.
         discovery.files.sort_by_key(|file| !known.unchanged(&snapshot, file));
         let unchanged = discovery.files.partition_point(|file| known.unchanged(&snapshot, file));
-        let batches = [&discovery.files[..unchanged], &discovery.files[unchanged..]].into_iter().flat_map(|files| files.chunks(PUBLISH_BATCH_SIZE));
-        for files in batches {
+        // Start PDFs and audiobook hashing ahead of publication so they overlap
+        // across batch boundaries instead of waiting for each other. The inventory is
+        // immutable; publication continues to refresh its own placement guards.
+        let inspection_snapshot = Arc::new(snapshot.clone());
+        let mut inspection_tasks = JoinSet::new();
+        let batches = [&discovery.files[..unchanged], &discovery.files[unchanged..]]
+            .into_iter()
+            .flat_map(|files| files.chunks(PUBLISH_BATCH_SIZE))
+            .map(|files| {
+                let (ahead, others): (Vec<_>, Vec<_>) = files
+                    .iter()
+                    .cloned()
+                    .partition(|file| matches!(BookFormat::from_file_name(&file.name), Some(BookFormat::Pdf | BookFormat::M4b)) || client_platform_runtime::filesystem::is_dir(&assets.native_library_root().join(&file.path)));
+                let pending = if ahead.is_empty() {
+                    None
+                } else {
+                    let snapshot = inspection_snapshot.clone();
+                    let known = known.clone();
+                    let cpu = self.cpu.clone();
+                    let root = assets.native_library_root().to_owned();
+                    let readable = discovery.readable;
+                    let (sender, receiver) = oneshot::channel();
+                    inspection_tasks.spawn(async move {
+                        let inspected = inspect_files(root, &ahead, readable, &snapshot, &known, &cpu).await;
+                        let _ = sender.send(inspected);
+                    });
+                    Some(receiver)
+                };
+                (files, others, pending)
+            })
+            .collect::<Vec<_>>();
+        for (files, others, pending) in batches {
             let profile = ScanProfileStage::new("inspection", files.len());
-            let inspected = inspect_files(assets.native_library_root(), files, discovery.readable, &snapshot, &known, &self.cpu).await;
+            let mut inspected = inspect_files(assets.native_library_root(), &others, discovery.readable, &snapshot, &known, &self.cpu).await;
+            if let Some(pending) = pending {
+                let ahead = pending.await.map_err(BackendError::operation)?;
+                inspected.readable &= ahead.readable;
+                inspected.books.extend(ahead.books);
+                inspected.books.sort_by_key(|book| files.iter().position(|file| file.directory == book.directory && file.name == book.name));
+            }
             drop(profile);
             if !assets.root_available() {
                 return Err(BackendError::message("library folder changed during scanning"));
@@ -137,36 +179,20 @@ impl LibraryResources {
                 continue;
             }
             let profile = ScanProfileStage::new("identity_lookup", inspected.books.len());
-            let mut contents = Vec::with_capacity(inspected.books.len());
-            for book in &inspected.books {
-                let (identity, proof) = if let Some(checksum) = book.audiobook_content_hash {
-                    let unchanged = snapshot.books.iter().find(|known| known.directory == book.directory && known.name == book.name && known.fingerprint == book.fingerprint).map(|known| known.book_id);
-                    let known = match book.byte_checksum {
-                        Some(bytes) => self.database.book_for_local_content(bytes).await?.or(unchanged),
-                        None => unchanged,
-                    };
-                    (self.database.resolve_audiobook_content(checksum, known).await?, book.byte_checksum.unwrap_or(checksum))
-                } else {
-                    let checksum = book.byte_checksum.ok_or_else(|| BackendError::message("scanned bytes have no checksum"))?;
-                    (self.database.resolve_scanned_content(checksum, book.source_identity).await?, checksum)
-                };
-                contents.push((identity, proof));
-            }
+            let prepared = self.database.prepare_filesystem_scan_batch(&snapshot.books, library_database::InspectedFilesystemScan { readable, books: inspected.books }).await.map_err(BackendError::operation)?;
+            let contents = prepared.local_contents();
+            let book_count = contents.len();
             drop(profile);
-            let profile = ScanProfileStage::new("checksum_persistence", inspected.books.len());
+            let profile = ScanProfileStage::new("checksum_persistence", book_count);
             assets.remember_local_contents(contents).await?;
             drop(profile);
-            let profile = ScanProfileStage::new("commit", inspected.books.len());
-            let result = self
-                .database
-                .apply_filesystem_scan_batch(&mut snapshot, &discovery, library_database::InspectedFilesystemScan { readable, books: inspected.books }, false, Some(ContributorNameMatcher::Normalized))
-                .await
-                .map_err(BackendError::operation)?;
+            let profile = ScanProfileStage::new("commit", book_count);
+            let result = self.database.apply_prepared_filesystem_scan_batch(&mut snapshot, &discovery, prepared, false, Some(ContributorNameMatcher::Normalized)).await.map_err(BackendError::operation)?;
             drop(profile);
             needs_rescan |= result == ScanApplyResult::AppliedNeedsRescan;
             discovery.directories.clear();
             self.publish_scan_changes(&mut contents_revision).await?;
-            // Deliver queries and partial contents before inspecting another batch.
+            // Deliver queries and partial contents between publication batches.
             tokio::task::yield_now().await;
         }
         if !assets.root_available() {

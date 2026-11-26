@@ -1,7 +1,5 @@
 //! Reader appearance and shortcuts share the reader's own Settings panel.
 
-use ui_text::text;
-
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, Focusable, IntoElement, Window, div};
 use ui_components::{self as components, KeyboardShortcutEditor, ShortcutPage};
@@ -19,7 +17,12 @@ pub(crate) fn with_keyboard_settings<C: 'static>(general: AnyElement, window: &m
     let keyboard = state.read(cx).keyboard;
     let editor = state.read(cx).editor.clone();
     let theme = components::browser_theme(cx);
-    div().size_full().min_h_0().min_w_0().flex().flex_col()
+    div()
+        .size_full()
+        .min_h_0()
+        .min_w_0()
+        .flex()
+        .flex_col()
         .when(keyboard, |panel| panel.key_context("ShortcutSettings"))
         .child(if keyboard { components::reader_settings_tab_body(theme, window).child(components::reader_settings_group(theme).child(editor)).into_any_element() } else { general })
         .into_any_element()
@@ -42,24 +45,20 @@ pub(crate) fn header<C: 'static>(window: &mut Window, cx: &mut Context<C>) -> An
     let state = settings_state(window, cx);
     let keyboard = state.read(cx).keyboard;
     let theme = components::browser_theme(cx);
-    let general_target = state.clone();
-    let keyboard_target = state;
-    components::row(0.0).flex_1().min_w_0().h_full()
-        .child(components::base_button("reader-settings-general-tab").label(text!(common::general)).ghost().no_fill().flex_1().h_full().border_b_2().border_color(if !keyboard { theme.accent } else { theme.rule }).on_click(move |_, window, cx| {
-            general_target.update(cx, |state, cx| {
-                state.keyboard = false;
-                state.editor.update(cx, |editor, cx| editor.cancel_capture(cx));
-                cx.notify();
-            });
-            window.focus_next(cx);
-        }))
-        .child(components::base_button("reader-settings-keyboard-tab").label(text!(common::keyboard)).ghost().no_fill().flex_1().h_full().border_b_2().border_color(if keyboard { theme.accent } else { theme.rule }).on_click(move |_, window, cx| {
-            keyboard_target.update(cx, |state, cx| {
-                state.keyboard = true;
-                state.editor.update(cx, |editor, cx| editor.cancel_capture(cx));
+    components::settings_tabs("reader-settings", keyboard, theme, move |keyboard, window, cx| {
+        state.update(cx, |state, cx| {
+            state.keyboard = keyboard;
+            state.editor.update(cx, |editor, cx| editor.cancel_capture(cx));
+            if keyboard {
                 state.editor.read(cx).focus_handle(cx).focus(window, cx);
-                cx.notify();
-            });
-        }))
-        .into_any_element()
+            }
+            cx.notify();
+        });
+        if !keyboard {
+            window.focus_next(cx);
+        }
+    })
+    .flex_1()
+    .h_full()
+    .into_any_element()
 }

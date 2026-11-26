@@ -100,7 +100,7 @@
 		-Server
 	}
 
-	@metadata_api path /health /v3/books /v2/audiobooks/audible
+	@metadata_api path /health /v3/books /v3/works /v2/audiobooks/audible
 	handle @metadata_api {
 		import bokheim_protobuf_compression
 		reverse_proxy 127.0.0.1:8091

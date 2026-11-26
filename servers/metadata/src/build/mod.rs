@@ -1,12 +1,11 @@
 //! Build immutable answers using the existing resolution rules, without network I/O.
 
-#[cfg(test)]
-use crate::build::tests::snapshot_from;
 use crate::schema::{self, now_ms};
 use crate::*;
 
 pub(crate) mod authority_ingestion;
 pub(crate) mod batch;
+pub(crate) mod edition_descriptions;
 mod edition_index;
 pub(crate) mod enrichment;
 pub(crate) mod identity;
@@ -17,11 +16,15 @@ pub(crate) mod openlibrary;
 mod providers;
 mod reclassify;
 mod work_classification;
+pub(crate) mod work_edition_index;
 mod work_lookup;
-pub use edition_index::{EditionIndexReport, extend_edition_index};
+pub(crate) mod work_search_index;
+pub use edition_index::{extend_edition_index, EditionIndexReport};
 pub use incremental::build_answers_incremental;
 pub use reclassify::reclassify_answers;
+pub use work_edition_index::index_work_editions;
 pub use work_lookup::index_work_classifications;
+pub use work_search_index::index_work_search;
 pub(crate) mod service;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -47,7 +50,6 @@ pub struct BuildReport {
     pub write_seconds: f64,
     pub edition_index_seconds: f64,
     pub authority_index_seconds: f64,
-    pub queue_seconds: f64,
 }
 
 pub fn build_answers(snapshot: &Path, providers: Option<&Path>, demand: Option<&Path>, descriptions: Option<&Path>, output: &Path) -> Result<BuildReport, MetadataError> {
@@ -75,10 +77,8 @@ pub fn build_answers(snapshot: &Path, providers: Option<&Path>, demand: Option<&
         out.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=-65536;").map_err(error)?;
         out.execute_batch(schema::ANSWERS).map_err(error)?;
         out.execute_batch(incremental::STATE_SCHEMA).map_err(error)?;
-        // Build secondary queue indexes after loading and ranking the rows.
-        out.execute_batch("DROP INDEX wanted_by_rank; DROP INDEX wanted_by_work;").map_err(error)?;
-        // A disk-backed union covers OL, supplements, crawled-only and requested-only ISBNs.
-        out.execute_batch("CREATE TABLE build_isbn(isbn13 INTEGER PRIMARY KEY,requests INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID; BEGIN;").map_err(error)?;
+        // A disk-backed union covers OL, supplements, archived provider results and requested-only ISBNs.
+        out.execute_batch("CREATE TABLE build_isbn(isbn13 INTEGER PRIMARY KEY) WITHOUT ROWID; BEGIN;").map_err(error)?;
         {
             let mut insert_isbn = out.prepare("INSERT OR IGNORE INTO build_isbn(isbn13) VALUES(?1)").map_err(error)?;
             for table in ["edition_isbn", "isbn_classification", "isbn_lcc", "lc_record_isbn"] {
@@ -96,10 +96,9 @@ pub fn build_answers(snapshot: &Path, providers: Option<&Path>, demand: Option<&
                 }
             }
             if let Some(c) = &demand_input {
-                let mut q = c.prepare("SELECT isbn13,requests FROM demand ORDER BY isbn13").map_err(error)?;
-                for row in q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).map_err(error)? {
-                    let (isbn, requests) = row.map_err(error)?;
-                    out.execute("INSERT INTO build_isbn VALUES(?1,?2) ON CONFLICT(isbn13) DO UPDATE SET requests=excluded.requests", params![isbn, requests]).map_err(error)?;
+                let mut q = c.prepare("SELECT isbn13 FROM demand ORDER BY isbn13").map_err(error)?;
+                for row in q.query_map([], |r| r.get::<_, i64>(0)).map_err(error)? {
+                    insert_isbn.execute([row.map_err(error)?]).map_err(error)?;
                 }
             }
         }
@@ -113,15 +112,15 @@ pub fn build_answers(snapshot: &Path, providers: Option<&Path>, demand: Option<&
         let mut bytes = 0;
         let mut work_cache = batch::WorkEvidenceCache::default();
         loop {
-            let mut q = out.prepare_cached("SELECT isbn13,requests FROM build_isbn WHERE isbn13>?1 ORDER BY isbn13 LIMIT ?2").map_err(error)?;
-            let rows = q.query_map(params![after, BUILD_BATCH_ISBNS as i64], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).map_err(error)?.collect::<Result<Vec<_>, _>>().map_err(error)?;
+            let mut q = out.prepare_cached("SELECT isbn13 FROM build_isbn WHERE isbn13>?1 ORDER BY isbn13 LIMIT ?2").map_err(error)?;
+            let rows = q.query_map(params![after, BUILD_BATCH_ISBNS as i64], |r| r.get::<_, i64>(0)).map_err(error)?.collect::<Result<Vec<_>, _>>().map_err(error)?;
             drop(q);
             if rows.is_empty() {
                 break;
             }
-            after = rows.last().unwrap().0;
+            after = *rows.last().unwrap();
             let lookup_started = Instant::now();
-            let mut response = resolver.enrich_build_batch_cached(rows.iter().map(|(id, _)| format!("{id:013}")).collect(), &mut work_cache)?;
+            let mut response = resolver.enrich_build_batch_cached(rows.iter().map(|id| format!("{id:013}")).collect(), &mut work_cache)?;
             lookup_seconds += lookup_started.elapsed().as_secs_f64();
             let provider_started = Instant::now();
             if let Some(c) = &provider {
@@ -139,7 +138,6 @@ pub fn build_answers(snapshot: &Path, providers: Option<&Path>, demand: Option<&
                 tracing::info!(isbn_rows = count, elapsed_seconds = started.elapsed().as_secs_f64(), lookup_seconds, provider_seconds, write_seconds, "building answers");
             }
         }
-        // All ISBNs of a work with a resolved LCC leave the crawler queue together.
         out.execute_batch("BEGIN").map_err(error)?;
         tracing::info!("building edition search index");
         let index_started = Instant::now();
@@ -149,22 +147,10 @@ pub fn build_answers(snapshot: &Path, providers: Option<&Path>, demand: Option<&
         let index_started = Instant::now();
         build_authorities(&source, &out)?;
         let authority_index_seconds = index_started.elapsed().as_secs_f64();
-        tracing::info!(authority_index_seconds, "finalizing crawler queue");
-        let queue_started = Instant::now();
-        // Candidate evidence already contains exact/work/sibling consensus.
-        out.execute_batch(
-            "CREATE INDEX wanted_by_work ON wanted(work_id,isbn13);
-DELETE FROM wanted WHERE work_id IN (SELECT work_id FROM answer_work_lcc UNION SELECT work_id FROM edition_candidate WHERE work_id IS NOT NULL);
-",
-        )
-        .map_err(error)?;
-        out.execute_batch(
-            "CREATE INDEX wanted_by_rank ON wanted(rank,isbn13); CREATE INDEX edition_candidate_by_work ON edition_candidate(work_id); CREATE INDEX edition_title_key_by_edition ON edition_title_key(edition_id); DROP TABLE build_isbn;",
-        )
-        .map_err(error)?;
+        tracing::info!(authority_index_seconds, "finalizing answer indexes");
+        out.execute_batch("CREATE INDEX edition_candidate_by_work ON edition_candidate(work_id); CREATE INDEX edition_title_key_by_edition ON edition_title_key(edition_id); DROP TABLE build_isbn;").map_err(error)?;
         incremental::save_state(&out, provider.as_ref(), demand_input.as_ref(), &inputs, count, bytes)?;
         inputs.verify(snapshot, descriptions)?;
-        let queue_seconds = queue_started.elapsed().as_secs_f64();
         out.execute("INSERT INTO snapshot VALUES(1,?1,?2,?3,?4)", params![schema::ANSWER_VERSION, resolver.state.snapshot.dump_date, now_ms(), through]).map_err(error)?;
         out.execute_batch("COMMIT; PRAGMA main.optimize;").map_err(error)?;
         let integrity: String = out.query_row("PRAGMA quick_check", [], |r| r.get(0)).map_err(error)?;
@@ -192,7 +178,6 @@ DELETE FROM wanted WHERE work_id IN (SELECT work_id FROM answer_work_lcc UNION S
             write_seconds,
             edition_index_seconds,
             authority_index_seconds,
-            queue_seconds,
         })
     })();
     let _ = std::fs::remove_file(temporary);
@@ -207,8 +192,8 @@ fn has_table(c: &Connection, table: &str) -> Result<bool, MetadataError> {
 }
 fn validate_source(c: &Connection) -> Result<(), MetadataError> {
     let version: i64 = c.query_row("SELECT value FROM metadata_metric WHERE name='builder_schema_version'", [], |r| r.get(0)).map_err(error)?;
-    if ![9, 10].contains(&version) {
-        return Err(MetadataError(format!("unsupported input builder schema {version}; expected 9 or 10; reimport the dumps")));
+    if ![9, 10, 11].contains(&version) {
+        return Err(MetadataError(format!("unsupported input builder schema {version}; expected 9, 10 or 11; reimport the dumps")));
     }
     // Current import schema is required; no old year-column/subtitle branches.
     c.prepare("SELECT b.book_year,s.subtitle,w.subtitle FROM edition_bibliography b LEFT JOIN edition_subtitle s USING(edition_id) LEFT JOIN edition e USING(edition_id) LEFT JOIN work_subtitle w USING(work_id) LIMIT 0").map_err(error)?;
@@ -303,27 +288,6 @@ pub fn import_authorities(snapshot: &Path, evidence: &Path, target: &Path) -> Re
     crate::build::authority_ingestion::ingest_wikidata_authorities(&Resolver::open(snapshot, None)?, evidence, target)
 }
 
-#[cfg(test)]
-mod wanted_tests {
-    use super::*;
-    #[test]
-    fn lcc_on_one_ambiguous_claimant_does_not_close_an_unclassified_work() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = snapshot_from(
-            dir.path(),
-            &[
-                serde_json::json!({"key":"/books/OL1M","works":[{"key":"/works/OL10W"}],"isbn_13":["9780306406157"],"lc_classifications":["QA76"]}),
-                serde_json::json!({"key":"/books/OL2M","works":[{"key":"/works/OL20W"}],"isbn_13":["9780306406157","9780131103627"]}),
-            ],
-            &[],
-            &[],
-        );
-        let out = dir.path().join("answers.sqlite");
-        build_answers(&source, None, None, None, &out).unwrap();
-        assert_eq!(Connection::open(out).unwrap().query_row("SELECT work_id FROM wanted WHERE isbn13=9780131103627", [], |r| r.get::<_, i64>(0)).unwrap(), 20);
-    }
-}
-
 /// Distinct work owners of an answer already known to contain usable LCC.
 fn classified_works(answer: &RichIsbnMetadataResult) -> BTreeSet<i64> {
     answer.matches.iter().filter(|m| m.classifications.iter().any(|c| c.scheme == ClassificationScheme::LibraryOfCongress)).filter_map(|m| m.open_library_work_id.as_deref().and_then(|id| open_library_id(id, 'W'))).collect()
@@ -332,28 +296,23 @@ fn classified_works(answer: &RichIsbnMetadataResult) -> BTreeSet<i64> {
 fn remove_answer(out: &Connection, isbn: i64) -> Result<(bool, u64), MetadataError> {
     let bytes = out.query_row("SELECT length(answer) FROM isbn_answer WHERE isbn13=?1", [isbn], |r| r.get::<_, i64>(0)).optional().map_err(error)?;
     let Some(bytes) = bytes else { return Ok((false, 0)) };
-    for table in ["isbn_answer", "wanted", "answer_classification"] {
+    for table in ["isbn_answer", "answer_classification"] {
         out.execute(&format!("DELETE FROM {table} WHERE isbn13=?1"), [isbn]).map_err(error)?;
     }
     Ok((true, u64::try_from(bytes).map_err(error)?))
 }
 
-fn write_answer_batch(out: &Connection, rows: Vec<(i64, i64)>, response: Vec<RichIsbnMetadataResult>) -> Result<(u64, u64), MetadataError> {
+fn write_answer_batch(out: &Connection, rows: Vec<i64>, response: Vec<RichIsbnMetadataResult>) -> Result<(u64, u64), MetadataError> {
     let mut count = 0;
     let mut bytes = 0;
     let mut descriptions = BTreeMap::<i64, String>::new();
-    let mut wanted = out.prepare_cached("INSERT INTO wanted VALUES(?1,?2,?3)").map_err(error)?;
     let mut work_lcc = out.prepare_cached("INSERT OR IGNORE INTO answer_work_lcc VALUES(?1)").map_err(error)?;
     let mut isbn_classification = out.prepare_cached("INSERT INTO answer_classification VALUES(?1,?2)").map_err(error)?;
     let mut put_description = out.prepare_cached("INSERT OR IGNORE INTO work_description VALUES(?1,?2)").map_err(error)?;
     let mut get_description = out.prepare_cached("SELECT text FROM work_description WHERE work_id=?1").map_err(error)?;
     let mut put_answer = out.prepare_cached("INSERT INTO isbn_answer VALUES(?1,?2)").map_err(error)?;
-    for ((isbn, requests), mut answer) in rows.into_iter().zip(response) {
-        let work = answer.matches.first().filter(|_| answer.matches.len() == 1).and_then(|m| m.open_library_work_id.as_deref()).and_then(|id| open_library_id(id, 'W'));
+    for (isbn, mut answer) in rows.into_iter().zip(response) {
         let classified = has_lcc(&answer);
-        if !classified {
-            wanted.execute(params![isbn, if requests > 0 { (-1_000_000_000_000_i64).saturating_sub(requests) } else { 0 }, work]).map_err(error)?;
-        }
         if classified {
             if answer.matches.len() == 1 {
                 isbn_classification.execute(params![isbn, serde_json::to_vec(&answer.matches[0].classifications).map_err(error)?]).map_err(error)?;

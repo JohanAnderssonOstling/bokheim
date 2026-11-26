@@ -15,7 +15,7 @@ use gpui::{
     AppContext, Axis, Bounds, ClickEvent, Context, Div, DragMoveEvent, EventEmitter, FocusHandle,
     Focusable, InteractiveElement, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent,
     ParentElement, Pixels, Point, Render, ScrollStrategy, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled, Task, UniformListScrollHandle, Window, div,
+    StatefulInteractiveElement as _, Styled, Task, TextAlign, UniformListScrollHandle, Window, div,
     prelude::FluentBuilder, px, uniform_list,
 };
 
@@ -1219,6 +1219,12 @@ where
             .h_full()
             .flex()
             .items_center()
+            .text_align(col_group.column.align)
+            .map(|cell| match col_group.column.align {
+                TextAlign::Left => cell.justify_start(),
+                TextAlign::Center => cell.justify_center(),
+                TextAlign::Right => cell.justify_end(),
+            })
             .flex_shrink_0()
             .overflow_hidden()
             .whitespace_nowrap()
@@ -1388,7 +1394,7 @@ where
         col_group: &ColGroup,
         _: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
+    ) -> Option<Stateful<Div>> {
         if !self.sortable {
             return None;
         }
@@ -1406,6 +1412,8 @@ where
         Some(
             div()
                 .id(("icon-sort", col_ix))
+                .flex_none()
+                .cursor_pointer()
                 .p(px(2.))
                 .rounded(cx.theme().radius / 2.)
                 .map(|this| match is_on {
@@ -1436,29 +1444,43 @@ where
         let movable = self.col_movable && col_group.column.movable;
         let paddings = col_group.column.paddings;
         let name = col_group.column.name.clone();
+        let align = col_group.column.align;
+        let clickable = if self.col_selectable {
+            col_group.column.selectable
+        } else {
+            self.sortable && col_group.column.sort.is_some()
+        };
+        let sort_icon = self.render_sort_icon(col_ix, col_group, window, cx);
+        let label = div()
+            .flex_1()
+            .min_w_0()
+            .text_align(align)
+            .child(self.delegate.render_th(col_ix, window, cx));
+        let heading = h_flex()
+            .size_full()
+            .items_center()
+            .when_some(paddings, |this, paddings| {
+                let offset_pr = self.options.size.table_cell_padding().right - paddings.right;
+                this.pr(offset_pr.max(px(0.)))
+            });
+        // Put the sort icon before right-aligned labels so their trailing
+        // edge lines up with the values below, including when sorting changes.
+        let heading = if align == TextAlign::Right {
+            heading.children(sort_icon).child(label)
+        } else {
+            heading.child(label).children(sort_icon)
+        };
 
         h_flex()
             .h_full()
             .child(
                 self.render_cell(None, col_ix, window, cx)
                     .id(("col-header", col_ix))
+                    .when(clickable, |cell| cell.cursor_pointer())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.on_col_head_click(col_ix, window, cx);
                     }))
-                    .child(
-                        h_flex()
-                            .size_full()
-                            .justify_between()
-                            .items_center()
-                            .child(self.delegate.render_th(col_ix, window, cx))
-                            .when_some(paddings, |this, paddings| {
-                                // Leave right space for the sort icon, if this column have custom padding
-                                let offset_pr =
-                                    self.options.size.table_cell_padding().right - paddings.right;
-                                this.pr(offset_pr.max(px(0.)))
-                            })
-                            .children(self.render_sort_icon(col_ix, &col_group, window, cx)),
-                    )
+                    .child(heading)
                     .when(movable, |this| {
                         this.on_drag(
                             DragColumn {

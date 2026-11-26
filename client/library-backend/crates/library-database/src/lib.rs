@@ -145,7 +145,6 @@ fn attach_taxonomy(connection: &rusqlite::Connection) -> Result<(), DatabaseErro
 pub struct Database {
     pub(crate) connection: rusqlite::Connection,
     path: PathBuf,
-    subject_trees: RefCell<browse::subjects::tree::SubjectTrees>,
     browse_results: RefCell<browse::result::BrowseResults>,
     browse_facets: RefCell<browse::facets::Facets>,
     text_index_usage: RefCell<Option<(i64, u64)>>,
@@ -363,7 +362,7 @@ impl Database {
         let path = path.as_ref().to_path_buf();
         let connection = device_sqlite::open(&path, device_sqlite::OpenOptions::new()).map_err(DatabaseError::operation)?;
         configure_library_connection(&connection).map_err(DatabaseError::operation)?;
-        Ok(Self { connection, path, subject_trees: Default::default(), browse_results: Default::default(), browse_facets: Default::default(), text_index_usage: Default::default() })
+        Ok(Self { connection, path, browse_results: Default::default(), browse_facets: Default::default(), text_index_usage: Default::default() })
     }
 
     /// Filesystem location of this library, so detached transfer drivers can

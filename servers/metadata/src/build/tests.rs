@@ -252,7 +252,7 @@ fn in_place_reclassification_preserves_rich_fields_updates_search() {
     let old_codes = serde_json::to_vec(&vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "PE1128".into(), source: ClassificationSource::Work, evidence: vec![] }]).unwrap();
     c.execute("UPDATE edition_candidate SET classifications=?1 WHERE edition_id=1", [old_codes]).unwrap();
     c.execute_batch(
-        "DELETE FROM edition_title_key WHERE edition_id IN (5,6,7,8); DELETE FROM edition_candidate WHERE edition_id IN (5,6,7,8); DELETE FROM answer_classification; DELETE FROM answer_work_lcc; DELETE FROM wanted;
+        "DELETE FROM edition_title_key WHERE edition_id IN (5,6,7,8); DELETE FROM edition_candidate WHERE edition_id IN (5,6,7,8); DELETE FROM answer_classification; DELETE FROM answer_work_lcc;
             UPDATE answer_build SET json_bytes=(SELECT sum(length(answer)) FROM isbn_answer);",
     )
     .unwrap();
@@ -266,11 +266,10 @@ fn in_place_reclassification_preserves_rich_fields_updates_search() {
     assert_eq!(report.isbn_rows, 8);
     let full = MetadataService::open(&fresh, &temp.path().join("full-demand.sqlite")).unwrap();
     let isbns = ["9780306406157", "9780131103627", "9781404309982", "9781324096900", "9780141439518"].into_iter().map(String::from).collect::<Vec<_>>();
-    assert_eq!(serde_json::to_value(server.enrich_rich(isbns.clone()).unwrap()).unwrap(), serde_json::to_value(full.enrich_rich(isbns).unwrap()).unwrap());
+    assert_eq!(serde_json::to_value(server.enrich_rich(isbns.clone(), true).unwrap()).unwrap(), serde_json::to_value(full.enrich_rich(isbns, true).unwrap()).unwrap());
     let c = Connection::open(&base).unwrap();
-    assert_eq!(c.query_row("SELECT count(*) FROM wanted WHERE work_id=50", [], |r| r.get::<_, i64>(0)).unwrap(), 0, "unchanged work queues must remain pruned");
     assert_eq!(c.query_row("SELECT answer FROM isbn_answer WHERE isbn13=9780131103627", [], |r| r.get::<_, Vec<u8>>(0)).unwrap(), unchanged);
-    for table in ["edition_candidate", "edition_title_key", "wanted"] {
+    for table in ["edition_candidate", "edition_title_key"] {
         let a: i64 = c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap();
         let b: i64 = Connection::open(&fresh).unwrap().query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap();
         assert_eq!(a, b, "{table}");
@@ -329,7 +328,12 @@ fn in_place_update_applies_provider_and_demand_changes_and_tracks_later_deletion
     let base = temp.path().join("answers.sqlite");
     build_answers(&source, None, None, None, &base).unwrap();
     let provider_path = temp.path().join("provider.sqlite");
-    let provider = crate::crawl::open_provider(&provider_path).unwrap();
+    let provider = Connection::open(&provider_path).unwrap();
+    provider
+        .execute_batch(
+            "CREATE TABLE provider_result(provider TEXT NOT NULL,isbn13 INTEGER NOT NULL,fetched_at_ms INTEGER NOT NULL,status TEXT NOT NULL,classifications BLOB NOT NULL,subjects BLOB NOT NULL,PRIMARY KEY(provider,isbn13)) WITHOUT ROWID;",
+        )
+        .unwrap();
     let codes = serde_json::to_vec(&vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "QA76".into(), source: ClassificationSource::ExactEdition, evidence: vec![] }]).unwrap();
     for isbn in [9780306406157_i64, 9780000000019] {
         provider.execute("INSERT INTO provider_result VALUES('loc',?1,1,'matched',?2,?3)", params![isbn, codes, b"[]".as_slice()]).unwrap();
@@ -505,8 +509,6 @@ fn matching_title_and_author_on_another_work_do_not_supply_lcc() {
     let enriched = service.enrich_rich(vec!["9780061847646".into()]).unwrap();
     assert!(enriched[0].matches[0].classifications.is_empty());
     assert_eq!(enriched[0].matches[0].authors[0].name.as_deref(), Some("John Steele Gordon"));
-    let answers = Connection::open(&service.server.state.database).unwrap();
-    assert_eq!(answers.query_row("SELECT count(*) FROM wanted WHERE isbn13=9780061847646", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
 }
 
 #[test]
@@ -563,7 +565,7 @@ fn zero_isbn_in_snapshot_is_built_before_edition_indexing() {
     let resolver = Resolver::open(&database, None).unwrap();
     let server = MetadataService::open(&answers, &temp.path().join("demand.sqlite")).unwrap();
     let requested = vec!["0000000000000".to_owned(), "9780306406157".to_owned()];
-    assert_eq!(serde_json::to_value(server.enrich_rich(requested.clone()).unwrap()).unwrap(), serde_json::to_value(resolver.enrich_rich(requested).unwrap()).unwrap());
+    assert_eq!(serde_json::to_value(server.enrich_rich(requested.clone(), true).unwrap()).unwrap(), serde_json::to_value(resolver.enrich_rich(requested).unwrap()).unwrap());
 }
 
 #[test]
@@ -745,7 +747,7 @@ impl FixtureService {
             }
         }
         drop(connection);
-        self.server.enrich_rich(isbns)
+        self.server.enrich_rich(isbns, true)
     }
     fn lookup(&self, isbns: Vec<String>) -> Result<Vec<IsbnClassificationResult>, MetadataError> {
         let results = self
@@ -776,7 +778,11 @@ fn edition_index_keeps_provider_fallbacks_and_title_author_authority_candidates(
         &[serde_json::json!({"key":"/authors/OL1A","name":"Jane Smith"})],
     );
     let provider = temp.path().join("provider.sqlite");
-    let c = crate::crawl::open_provider(&provider).unwrap();
+    let c = Connection::open(&provider).unwrap();
+    c.execute_batch(
+        "CREATE TABLE provider_result(provider TEXT NOT NULL,isbn13 INTEGER NOT NULL,fetched_at_ms INTEGER NOT NULL,status TEXT NOT NULL,classifications BLOB NOT NULL,subjects BLOB NOT NULL,PRIMARY KEY(provider,isbn13)) WITHOUT ROWID;",
+    )
+    .unwrap();
     let codes = vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "QA76".into(), source: ClassificationSource::ExactEdition, evidence: vec![] }];
     c.execute("INSERT INTO provider_result VALUES('loc',9780306406157,1,'matched',?1,?2)", params![serde_json::to_vec(&codes).unwrap(), b"[]".as_slice()]).unwrap();
     drop(c);
@@ -791,9 +797,7 @@ fn edition_index_keeps_provider_fallbacks_and_title_author_authority_candidates(
         assert_eq!(ids, if authority { vec![1, 2] } else { vec![1] });
         let codes: Vec<u8> = c.query_row("SELECT classifications FROM edition_candidate WHERE edition_id=1", [], |r| r.get(0)).unwrap();
         assert_eq!(serde_json::from_slice::<Vec<Classification>>(&codes).unwrap()[0].notation, "QA76");
-        assert_eq!(c.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('wanted_by_work','wanted_by_rank')", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
         assert_eq!(c.query_row("SELECT count(*) FROM sqlite_master WHERE name LIKE 'build_%'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        assert_eq!(c.query_row("SELECT count(*) FROM wanted WHERE work_id=10", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     }
 }
 
@@ -807,7 +811,6 @@ fn assert_answer_tables_equal(left: &Path, right: &Path) {
         ("edition_candidate", "edition_id"),
         ("edition_title_key", "key,edition_id"),
         ("authority_title", "key,source,control_number"),
-        ("wanted", "isbn13"),
         ("answer_classification", "isbn13"),
         ("answer_work_lcc", "work_id"),
         ("answer_provider", "provider,isbn13"),
@@ -825,7 +828,7 @@ fn assert_answer_tables_equal(left: &Path, right: &Path) {
 }
 
 #[test]
-fn incremental_provider_and_demand_updates_match_full_builds_and_restore_work_queues() {
+fn incremental_provider_and_demand_updates_match_full_builds() {
     let temp = tempfile::tempdir().unwrap();
     let database = snapshot_from(
         temp.path(),
@@ -839,7 +842,12 @@ fn incremental_provider_and_demand_updates_match_full_builds_and_restore_work_qu
         &[],
     );
     let provider_path = temp.path().join("provider.sqlite");
-    let provider = crate::crawl::open_provider(&provider_path).unwrap();
+    let provider = Connection::open(&provider_path).unwrap();
+    provider
+        .execute_batch(
+            "CREATE TABLE provider_result(provider TEXT NOT NULL,isbn13 INTEGER NOT NULL,fetched_at_ms INTEGER NOT NULL,status TEXT NOT NULL,classifications BLOB NOT NULL,subjects BLOB NOT NULL,PRIMARY KEY(provider,isbn13)) WITHOUT ROWID;",
+        )
+        .unwrap();
     let demand_path = temp.path().join("demand.sqlite");
     let demand = Connection::open(&demand_path).unwrap();
     demand.execute_batch("CREATE TABLE demand(isbn13 INTEGER PRIMARY KEY,requests INTEGER NOT NULL); INSERT INTO demand VALUES(9780306406157,9);").unwrap();
@@ -878,13 +886,11 @@ fn incremental_provider_and_demand_updates_match_full_builds_and_restore_work_qu
         let server = MetadataService::open(&updated, &temp.path().join(format!("serve-demand-{iteration}.sqlite"))).unwrap();
         let full = MetadataService::open(&fresh, &temp.path().join(format!("serve-full-demand-{iteration}.sqlite"))).unwrap();
         let isbns = vec!["9780306406157", "9780131103627", "9780821338278", "9780000000026", "9780000000033"].into_iter().map(String::from).collect::<Vec<_>>();
-        assert_eq!(serde_json::to_value(server.enrich_rich(isbns.clone()).unwrap()).unwrap(), serde_json::to_value(full.enrich_rich(isbns).unwrap()).unwrap());
+        assert_eq!(serde_json::to_value(server.enrich_rich(isbns.clone(), true).unwrap()).unwrap(), serde_json::to_value(full.enrich_rich(isbns, true).unwrap()).unwrap());
         let queries =
             ["Shared Title", "Other Title"].into_iter().map(|title| EditionIdentityQuery { query_id: title.into(), title: title.into(), authors: vec![], author_surname: None, publishers: vec![], book_year: None }).collect::<Vec<_>>();
         assert_eq!(serde_json::to_value(server.resolve_editions(queries.clone()).unwrap()).unwrap(), serde_json::to_value(full.resolve_editions(queries).unwrap()).unwrap());
         let c = crate::snapshot::open(&updated).unwrap();
-        let first_work_wanted: i64 = c.query_row("SELECT count(*) FROM wanted WHERE work_id=10", [], |r| r.get(0)).unwrap();
-        assert_eq!(first_work_wanted, if iteration < 2 { 0 } else { 2 });
         // A code on the second ISBN must not classify the edition's first-ISBN fallback.
         assert_eq!(c.query_row("SELECT count(*) FROM edition_candidate WHERE edition_id=4", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         previous = updated;
@@ -930,7 +936,12 @@ fn failed_incremental_resolution_preserves_the_base_and_does_not_publish() {
     let temp = tempfile::tempdir().unwrap();
     let database = snapshot_from(temp.path(), &[], &[], &[]);
     let provider_path = temp.path().join("provider.sqlite");
-    let provider = crate::crawl::open_provider(&provider_path).unwrap();
+    let provider = Connection::open(&provider_path).unwrap();
+    provider
+        .execute_batch(
+            "CREATE TABLE provider_result(provider TEXT NOT NULL,isbn13 INTEGER NOT NULL,fetched_at_ms INTEGER NOT NULL,status TEXT NOT NULL,classifications BLOB NOT NULL,subjects BLOB NOT NULL,PRIMARY KEY(provider,isbn13)) WITHOUT ROWID;",
+        )
+        .unwrap();
     let base = temp.path().join("base.sqlite");
     let next = temp.path().join("next.sqlite");
     build_answers(&database, Some(&provider_path), None, None, &base).unwrap();
@@ -943,7 +954,7 @@ fn failed_incremental_resolution_preserves_the_base_and_does_not_publish() {
 }
 
 #[test]
-fn demand_priority_changes_do_not_resolve_existing_metadata() {
+fn demand_count_changes_do_not_resolve_existing_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let database = snapshot_from(temp.path(), &[serde_json::json!({"key":"/books/OL1M","isbn_13":["9780306406157"]})], &[], &[]);
     let demand_path = temp.path().join("demand.sqlite");
@@ -957,5 +968,4 @@ fn demand_priority_changes_do_not_resolve_existing_metadata() {
     assert_eq!(report.mode, "incremental");
     assert_eq!(report.resolved_rows, 0);
     assert_eq!(report.reused_rows, 1);
-    assert_eq!(crate::snapshot::open(&next).unwrap().query_row("SELECT rank FROM wanted WHERE isbn13=9780306406157", [], |r| r.get::<_, i64>(0)).unwrap(), -1_000_000_000_100);
 }

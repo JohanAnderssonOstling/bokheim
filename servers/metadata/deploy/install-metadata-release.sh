@@ -11,7 +11,7 @@ flock -n 9 || { echo "another Bokheim metadata deployment is running" >&2; exit 
 
 source_root=/var/lib/bokheim-deploy/metadata-incoming
 service_templates=/usr/local/share/bokheim-deploy
-for required in metadata-server; do
+for required in metadata-server taxonomy.sqlite3; do
     if [[ ! -f ${source_root}/${required} || -L ${source_root}/${required} ]]; then
         echo "missing or unsafe staged artifact: ${required}" >&2
         exit 1
@@ -25,7 +25,11 @@ if [[ ! -r /home/johan/data/openlibrary/answers-current.sqlite ]]; then
     echo "missing answers file: build one and point answers-current.sqlite at it" >&2
     exit 1
 fi
-for required in bokheim-metadata.service bokheim-metadata-crawl.service; do
+if [[ ! -r /home/johan/data/openlibrary/works-current.sqlite ]]; then
+    echo "missing work source: point works-current.sqlite at the matching indexed import" >&2
+    exit 1
+fi
+for required in bokheim-metadata.service; do
     if [[ ! -f ${service_templates}/${required} || -L ${service_templates}/${required} || $(stat -c %u "${service_templates}/${required}") -ne 0 ]]; then
         echo "missing or unsafe root-owned service template: ${required}" >&2
         exit 1
@@ -35,11 +39,13 @@ done
 rollback_root=$(mktemp -d /var/tmp/bokheim-metadata-rollback.XXXXXX)
 metadata_binary_existed=false
 metadata_unit_existed=false
+taxonomy_existed=false
 activation_started=false
 deployment_succeeded=false
 [[ -f /usr/local/bin/metadata-server ]] && metadata_binary_existed=true
 [[ -f /etc/systemd/system/bokheim-metadata.service ]] && metadata_unit_existed=true
-for installed in /usr/local/bin/metadata-server /etc/systemd/system/bokheim-metadata.service /etc/systemd/system/bokheim-metadata-crawl.service; do
+[[ -f /usr/local/share/bokheim-metadata/taxonomy.sqlite3 ]] && taxonomy_existed=true
+for installed in /usr/local/bin/metadata-server /etc/systemd/system/bokheim-metadata.service /usr/local/share/bokheim-metadata/taxonomy.sqlite3; do
     if [[ -f ${installed} ]]; then
         cp -a -- "${installed}" "${rollback_root}/"
     fi
@@ -49,7 +55,7 @@ cleanup() {
     trap - EXIT
     if [[ ${activation_started} == true && ${deployment_succeeded} != true ]]; then
         echo "activation failed; restoring the previous metadata release" >&2
-        systemctl stop bokheim-metadata.service bokheim-metadata-crawl.service 2>/dev/null || true
+        systemctl stop bokheim-metadata.service 2>/dev/null || true
         if [[ ${metadata_binary_existed} == true ]]; then
             install -o root -g root -m 0755 "${rollback_root}/metadata-server" /usr/local/bin/metadata-server
         else
@@ -61,16 +67,14 @@ cleanup() {
             systemctl disable --now bokheim-metadata.service 2>/dev/null || true
             rm -f -- /etc/systemd/system/bokheim-metadata.service
         fi
-        if [[ -f ${rollback_root}/bokheim-metadata-crawl.service ]]; then
-            install -o root -g root -m 0644 "${rollback_root}/bokheim-metadata-crawl.service" /etc/systemd/system/bokheim-metadata-crawl.service
+        if [[ ${taxonomy_existed} == true ]]; then
+            install -o root -g root -m 0644 "${rollback_root}/taxonomy.sqlite3" /usr/local/share/bokheim-metadata/taxonomy.sqlite3
         else
-            systemctl disable --now bokheim-metadata-crawl.service 2>/dev/null || true
-            rm -f -- /etc/systemd/system/bokheim-metadata-crawl.service
+            rm -f -- /usr/local/share/bokheim-metadata/taxonomy.sqlite3
         fi
         systemctl daemon-reload
         if [[ ${metadata_binary_existed} == true && ${metadata_unit_existed} == true ]]; then
             systemctl restart bokheim-metadata.service || true
-            if [[ -f ${rollback_root}/bokheim-metadata-crawl.service ]]; then systemctl restart bokheim-metadata-crawl.service || true; fi
         fi
     fi
     rm -rf -- "${rollback_root}"
@@ -79,17 +83,17 @@ cleanup() {
 trap cleanup EXIT
 
 activation_started=true
-systemctl stop bokheim-metadata.service bokheim-metadata-crawl.service 2>/dev/null || true
+systemctl stop bokheim-metadata.service 2>/dev/null || true
 # Do not use a process-name-wide cleanup here. Linux truncates `comm` names,
 # which can make a long-running metadata importer look exactly like the server
 # and would interrupt an unrelated resumable snapshot build.
 install -o root -g root -m 0755 "${source_root}/metadata-server" /usr/local/bin/metadata-server
+install -d -o root -g root -m 0755 /usr/local/share/bokheim-metadata
+install -o root -g root -m 0644 "${source_root}/taxonomy.sqlite3" /usr/local/share/bokheim-metadata/taxonomy.sqlite3
 install -o root -g root -m 0644 "${service_templates}/bokheim-metadata.service" /etc/systemd/system/bokheim-metadata.service
-install -o root -g root -m 0644 "${service_templates}/bokheim-metadata-crawl.service" /etc/systemd/system/bokheim-metadata-crawl.service
 systemctl daemon-reload
-systemctl enable bokheim-metadata.service bokheim-metadata-crawl.service
+systemctl enable bokheim-metadata.service
 systemctl restart bokheim-metadata.service
-systemctl restart bokheim-metadata-crawl.service
 
 metadata_ready=false
 for _ in $(seq 1 30); do

@@ -31,6 +31,8 @@ pub(super) struct BrowseNavigator {
     pub(super) destination: BrowseDestination,
     pub(super) listing: BrowseListing,
     pub(super) selection: BrowseOptionsSelection,
+    /// Graph search filters the hierarchy locally, leaving its book panel unfiltered.
+    search_graph: bool,
     pub(super) error: Option<SharedString>,
     /// The load in flight. Replacing it drops the one before, which cancels it.
     request: Option<Task<()>>,
@@ -66,6 +68,14 @@ impl BrowseNavigator {
         query
     }
 
+    /// One completed hierarchy replaces branch-by-branch browse requests.
+    #[cfg(all(feature = "graph", not(feature = "kobo")))]
+    pub(super) fn graph_hierarchy_request(&self, location: BrowseLocation) -> impl Future<Output = Result<library_model::BrowseHierarchy, BackendError>> + use<> {
+        let query = self.child_query(location);
+        let library = self.ui.backend().clone();
+        async move { library.browse_hierarchy(query).await }
+    }
+
     /// A displayed section belongs to the installed response, even while a
     /// different filter or sort is still being loaded in the background.
     pub(super) fn section_request(&self, section: BrowseLocation, offset: usize, limit: usize) -> Option<impl Future<Output = Result<Option<BrowseBookPage>, BackendError>> + use<>> {
@@ -96,12 +106,17 @@ impl BrowseNavigator {
         let updates = ui.updates();
         let subscriptions = [cx.subscribe(&updates, |navigator, _, _: &LibraryContentsChanged, cx| navigator.invalidate(cx)), cx.subscribe(&updates, |navigator, _, _: &LibraryDownloadChanged, cx| navigator.invalidate(cx))];
         let root = if selection.by_author { BrowseLocation::CatalogAuthor(None) } else { kind.root_location() };
+        #[cfg(all(feature = "graph", not(feature = "kobo")))]
+        let search_graph = kind.supports_graph() && !selection.by_author && crate::stores::current_graph_view(cx);
+        #[cfg(not(all(feature = "graph", not(feature = "kobo"))))]
+        let search_graph = false;
         let mut navigator = Self {
             ui,
             kind,
             destination: BrowseDestination::from_path(root, Vec::new()),
             listing,
             selection,
+            search_graph,
             error: None,
             request: None,
             more: None,
@@ -155,7 +170,29 @@ impl BrowseNavigator {
     /// Searches for `query`, or drops the search for an empty one.
     pub(super) fn search(&mut self, query: String, cx: &mut Context<Self>) {
         self.selection.search = query;
-        self.reload(cx);
+        if self.search_graph {
+            cx.notify();
+        } else {
+            self.reload(cx);
+        }
+    }
+
+    #[cfg(all(feature = "graph", not(feature = "kobo")))]
+    pub(super) fn graph_search(&self) -> &str {
+        if self.search_graph { &self.selection.search } else { "" }
+    }
+
+    /// A view switch changes what the shared search field filters.
+    #[cfg(all(feature = "graph", not(feature = "kobo")))]
+    pub(super) fn set_graph_search(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.search_graph == enabled {
+            return;
+        }
+        self.search_graph = enabled;
+        if !self.selection.search.is_empty() {
+            self.reload(cx);
+        }
+        cx.notify();
     }
 
     pub(super) fn select_option(&mut self, event: BrowseOptionsEvent, cx: &mut Context<Self>) {
@@ -170,6 +207,10 @@ impl BrowseNavigator {
             // catalog opens with it next time.
             if let BrowseOptionsEvent::ShowByAuthor(by_author) = event {
                 crate::stores::save_catalog_grouping(if by_author { app_preferences::CatalogGrouping::Author } else { app_preferences::CatalogGrouping::Subject }, cx);
+                #[cfg(all(feature = "graph", not(feature = "kobo")))]
+                {
+                    self.search_graph = !by_author && crate::stores::current_graph_view(cx);
+                }
                 self.open_path(Vec::new(), cx);
             } else {
                 self.reload(cx);
@@ -239,7 +280,7 @@ impl BrowseNavigator {
     fn load(&mut self, destination: BrowseDestination, refresh: bool, cx: &mut Context<Self>) {
         self.refresh_pending = false;
         let location = destination.location;
-        let query = self.selection.backend_query(location, true);
+        let query = self.selection.backend_query(location, !self.search_graph);
         #[cfg(target_os = "android")]
         log::info!("Browse request: location={} formats={:?} languages={:?} search_length={}", location, query.file_types, query.languages, query.search.len());
         // Navigation keeps the current frame painted until the next one is

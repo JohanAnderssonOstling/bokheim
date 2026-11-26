@@ -16,7 +16,7 @@ struct EditionCandidate {
     book_year: Option<i32>,
 }
 
-fn load_edition_authors(connection: &Connection, edition_ids: &BTreeSet<i64>) -> Result<HashMap<i64, Vec<String>>, MetadataError> {
+pub(crate) fn load_edition_authors(connection: &Connection, edition_ids: &BTreeSet<i64>) -> Result<HashMap<i64, Vec<String>>, MetadataError> {
     load_names_by_ids(connection, edition_ids, "edition_author", "edition_id")
 }
 
@@ -41,7 +41,7 @@ pub(crate) fn load_names_by_ids(connection: &Connection, ids: &BTreeSet<i64>, re
     Ok(names)
 }
 
-fn load_edition_publishers(connection: &Connection, edition_ids: &BTreeSet<i64>) -> Result<HashMap<i64, Vec<(String, String)>>, MetadataError> {
+pub(crate) fn load_edition_publishers(connection: &Connection, edition_ids: &BTreeSet<i64>) -> Result<HashMap<i64, Vec<(String, String)>>, MetadataError> {
     let mut publishers = HashMap::<i64, Vec<(String, String)>>::new();
     for chunk in edition_ids.iter().copied().collect::<Vec<_>>().chunks(BULK_EVIDENCE_IDS_PER_QUERY) {
         let sql = format!("SELECT edition_id,name,normalized_name FROM edition_publisher WHERE edition_id IN ({}) ORDER BY edition_id,position", sql_placeholders(chunk.len()));
@@ -55,7 +55,7 @@ fn load_edition_publishers(connection: &Connection, edition_ids: &BTreeSet<i64>)
     Ok(publishers)
 }
 
-fn load_edition_isbns(connection: &Connection, edition_ids: &BTreeSet<i64>) -> Result<HashMap<i64, Isbn13>, MetadataError> {
+pub(crate) fn load_edition_isbns(connection: &Connection, edition_ids: &BTreeSet<i64>) -> Result<HashMap<i64, Isbn13>, MetadataError> {
     let mut isbns = HashMap::<i64, Isbn13>::new();
     for chunk in edition_ids.iter().copied().collect::<Vec<_>>().chunks(BULK_EVIDENCE_IDS_PER_QUERY) {
         let sql = format!("SELECT edition_id,isbn13 FROM edition_isbn WHERE edition_id IN ({}) ORDER BY edition_id,isbn13", sql_placeholders(chunk.len()));

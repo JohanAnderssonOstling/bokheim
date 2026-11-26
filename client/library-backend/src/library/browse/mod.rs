@@ -2,11 +2,15 @@
 
 use crate::library::LibraryHandle;
 use crate::{BackendError, BookId, LibraryBrowseData};
-use library_model::{BrowseBookPage, BrowseLocation, BrowsePageRequest, LibraryBrowseQuery};
+use library_model::{BrowseBookPage, BrowseHierarchy, BrowseLocation, BrowsePageRequest, LibraryBrowseQuery};
 
 pub(super) mod text_search;
 
 impl LibraryHandle {
+    pub async fn browse_hierarchy(&self, query: LibraryBrowseQuery) -> Result<BrowseHierarchy, BackendError> {
+        Ok(self.database().browse_hierarchy(&query, false).await?)
+    }
+
     pub async fn book_count(&self) -> Result<usize, BackendError> {
         let database = self.database();
         Ok(database.book_count().await?)

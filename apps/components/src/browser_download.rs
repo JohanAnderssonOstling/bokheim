@@ -58,7 +58,7 @@ impl BrowserDownloads {
 
     pub fn progress(&mut self, id: &str, percent: Option<u8>, window: &mut Window, cx: &mut App) {
         let Some(entry) = self.entries.get(id) else { return };
-        self.apply(BrowserDownloadUpdate { download: id.into(), name: entry.name.clone(), phase: BrowserDownloadPhase::Downloading, percent, message: None }, window, cx);
+        self.apply(BrowserDownloadUpdate { download: id.into(), name: entry.name.clone(), phase: entry.phase, percent, message: entry.message.clone() }, window, cx);
     }
 
     /// Byte counts live inside the existing progress view so frequent updates
@@ -104,7 +104,7 @@ impl BrowserDownloads {
                 let entry = self.entries.entry(download.clone()).or_insert_with(|| BrowserDownload { name: String::new(), progress: cx.new(|_| BrowserDownloadProgress { percent: None, detail: None }), phase, message: None });
                 entry.progress.update(cx, |progress, cx| {
                     progress.percent = percent.map(|value| value.min(100));
-                    if phase != BrowserDownloadPhase::Downloading {
+                    if !matches!(phase, BrowserDownloadPhase::Downloading | BrowserDownloadPhase::Transferring) {
                         progress.detail = None;
                     }
                     cx.notify();
@@ -121,6 +121,7 @@ impl BrowserDownloads {
                 let title = match phase {
                     BrowserDownloadPhase::Preparing => text!(common::preparing_download),
                     BrowserDownloadPhase::Importing => text!(common::adding_to_library),
+                    BrowserDownloadPhase::Transferring => text!(browse::transferring_files),
                     _ => text!(common::downloading),
                 };
                 Notification::new().title(title).message(text).autohide(false).content(move |_, _, _| progress.clone().into_any_element())

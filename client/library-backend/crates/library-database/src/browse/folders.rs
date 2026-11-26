@@ -3,13 +3,46 @@
 use crate::browse::{BrowseRow, FoldersSql, invalid_integer_column, parse_uuid_column};
 use crate::query_methods::text_column;
 use crate::{Database, DatabaseError};
-use library_model::BrowseLocation;
+use library_model::{BrowseHierarchy, BrowseHierarchyNode, BrowseLocation};
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use sync_common::{DirId, ROOT_DIR_ID};
 
 impl Database {
+    pub(super) fn folder_hierarchy(&self, root: DirId, options: &super::BrowseOptions) -> Result<BrowseHierarchy, DatabaseError> {
+        let tree = self.folder_tree(root, options)?;
+        let count = tree.counts.get(&root).copied().unwrap_or_default();
+        let name = self.browse_directory_path(&root)?.last().map_or_else(|| "Folders".to_owned(), |part| part.name.clone());
+        let mut nodes = vec![BrowseHierarchyNode {
+            row: BrowseRow {
+                id: BrowseLocation::Folder(root),
+                name,
+                path: None,
+                book_count: if options.downloaded_only { count.downloaded } else { count.total },
+                downloaded_book_count: count.downloaded,
+                requested_book_count: Some(if options.downloaded_only { 0 } else { count.requested }),
+                size_bytes: None,
+            },
+            parent: None,
+            first_child: 1,
+        }];
+        let mut seen = HashSet::from([root]);
+        let mut cursor = 0;
+        while cursor < nodes.len() {
+            let BrowseLocation::Folder(folder) = nodes[cursor].row.id else { unreachable!() };
+            nodes[cursor].first_child = nodes.len();
+            for row in self.folder_children(&[folder], &tree.counts, options)? {
+                let BrowseLocation::Folder(folder) = row.id else { continue };
+                if seen.insert(folder) {
+                    nodes.push(BrowseHierarchyNode { row, parent: Some(cursor), first_child: 0 });
+                }
+            }
+            cursor += 1;
+        }
+        BrowseHierarchy::new(nodes).map_err(DatabaseError::message)
+    }
+
     #[cfg(test)]
     pub(super) fn browse_folder(&self, directory_id: DirId, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<super::LibraryBrowseData, DatabaseError> {
         let options = super::BrowseOptions::from_query(query, downloaded_only);
@@ -120,7 +153,7 @@ impl Database {
             if book_model::normalize_search_text(&name).contains(&options.search) {
                 folders.push({
                     let id = text_column(row, 1)?;
-                    BrowseRow { id: BrowseLocation::Folder(parse_uuid_column(id, 1)?), name, path: None, book_count: 0, downloaded_book_count: 0, size_bytes: None }
+                    BrowseRow { id: BrowseLocation::Folder(parse_uuid_column(id, 1)?), name, path: None, book_count: 0, downloaded_book_count: 0, requested_book_count: None, size_bytes: None }
                 });
                 parents.push(row.get::<_, String>(0)?);
             }
@@ -143,6 +176,7 @@ impl Database {
                 };
                 folder.book_count = if options.downloaded_only { count.downloaded } else { count.total };
                 folder.downloaded_book_count = count.downloaded;
+                folder.requested_book_count = Some(if options.downloaded_only { 0 } else { count.requested });
                 folder.size_bytes = if options.downloaded_only { (count.downloaded_sized == count.downloaded).then_some(count.downloaded_size_bytes) } else { (count.sized == count.total).then_some(count.size_bytes) };
                 // Empty directories stay navigable in local-only libraries and name searches.
                 // Folders containing only remote books still obey the download filter.
@@ -186,6 +220,7 @@ impl Database {
                     sized: count_column(row, 4)?,
                     downloaded_size_bytes: size_column(row, 5)?,
                     downloaded_sized: count_column(row, 6)?,
+                    requested: count_column(row, 7)?,
                 },
             );
             Ok(())
@@ -211,6 +246,7 @@ impl Database {
 pub(super) struct FolderCount {
     total: usize,
     downloaded: usize,
+    requested: usize,
     size_bytes: u64,
     sized: usize,
     downloaded_size_bytes: u64,
@@ -221,6 +257,7 @@ impl FolderCount {
     fn add(&mut self, child: Self) {
         self.total += child.total;
         self.downloaded += child.downloaded;
+        self.requested += child.requested;
         self.size_bytes += child.size_bytes;
         self.sized += child.sized;
         self.downloaded_size_bytes += child.downloaded_size_bytes;

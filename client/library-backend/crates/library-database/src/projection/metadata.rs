@@ -2,7 +2,7 @@
 
 use crate::DatabaseError;
 use crate::browse::{options::base_language, text::search_title};
-use crate::contributors::{ContributorNameMatcher, resolve_credits};
+use crate::contributors::{ContributorNameMatcher, ContributorResolver};
 use crate::sync::apply::{project_book, retained_subject_concepts};
 use crate::sync::storage_i64;
 use book_model::{AUTHOR_MARC_RELATOR_CODE, normalize_search_text};
@@ -72,7 +72,7 @@ fn retain_changed_sets<const N: usize>(tx: &Transaction<'_>, books: &[[Value; 1]
     Ok(())
 }
 
-pub(super) fn project<'a>(tx: &Transaction<'_>, inputs: impl Iterator<Item = (&'a BookId, Option<&'a BookAddition>)>) -> Result<(), DatabaseError> {
+pub(super) fn project<'a>(tx: &Transaction<'_>, contributors: &mut ContributorResolver, inputs: impl Iterator<Item = (&'a BookId, Option<&'a BookAddition>)>) -> Result<(), DatabaseError> {
     let inputs = inputs.collect::<Vec<_>>();
     if inputs.is_empty() {
         return Ok(());
@@ -102,7 +102,7 @@ pub(super) fn project<'a>(tx: &Transaction<'_>, inputs: impl Iterator<Item = (&'
         let empty = BookDetails::default();
         let metadata = addition.map_or(&empty, |addition| &addition.record.metadata);
         let projected = project_book(&metadata.book)?;
-        let resolved = resolve_credits(tx, &metadata.contributors, Some(ContributorNameMatcher::Normalized))?;
+        let resolved = contributors.resolve_credits(tx, &metadata.contributors, Some(ContributorNameMatcher::Normalized))?;
         let author = resolved.iter().filter(|(_, credit)| credit.role_code() == AUTHOR_MARC_RELATOR_CODE).map(|(_, credit)| credit.name()).collect::<Vec<_>>().join(", ");
         let search_author = normalize_search_text(&author);
         let title = addition.map(|_| metadata.title.clone());

@@ -6,7 +6,7 @@ use book_model::{BookFormat, BookRecord};
 use include_sqlite_sql::include_sql;
 use library_replica::{EnrichmentResult, LibraryStateEntry};
 use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
-use rusqlite::{Connection, Error as SqlError, OptionalExtension, types::Type};
+use rusqlite::{types::Type, Connection, Error as SqlError, OptionalExtension};
 use sync_common::{BookId, StateKey};
 
 /// What the device stores about a book the metadata server hasn't answered.
@@ -16,6 +16,7 @@ pub struct EnrichmentCandidate {
     pub request_key: String,
     /// `description` is empty: the file's own description always wins.
     pub record: BookRecord,
+    pub needs_description: bool,
     pub audiobook: bool,
     pub recording: Option<metadata_contract::audible::LookupRequest>,
     /// Local, never synchronized.
@@ -35,9 +36,15 @@ impl Database {
     /// A bounded page of due lookups and its last scanned book, including corrupt inputs.
     /// Successful answers and definite misses do not expire.
     pub fn enrichment_candidates(&self, now: i64, after: Option<&BookId>) -> Result<(Vec<EnrichmentCandidate>, Option<BookId>), DatabaseError> {
+        self.enrichment_candidates_excluding(now, after, &[])
+    }
+
+    /// Newly arrived books can be dispatched while earlier requests are pending.
+    pub fn enrichment_candidates_excluding(&self, now: i64, after: Option<&BookId>, excluded: &[BookId]) -> Result<(Vec<EnrichmentCandidate>, Option<BookId>), DatabaseError> {
         let mut candidates = Vec::new();
         let mut last = None;
-        self.connection.facts_candidates(now, after, |row| {
+        let excluded = serde_json::to_string(excluded).map_err(DatabaseError::operation)?;
+        self.connection.facts_candidates(now, after, &excluded, |row| {
             let hash = row.get(0)?;
             last = Some(hash);
             let format: Option<i64> = row.get(1)?;
@@ -52,8 +59,9 @@ impl Database {
             };
             let recording = value.recording;
             let audiobook = matches!(format.and_then(BookFormat::from_code), Some(BookFormat::M4b | BookFormat::Mp3Folder));
+            let needs_description = value.record.description.trim().is_empty();
             let record = BookRecord { metadata: value.record.metadata, description: String::new() };
-            candidates.push(EnrichmentCandidate { book_id: hash, request_key: key, record, audiobook, recording, filenames: Vec::new() });
+            candidates.push(EnrichmentCandidate { book_id: hash, request_key: key, record, needs_description, audiobook, recording, filenames: Vec::new() });
             Ok(())
         })?;
         if candidates.is_empty() {
@@ -197,6 +205,10 @@ database_methods! {
     fn enrichment_candidates(now: i64, after: Option<&BookId>) -> (Vec<EnrichmentCandidate>, Option<BookId>);
     arguments (i64, Option<BookId>) = (now, after.copied());
     execute database, arguments => database.enrichment_candidates(arguments.0, arguments.1.as_ref());
+
+    fn enrichment_candidates_excluding(now: i64, after: Option<&BookId>, excluded: &[BookId]) -> (Vec<EnrichmentCandidate>, Option<BookId>);
+    arguments (i64, Option<BookId>, Vec<BookId>) = (now, after.copied(), excluded.to_vec());
+    execute database, arguments => database.enrichment_candidates_excluding(arguments.0, arguments.1.as_ref(), &arguments.2);
 
     fn record_catalog_answer(hash: &BookId, record: BookRecord) -> ();
     arguments (BookId, BookRecord,) = (hash.clone(), record,);

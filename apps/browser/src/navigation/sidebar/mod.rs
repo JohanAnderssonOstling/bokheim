@@ -32,13 +32,18 @@ pub(crate) const RAIL_ROUTES: [Route; 9] = [
 
 /// Where the keyboard is inside the open library switcher.
 ///
-/// A grid rather than a list: rows are the add button and then one per library,
+/// A grid rather than a list: a row of header actions, then one per library,
 /// and a library row has two cells. Tab order alone could not express this —
 /// `down` has to skip a row's menu button and land on the next library.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SwitcherCursor {
     Add,
-    Library { index: usize, menu: bool },
+    #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    Import,
+    Library {
+        index: usize,
+        menu: bool,
+    },
 }
 
 pub(crate) struct Sidebar {

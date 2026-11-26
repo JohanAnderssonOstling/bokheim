@@ -6,7 +6,6 @@ use client_platform_runtime::filesystem as fs;
 use content_address::BookId;
 use lopdf::{Dictionary, Document};
 use pdf_reader_core::{PdfPageTextVisitor, PdfResult};
-use pdf_view_common::PdfReaderMetadata;
 use roxmltree::{Document as XmlDocument, Node};
 use std::collections::HashSet;
 use std::error::Error;
@@ -54,9 +53,9 @@ fn inspect_pdf_pages_mode<R: Read + Seek + Send + 'static>(source_name: &Path, m
     Ok(visitor.finish())
 }
 
-pub(super) fn inspect_pdf_with_reader_facts<R: Read + Seek + Send + 'static>(
+pub(super) fn inspect_pdf_with_navigation<R: Read + Seek + Send + 'static>(
     source_name: &Path, mut reader: R, book_id: Option<BookId>, cached: Option<CachedPdfReader>, declared: Option<BookRecord>,
-) -> MetadataResult<(InspectedPdf, PdfReaderMetadata, Vec<BookTocEntry>)> {
+) -> MetadataResult<(InspectedPdf, Vec<BookTocEntry>)> {
     reader.rewind()?;
     let inspected = match declared {
         Some(metadata) => InspectedPdf { metadata },
@@ -64,19 +63,15 @@ pub(super) fn inspect_pdf_with_reader_facts<R: Read + Seek + Send + 'static>(
     };
     let visitor = PdfPageEvidence::new(inspected);
     let pages = visitor.pages();
-    let (metadata, outline, visitor) = match cached.filter(|cached| book_id.is_some_and(|identity| cached.metadata.valid_for(&identity.to_hex()))) {
-        Some(mut cached) => {
-            cached.metadata.annotations.clear();
+    let (outline, visitor) = match cached.filter(|cached| book_id.is_some_and(|identity| cached.metadata.valid_for(&identity.to_hex()))) {
+        Some(cached) => {
             reader.rewind()?;
             let (_, visitor) = pdf_reader_core::visit_page_text(reader, pages, MAX_SECTION_BYTES, visitor)?;
-            (cached.metadata, cached.toc, visitor)
+            (cached.toc, visitor)
         }
-        None => {
-            let (_, metadata, outline, visitor) = pdf_reader_core::inspect_reader_with_text_visitor(reader, book_id.map(|identity| identity.to_hex()), pages, MAX_SECTION_BYTES, visitor)?;
-            (metadata, outline, visitor)
-        }
+        None => pdf_reader_core::visit_page_text_with_outline(reader, pages, MAX_SECTION_BYTES, visitor)?,
     };
-    Ok((visitor.finish(), metadata, outline))
+    Ok((visitor.finish(), outline))
 }
 
 fn declared_metadata(source_name: &Path, reader: &mut (impl Read + Seek)) -> InspectedPdf {
@@ -136,9 +131,13 @@ impl PdfPageTextVisitor for PdfPageEvidence {
         let section = crate::evidence::try_inspect_section(&self.inspected.metadata, &format!("pdf:page:{page}"), &text)?;
         profile_pdf_phase("page_evidence_parse", page, started);
         log::debug!(target: "library_pdf_profile", "{}", serde_json::json!({"event":"pdf_page_evidence", "page":page, "text_bytes":text.len(), "evidence":section}));
+        // A checksum-valid ISBN from page text is enough to finish the
+        // evidence search. Keep any classification found on this or prior
+        // pages; declared/filename ISBNs alone do not skip the page search.
+        let found_isbn = !section.isbns.is_empty();
         self.progress.observe(&section);
         self.evidence.push((page, section));
-        Ok(!self.progress.complete())
+        Ok(!found_isbn && !self.progress.complete())
     }
 }
 

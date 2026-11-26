@@ -1,4 +1,5 @@
 pub mod wikidata;
+pub mod works;
 pub use wikidata::*;
 pub mod audible;
 pub mod authority_subjects;
@@ -61,8 +62,8 @@ pub struct EditionIdentityResult {
     pub candidates_truncated: bool,
     #[serde(default)]
     pub authority_subjects: Option<AuthoritySubjectMatch>,
-    /// Computed from the complete candidate set before display truncation or
-    /// edition ranking. An empty result means the sibling fallback abstained.
+    /// Computed before display truncation or edition ranking. `sample` records
+    /// whether work-scoped evidence was bounded. Empty subjects mean abstention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sibling_subjects: Option<SiblingSubjectConsensus>,
 }
@@ -76,6 +77,16 @@ pub struct SiblingSubjectConsensus {
     /// No subject reached the threshold; only the highest support ties remain.
     #[serde(default)]
     pub used_highest_support_fallback: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample: Option<SiblingSubjectSample>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SiblingSubjectSample {
+    pub examined_editions: usize,
+    pub classified_edition_limit: usize,
+    /// Support fractions describe the selected sample when more evidence exists.
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -86,7 +97,8 @@ pub struct SiblingSubjectSupport {
     pub path: String,
     pub supporting_editions: usize,
     /// Each edition splits one vote across its distinct deepest subjects.
-    /// The denominator is all directly classified compatible editions.
+    /// The denominator is the directly classified compatible observations used
+    /// by the consensus, which may be a bounded sample.
     #[serde(default)]
     pub support_fraction: f64,
     pub evidence: Vec<ClassificationEvidence>,
