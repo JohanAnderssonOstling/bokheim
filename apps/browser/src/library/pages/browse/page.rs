@@ -1074,7 +1074,7 @@ impl BrowsePage {
             + usize::from(trash_button.is_some())
             + usize::from(language_control.is_some());
         let available = window.viewport_size().width - if components::uses_mobile_navigation(window) { px(0.0) } else { window.rem_size() * components::NAV_RAIL_SIZE_REM };
-        let collapsed_views = (compact || components::touch_ui() || cfg!(feature = "kobo")) && available < window.rem_size() * (components::topbar_action_height_rem() * (actions + view_count) as f32 + 5.0);
+        let collapsed_views = (compact || components::touch_ui() || cfg!(feature = "kobo")) && available < window.rem_size() * (components::topbar_action_height_rem() * (actions + view_count) as f32 + 8.0);
         #[cfg(all(feature = "graph", not(feature = "kobo")))]
         let graph_expansion_controls = self.shown_graph(cx).cloned().map(|graph| graph.update(cx, |graph, cx| graph.expansion_controls(cx)));
         let menu_anchor = gpui::Anchor::TopRight;

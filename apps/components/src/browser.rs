@@ -210,7 +210,7 @@ pub fn library_switcher_group() -> Div {
 /// it carries no underline: the breadcrumb and the actions already mark the
 /// boundary. See [`crate::nav_rail_destinations`].
 pub fn topbar(theme: BrowserTheme) -> Div {
-    div().w_full().min_w_0().h(gpui::rems(topbar_height_rem())).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).when(cfg!(feature = "kobo"), |bar| bar.px(px(CONTENT_INSET))).bg(theme.page_bg)
+    div().w_full().min_w_0().h(gpui::rems(topbar_height_rem())).flex_none().flex().flex_row().items_center().gap(px(if crate::touch_ui() { SPACE_XXS } else { SPACE_MD })).when(cfg!(feature = "kobo"), |bar| bar.px(px(CONTENT_INSET))).bg(theme.page_bg)
 }
 
 /// The reader's single-row topbar, sized to its controls without extra vertical
@@ -252,13 +252,14 @@ pub fn mobile_navigation_menu_heading(title: impl IntoElement, back: Option<Butt
 /// chevron saying it can be changed. Pulled left by its own padding so the
 /// text lines up with the plain titles of other pages.
 pub fn mobile_navigation_menu_title(id: impl Into<ElementId>, title: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    crate::base_button(id).ghost().min_w_0().h(gpui::rems(topbar_action_height_rem())).px(px(SPACE_XS)).ml(px(-SPACE_XS)).child(
+    crate::base_button(id).ghost().flex_1().min_w_0().max_w_full().h(gpui::rems(topbar_action_height_rem())).px(px(SPACE_XS)).ml(px(-SPACE_XS)).child(
         div()
+            .flex_1()
             .min_w_0()
             .flex()
             .items_center()
             .gap(px(SPACE_XS))
-            .child(div().min_w_0().truncate().when_some(theme.display_font_family(), |text, family| text.font_family(family)).text_size(gpui::rems(TEXT_MD)).child(title.into()))
+            .child(div().flex_1().min_w_0().truncate().when_some(theme.display_font_family(), |text, family| text.font_family(family)).text_size(gpui::rems(TEXT_MD)).child(title.into()))
             .child(Icon::new(IconName::ChevronDown).flex_none().text_color(theme.text_muted)),
     )
 }
