@@ -259,6 +259,7 @@ enum OverlayCommand {
     Open,
     NewWindow,
     Add,
+    Download,
     CopyToFolder,
     MoveToFolder,
     /// Read, or unread again; where the reader is stays put.
@@ -835,7 +836,8 @@ impl BookCardView {
                 if offered && !held(book, cx) { vec![OverlayCommand::Add] } else { Vec::new() }
             }
             Some(book_id) => {
-                let downloaded = matches!(self.ui.updates().read(cx).download_state(book_id), Some(DownloadState::Downloaded));
+                let updates = self.ui.updates().read(cx);
+                let state = updates.download_state(book_id).unwrap_or_else(|| initial_download_state(book.downloaded, book.download_requested));
                 {
                     let in_folder = self.folder_commands && book.source_directory.is_some();
                     let mut commands = vec![OverlayCommand::Open];
@@ -849,8 +851,10 @@ impl BookCardView {
                         commands.push(OverlayCommand::MoveToFolder);
                     }
                     commands.push(OverlayCommand::ToggleRead);
-                    if downloaded {
-                        commands.push(OverlayCommand::RemoveDownload);
+                    match state {
+                        DownloadState::NotDownloaded if !updates.downloads_blocked() => commands.push(OverlayCommand::Download),
+                        DownloadState::Downloaded => commands.push(OverlayCommand::RemoveDownload),
+                        _ => {}
                     }
                     commands.push(OverlayCommand::Remove);
                     commands
@@ -870,6 +874,7 @@ impl BookCardView {
                 components::action_button(id, if audiobook { text!(browse::listen) } else { text!(browse::read) }).primary().icon(icon)
             }
             OverlayCommand::Add => components::action_button(id, if self.add_task.is_some() { text!(browse::adding) } else { text!(browse::add_to_library) }).primary().icon(components::download_glyph()).disabled(self.add_task.is_some()),
+            OverlayCommand::Download => components::book_overlay_command(id, text!(common::download), components::download_glyph(), theme),
             OverlayCommand::NewWindow => components::book_overlay_command(id, text!(browse::new_window), IconName::ExternalLink, theme),
             OverlayCommand::CopyToFolder => components::book_overlay_command(id, text!(browse::copy_to_folder), IconName::Copy, theme),
             OverlayCommand::MoveToFolder => components::book_overlay_command(id, text!(browse::move_to_folder), IconName::FolderOpen, theme),
@@ -910,6 +915,7 @@ impl BookCardView {
             (OverlayCommand::Add, _) => card.update(cx, |card, cx| {
                 card.add(vec![card.book.clone()], window, cx);
             }),
+            (OverlayCommand::Download, Some(_)) => card.update(cx, |card, cx| card.download(cx)),
             (OverlayCommand::NewWindow, Some(_)) => open_book_windows(*backend.id(), std::slice::from_ref(&book), window, cx),
             (OverlayCommand::CopyToFolder, Some(book_id)) => events(BookCardEvent::Place(vec![book_id], folder.filter(|_| folder_commands), FolderPlacement::Copy), window, cx),
             (OverlayCommand::MoveToFolder, Some(book_id)) => {
