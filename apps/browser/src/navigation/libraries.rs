@@ -8,7 +8,7 @@ use library_backend::{ImportFailure, ROOT_DIR_ID};
 use library_backend::{ReaderImportOptions, ReaderImportSource};
 use library_management::management::ManagementClient;
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
 use std::path::Path;
 use std::rc::Rc;
@@ -27,6 +27,7 @@ pub(crate) struct Libraries {
     backend: Rc<AppClient>,
     open_book: OpenBook,
     sessions: HashMap<LibraryId, Entity<LibrarySession>>,
+    opening_libraries: HashSet<LibraryId>,
     now_playing: Entity<crate::NowPlaying>,
     entries: Vec<LibraryEntry>,
     pub(super) page_navigation: Rc<PageNavigation>,
@@ -77,8 +78,19 @@ impl Libraries {
         });
         // The shared backend scheduler owns startup reconciliation. Each tab
         // uses the initial local list and subscribes to discovery updates.
-        let mut libraries =
-            Self { backend, open_book, sessions: HashMap::new(), now_playing, entries, page_navigation: Rc::new(PageNavigation::new(library_id)), selected_error: None, creating_libraries: 0, selection_epoch, _list_updates: list_updates };
+        let mut libraries = Self {
+            backend,
+            open_book,
+            sessions: HashMap::new(),
+            opening_libraries: HashSet::new(),
+            now_playing,
+            entries,
+            page_navigation: Rc::new(PageNavigation::new(library_id)),
+            selected_error: None,
+            creating_libraries: 0,
+            selection_epoch,
+            _list_updates: list_updates,
+        };
         if let Some(id) = library_id {
             libraries.set_selected_library(id, cx);
         }
@@ -133,6 +145,10 @@ impl Libraries {
     }
     pub(super) fn selected_session(&self) -> Option<Entity<LibrarySession>> {
         self.selected_id().and_then(|id| self.sessions.get(&id).cloned())
+    }
+
+    pub(super) fn selected_is_opening(&self) -> bool {
+        self.selected_id().is_some_and(|id| self.opening_libraries.contains(&id))
     }
 
     pub(super) fn selected_library_blocks_navigation(&self, cx: &App) -> bool {
@@ -373,13 +389,31 @@ impl Libraries {
     fn set_selected_library(&mut self, library_id: LibraryId, cx: &mut Context<Self>) {
         self.selected_error = None;
         if self.entries.iter().any(|entry| *entry.library_id() == library_id) && !self.sessions.contains_key(&library_id) {
-            if let Err(error) = self.ensure_session(library_id, cx) {
-                self.selected_error = Some(error);
+            if self.ensure_session(library_id, cx).is_err() && self.opening_libraries.insert(library_id) {
+                let management = self.backend.management.clone();
+                cx.spawn(async move |libraries, cx| {
+                    let result = management.open_library(library_id).await;
+                    let _ = libraries.update(cx, |libraries, cx| {
+                        libraries.opening_libraries.remove(&library_id);
+                        if libraries.selected_id() != Some(library_id) || !libraries.contains(&library_id) {
+                            return;
+                        }
+                        libraries.selected_error = result.and_then(|_| libraries.ensure_session(library_id, cx)).err();
+                        #[cfg(target_os = "android")]
+                        if libraries.selected_error.is_none() {
+                            if let Ok(library) = libraries.backend.management.library(library_id) {
+                                library.request_filesystem_scan();
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
             }
         }
         self.page_navigation.library_id.set(Some(library_id));
         #[cfg(target_os = "android")]
-        if self.selected_error.is_none() {
+        if self.selected_error.is_none() && !self.selected_is_opening() {
             if let Ok(library) = self.backend.management.library(library_id) {
                 library.request_filesystem_scan();
             }

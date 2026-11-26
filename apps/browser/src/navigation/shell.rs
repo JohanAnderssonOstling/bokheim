@@ -217,6 +217,9 @@ impl BrowserShell {
 
     fn empty_libraries(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
+        if self.libraries.read(cx).selected_is_opening() {
+            return components::library_section_content().child(components::browser_loading_message(text!(common::loading), theme)).into_any_element();
+        }
         if let Some(error) = &self.libraries.read(cx).selected_error {
             let message = user_facing_error(error, text!(browse::couldn_t_prepare_this_library_s_local_data_restart_the_app_if));
             return components::library_section_content().child(components::error_text(theme).child(message)).into_any_element();
@@ -263,7 +266,9 @@ impl BrowserShell {
     fn open_pending_navigation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let libraries = self.libraries.read(cx);
         let session = libraries.selected_session();
-        let Some(request) = self.pending_navigation.take_if(|request| request.library_id() == libraries.selected_id() && (session.is_some() || matches!(request, PendingNavigation::Restore(_)))) else { return };
+        let Some(request) = self.pending_navigation.take_if(|request| request.library_id() == libraries.selected_id() && (session.is_some() || matches!(request, PendingNavigation::Restore(_)) && !libraries.selected_is_opening())) else {
+            return;
+        };
         if session.as_ref().is_some_and(|session| session.read(cx).blocks_navigation(cx)) {
             return;
         }
@@ -392,6 +397,7 @@ impl BrowserShell {
 
     fn show_destination(&mut self, route: Route, page: Option<BrowsePageSession>, window: &mut Window, cx: &mut Context<Self>) {
         self.close_reader_surface(cx);
+        self.pending_navigation = None;
         self.page_navigation.navigate(route);
         self.sync_page.update(cx, |page, cx| page.set_open(route == Route::Global(GlobalRoute::Settings), cx));
         if matches!(route, Route::Library(_))
@@ -403,6 +409,8 @@ impl BrowserShell {
                 }
                 session.activate_page(window, cx);
             });
+        } else if matches!(route, Route::Library(_)) && self.libraries.read(cx).selected_is_opening() {
+            self.pending_navigation = Some(PendingNavigation::Restore(NavigationSession { library_id: self.libraries.read(cx).selected_id(), route, page, ..Default::default() }));
         }
         cx.notify();
     }

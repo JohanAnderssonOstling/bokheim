@@ -356,16 +356,14 @@ impl ApplicationPane {
         if self.reader.is_some() || self.opening || self.pending_reader.as_ref() != Some(&reader) {
             return;
         }
-        let library = match self.backend.management.library(*reader.locator.library_id()) {
-            Ok(library) => library,
-            Err(error) => {
-                self.book_open_failed(&reader.title, error, window, cx);
-                return;
-            }
-        };
+        let management = self.backend.management.clone();
         self.begin_opening(window, cx);
         self.open_task = Some(cx.spawn(async move |root, cx| {
-            let format = library.book_format(reader.locator.book_id()).await;
+            let format = async {
+                let library = management.open_library(*reader.locator.library_id()).await?;
+                library.book_format(reader.locator.book_id()).await
+            }
+            .await;
             let _ = root.update_in(cx, |root, window, cx| match format {
                 Ok(Some(format)) if !matches!(format, book_model::BookFormat::M4b | book_model::BookFormat::Mp3Folder) => {
                     // No explicit target: the reader loads the latest durable EPUB/PDF position.
@@ -413,7 +411,7 @@ impl ApplicationPane {
                 if !backend.management.libraries().await?.iter().any(|entry| *entry.library_id() == library_id) {
                     return Err(BackendError::message(text!(common::this_link_refers_to_a_library_that_is_not_configured_on_this)));
                 }
-                let library = backend.management.library(library_id)?;
+                let library = backend.management.open_library(library_id).await?;
                 let book = link.locator.book_id();
                 let mut anchor = link.anchor;
                 if let Some(id) = link.annotation_id {

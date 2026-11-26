@@ -337,7 +337,7 @@ impl PlaybackController {
         cx.spawn(async move |_, _| writer.await).detach();
         cx.spawn(async move |this, cx| {
             if let Ok(record) = restored_rx.recv().await {
-                let library = match restore_backend.management.library(*record.locator.library_id()) {
+                let library = match restore_backend.management.open_library(*record.locator.library_id()).await {
                     Ok(library) => library,
                     Err(error) => {
                         log::warn!("could not restore audiobook: {error}");

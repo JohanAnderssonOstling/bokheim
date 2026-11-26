@@ -34,6 +34,13 @@ impl ManagementClient {
         let handle = self.service.handle(&id)?;
         Ok(LibraryClient::new(handle, Arc::new(self.clone())))
     }
+    /// Await library initialization without blocking the UI during startup.
+    pub async fn open_library(&self, id: LibraryId) -> Result<LibraryClient, BackendError> {
+        if self.service.try_handle(&id).is_none() {
+            self.executor().with_io_context(self.service.open(&id)).await?;
+        }
+        self.library(id)
+    }
     pub async fn library_for_import(&self, selected: Option<LibraryId>) -> Result<LibraryClient, BackendError> {
         let explicitly_selected = selected.is_some();
         let id = match selected {
