@@ -5,7 +5,7 @@ use gpui::{Anchor, EventEmitter, TouchEvent, TouchId, TouchPhase, anchored, defe
 use gpui_component::menu::DropdownMenu as _;
 use std::rc::Rc;
 use ui_components::{
-    Button, FlexItem as _, PLAYER_DOCK_CAPTION_SIZE_REM, PLAYER_DOCK_COMPACT_ROW_HEIGHT_REM, PLAYER_DOCK_HEIGHT_REM, PLAYER_DOCK_TEXT_SIZE_REM, PlaybackTransportAction, SPACE_SM, TransportLayout, playback_secondary_button,
+    Button, FlexItem as _, PLAYER_DOCK_CAPTION_SIZE_REM, PLAYER_DOCK_HEIGHT_REM, PLAYER_DOCK_TEXT_SIZE_REM, PlaybackTransportAction, SPACE_SM, TransportLayout, playback_secondary_button,
 };
 
 mod gestures;
@@ -392,6 +392,30 @@ impl Render for AudiobookDock {
         let title = player.book.as_ref().map(|book| book.title.clone()).unwrap_or_else(|| text!(audiobook::opening_audiobook).into());
         let current_chapter = player.book.as_ref().and_then(|book| book.chapters.get(player.active_chapter_index())).map(|chapter| super::chapter_display_title(&chapter.title)).unwrap_or_else(|| text!(audiobook::no_chapter).into());
         let playing = player.transport_playing();
+        if compact && !self.inline {
+            let play = ui_components::playback_play_button("dock-play", playing, TransportLayout::MiniPlayer, theme).on_click(cx.listener(|dock, _, _, cx| {
+                cx.stop_propagation();
+                dock.toggle_playback(cx);
+            }));
+            return ui_components::bottom_bar(theme)
+                .id("audiobook-dock")
+                .debug_selector(|| "audiobook-dock".into())
+                .occlude()
+                .cursor_pointer()
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(DockAction::Expand)))
+                .on_scroll_wheel(cx.listener(|dock, event, _, cx| dock.handle_swipe(event, cx)))
+                .child(
+                    ui_components::row(0.0)
+                        .w_full()
+                        .h(rems(3.5))
+                        .px(rems(SPACE_SM / 16.0))
+                        .gap(rems(SPACE_SM / 16.0))
+                        .child(cover_box(cover, 3.0, theme))
+                        .child(ui_components::single_line(title).fill().text_size(rems(PLAYER_DOCK_TEXT_SIZE_REM)).line_height_auto())
+                        .child(play),
+                )
+                .into_any_element();
+        }
         let display_fraction = self.scrub.unwrap_or(progress_fraction);
         let display_position = self.scrub.map(|fraction| super::chapter_position_at_fraction(Duration::ZERO, chapter_duration, fraction)).unwrap_or(chapter_position);
         let sleep_label = player.sleep_label();
@@ -484,13 +508,11 @@ impl Render for AudiobookDock {
         let speed = speed.dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |menu, _, _| super::speed_menu(rate).dropdown(menu, set_rate.clone()));
         let tools = ui_components::player_dock_tools().id("audiobook-dock-tools").on_click(|_, _, cx| cx.stop_propagation()).child(sleep).child(speed).child(close);
 
-        let cover_size = if compact { PLAYER_DOCK_COMPACT_ROW_HEIGHT_REM } else { PLAYER_DOCK_HEIGHT_REM };
-        let leading = ui_components::row(0.0).gap(rems(SPACE_SM / 16.0)).h_full().min_w_0().flex_1().child(cover_box(cover, cover_size, theme)).child(book);
-        ui_components::player_dock(leading, transport, tools, compact, theme)
+        let leading = ui_components::row(0.0).gap(rems(SPACE_SM / 16.0)).h_full().min_w_0().flex_1().child(cover_box(cover, PLAYER_DOCK_HEIGHT_REM, theme)).child(book);
+        ui_components::player_dock(leading, transport, tools, false, theme)
             .id("audiobook-dock")
             .debug_selector(|| "audiobook-dock".into())
             .cursor_pointer()
-            .when(compact, |dock| dock.on_scroll_wheel(cx.listener(|dock, event, _, cx| dock.handle_swipe(event, cx))))
             .on_click(cx.listener(|_, _, _, cx| cx.emit(DockAction::Expand)))
             .child(scrub_track)
             .into_any_element()

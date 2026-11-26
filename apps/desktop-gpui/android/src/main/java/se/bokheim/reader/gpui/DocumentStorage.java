@@ -92,9 +92,15 @@ final class DocumentStorage {
         if ("com.android.externalstorage.documents".equals(tree.getAuthority())) {
             String id = DocumentsContract.getTreeDocumentId(tree);
             for (int i = 1; i < components.length; i++) id += (id.endsWith(":") ? "" : "/") + components[i];
-            document = DocumentsContract.buildDocumentUriUsingTree(tree, id);
-            stat(context.getContentResolver(), document);
-            return document;
+            Uri direct = DocumentsContract.buildDocumentUriUsingTree(tree, id);
+            try {
+                stat(context.getContentResolver(), direct);
+                return direct;
+            } catch (IllegalArgumentException invalid) {
+                // Some local providers reject a missing ID during their tree
+                // check. Listing its parents distinguishes absence from errors.
+                if (components.length == 1) throw invalid;
+            }
         }
         for (int i = 1; i < components.length; i++) document = child(context.getContentResolver(), tree, document, components[i]);
         return document;

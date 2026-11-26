@@ -206,7 +206,10 @@ impl AudioEngine {
         self.started.store(true, Ordering::Release);
         lock_state(sessions()).insert(self.id, self.session.clone());
         if let Err(error) = dispatch(load) {
-            lock_state(&self.session.status).error = Some(error);
+            let mut status = lock_state(&self.session.status);
+            status.error = Some(error);
+            status.requested = false;
+            drop(status);
             lock_state(sessions()).remove(&self.id);
             self.session.release.0.close();
         }
@@ -243,10 +246,22 @@ impl AudioEngine {
         lock_state(&self.session.status).buffering
     }
     pub fn toggle(&self) -> Result<(), PlaybackError> {
-        dispatch(json!({"command":"toggle", "id":self.id}))
+        let (sequence, playing) = {
+            let mut status = lock_state(&self.session.status);
+            status.sequence += 1;
+            status.requested = !status.requested;
+            (status.sequence, status.requested)
+        };
+        dispatch(json!({"command":"toggle", "id":self.id, "sequence":sequence, "playWhenReady":playing}))
     }
     pub fn pause(&self) -> Result<(), PlaybackError> {
-        dispatch(json!({"command":"pause", "id":self.id}))?;
+        let sequence = {
+            let mut status = lock_state(&self.session.status);
+            status.sequence += 1;
+            status.requested = false;
+            status.sequence
+        };
+        dispatch(json!({"command":"pause", "id":self.id, "sequence":sequence}))?;
         if let Some(control) = &self.session.control {
             control.set_paused(true);
         }
@@ -397,6 +412,7 @@ pub fn playback_state(event: &str) {
         }
         status.playing = false;
         status.buffering = false;
+        status.requested = false;
         session.release.0.close();
         lock_state(sessions()).remove(&id);
     }

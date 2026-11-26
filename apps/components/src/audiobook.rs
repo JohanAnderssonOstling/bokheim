@@ -61,6 +61,8 @@ pub enum TransportLayout {
     Player,
     /// A book's detail page.
     Inline,
+    /// The compact audiobook bar on phones.
+    MiniPlayer,
     /// The dock along the bottom of a window: audiobooks and narration.
     Dock,
 }
@@ -87,10 +89,10 @@ pub fn playback_transport_buttons(id: &str, playing: bool, layout: TransportLayo
     buttons
 }
 
-/// Play or pause uses the same accent-filled circle in every transport.
+/// Play or pause is a plain icon in the mini-player and filled elsewhere.
 pub fn playback_play_button(id: impl Into<ElementId>, playing: bool, layout: TransportLayout, theme: BrowserTheme) -> Button {
     let button = transport_button(id, if playing { text!(common::pause) } else { text!(common::play) }, play_pause_icon(playing), TransportControl::Play, layout, theme);
-    crate::selectable_button(button, true, theme)
+    if layout == TransportLayout::MiniPlayer { button.no_fill().text_color(theme.accent) } else { crate::selectable_button(button, true, theme) }
 }
 
 impl TransportControl {
@@ -101,10 +103,13 @@ impl TransportControl {
             (TransportControl::Skip, TransportLayout::Player) => (PLAYBACK_SECONDARY_SIZE_REM, 2.0),
             (TransportControl::Chapter | TransportControl::Skip, TransportLayout::Inline) => (PLAYBACK_SECONDARY_SIZE_REM, INLINE_GLYPH_REM),
             (TransportControl::Play, TransportLayout::Player | TransportLayout::Inline) => (4.5, 1.875),
+            (TransportControl::Chapter | TransportControl::Skip, TransportLayout::MiniPlayer) => (PLAYBACK_SECONDARY_SIZE_REM, INLINE_GLYPH_REM),
+            (TransportControl::Play, TransportLayout::MiniPlayer) => (3.0, 1.5),
             (TransportControl::Chapter | TransportControl::Skip, TransportLayout::Dock) => (PLAYBACK_SECONDARY_SIZE_REM, 1.25),
             (TransportControl::Play, TransportLayout::Dock) => (4.0, 2.0),
         };
         let (size, icon_size) = match (self, layout, touch_ui()) {
+            (Self::Play, TransportLayout::MiniPlayer, _) => (size, icon_size),
             (Self::Play, TransportLayout::Dock, false) => (DESKTOP_DOCK_PLAY_SIZE_REM, DESKTOP_DOCK_PLAY_ICON_SIZE_REM),
             (Self::Play, _, false) => (DESKTOP_PLAY_SIZE_REM, icon_size),
             _ => (size, icon_size),
@@ -202,7 +207,7 @@ pub fn now_playing_times(elapsed: impl Into<SharedString>, remaining: impl Into<
 
 /// The phone's main controls, close beneath the progress bar.
 pub fn now_playing_transport() -> Div {
-    crate::row(0.0).w_full().flex_none().justify_evenly().mt(px(SPACE_XXS))
+    crate::row(0.0).w_full().flex_none().justify_between().mt(px(SPACE_XXS))
 }
 
 /// One transport control; `playback_play_button` supplies play's accent.
@@ -217,14 +222,14 @@ fn transport_button(id: impl Into<ElementId>, label: impl Into<SharedString>, ic
     let icon = icon.into().size(rems(icon_size)).flex_none();
     let button = crate::base_button(id).ghost().when_some(color, |button, color| button.text_color(color)).p_0().flex_none().size(rems(size)).tooltip(label).child(icon);
     match control {
-        TransportControl::Play => button.rounded_full().when(!touch_ui(), |button| button.min_w(px(DESKTOP_PLAY_MIN_SIZE_PX)).min_h(px(DESKTOP_PLAY_MIN_SIZE_PX)).max_w(px(DESKTOP_PLAY_MAX_SIZE_PX)).max_h(px(DESKTOP_PLAY_MAX_SIZE_PX))),
+        TransportControl::Play if layout != TransportLayout::MiniPlayer => button.rounded_full().when(!touch_ui(), |button| button.min_w(px(DESKTOP_PLAY_MIN_SIZE_PX)).min_h(px(DESKTOP_PLAY_MIN_SIZE_PX)).max_w(px(DESKTOP_PLAY_MAX_SIZE_PX)).max_h(px(DESKTOP_PLAY_MAX_SIZE_PX))),
         _ => button,
     }
 }
 
 /// Spread across the bottom of the phone's player.
 pub fn now_playing_tools() -> Div {
-    crate::row(0.0).w_full().flex_none().justify_evenly().mt(px(SPACE_LG))
+    crate::row(0.0).w_full().flex_none().justify_between().mt(px(SPACE_LG))
 }
 
 /// Shared playback tool: normal text by default, accent for a changed speed
