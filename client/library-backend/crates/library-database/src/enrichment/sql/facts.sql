@@ -24,11 +24,13 @@ ORDER BY candidate_index, filename_rank;
 -- name: facts_candidates?
 -- param: now: i64
 -- param: after: Option<&BookId>
+-- param: excluded: &str
 SELECT b.content_hash, b.format, record.body
 FROM book b
 JOIN sync_state_version record ON record.state_key=b.content_hash AND record.state_kind='book_add' AND record.state_subkey='' AND record.body IS NOT NULL
 JOIN book_transfer transfer ON transfer.content_hash=b.content_hash
 WHERE b.deleted_at IS NULL AND transfer.enrichment_retry_at <= :now AND b.content_hash>COALESCE(:after,x'')
+  AND b.content_hash NOT IN (SELECT unhex(value) FROM json_each(:excluded))
 ORDER BY b.content_hash LIMIT 256;
 
 -- name: facts_next_retry ->

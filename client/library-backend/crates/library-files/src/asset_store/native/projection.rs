@@ -18,7 +18,6 @@ pub(crate) fn readable_path(handle: &Handle, name: String) -> Result<Option<Path
     if fs::is_file(&path) {
         return Ok(Some(path));
     }
-    root_available(handle);
     Ok(None)
 }
 
@@ -37,10 +36,11 @@ pub(crate) fn book_eviction_files(path: &Path) -> Result<Vec<PathBuf>, AssetStor
     if !metadata.is_dir() {
         return Ok(Vec::new());
     }
-    let mut files = audiobook_folder::discover(path)?.into_iter().map(|track| track.path).collect::<Vec<_>>();
-    files.extend([audiobook_folder::discover_nfo(path)?, audiobook_folder::discover_cue(path)?, audiobook_folder::discover_cover(path)?].into_iter().flatten().map(|sidecar| sidecar.path));
+    let mut inventory = audiobook_folder::FolderInventory::read(path)?;
+    let mut files = inventory.tracks()?.into_iter().map(|track| track.path).collect::<Vec<_>>();
+    files.extend([inventory.nfo()?, inventory.cue()?, inventory.cover()?].into_iter().flatten().map(|sidecar| sidecar.path));
     let mapping = path.join(audiobook_folder::PATH_MAPPING_FILE);
-    if fs::try_exists(&mapping)? {
+    if inventory.has_mapping() {
         files.push(mapping);
     }
     Ok(files)

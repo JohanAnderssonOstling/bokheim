@@ -171,6 +171,8 @@ mod tests {
 /// The resulting file location and fingerprint after staged bytes are published.
 #[derive(Clone, Debug)]
 pub struct PublishedStagedBook {
+    /// Observed bytes on disk, independent of canonical archive/transfer size.
+    pub physical_size_bytes: Option<u64>,
     pub name: String,
     pub relative_path: String,
     pub published: bool,

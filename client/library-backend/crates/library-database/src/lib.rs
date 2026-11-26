@@ -35,7 +35,7 @@ mod taxonomy_update;
 mod transactions;
 pub mod transfer;
 
-pub const LIBRARY_SCHEMA_VERSION: i64 = 63;
+pub const LIBRARY_SCHEMA_VERSION: i64 = 64;
 
 pub use client_platform_runtime::executor;
 pub use client_platform_runtime::storage_queue;
@@ -145,7 +145,6 @@ fn attach_taxonomy(connection: &rusqlite::Connection) -> Result<(), DatabaseErro
 pub struct Database {
     pub(crate) connection: rusqlite::Connection,
     path: PathBuf,
-    subject_trees: RefCell<browse::subjects::tree::SubjectTrees>,
     browse_results: RefCell<browse::result::BrowseResults>,
     browse_facets: RefCell<browse::facets::Facets>,
     text_index_usage: RefCell<Option<(i64, u64)>>,
@@ -234,6 +233,13 @@ impl Database {
             }
             if version < 62 {
                 migration::upgrade_optional_enrichment(&transaction)?;
+            }
+            if version < 64 {
+                let has_size: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_file_projection') WHERE name='physical_size_bytes')", [], |row| row.get(0))?;
+                if !has_size {
+                    transaction.execute_batch("ALTER TABLE local_file_projection ADD COLUMN physical_size_bytes INTEGER CHECK(physical_size_bytes IS NULL OR physical_size_bytes>=0);")?;
+                }
+                transaction.execute("UPDATE local_file_projection SET physical_size_bytes=(SELECT bd.size_bytes FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE b.content_hash=local_file_projection.content_hash AND bd.dir_id=local_file_projection.dir_id AND bd.is_downloaded=1 AND b.format!=?1)", [BookFormat::Mp3Folder as i64])?;
             }
             if version != VERSION {
                 transaction.pragma_update(None, "user_version", VERSION)?;
@@ -363,7 +369,7 @@ impl Database {
         let path = path.as_ref().to_path_buf();
         let connection = device_sqlite::open(&path, device_sqlite::OpenOptions::new()).map_err(DatabaseError::operation)?;
         configure_library_connection(&connection).map_err(DatabaseError::operation)?;
-        Ok(Self { connection, path, subject_trees: Default::default(), browse_results: Default::default(), browse_facets: Default::default(), text_index_usage: Default::default() })
+        Ok(Self { connection, path, browse_results: Default::default(), browse_facets: Default::default(), text_index_usage: Default::default() })
     }
 
     /// Filesystem location of this library, so detached transfer drivers can

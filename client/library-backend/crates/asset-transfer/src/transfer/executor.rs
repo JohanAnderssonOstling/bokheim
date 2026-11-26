@@ -348,7 +348,7 @@ mod failure_tests {
                 size_bytes: 4,
                 inspection_version: 1,
                 inspection: Some(InspectedBook { pdf: None, audiobook: None, metadata: BookRecord { metadata: BookDetails { title: "Remote book".into(), ..Default::default() }, description: String::new() }, toc: vec![] }),
-                published: PublishedStagedBook { name: "book.epub".into(), relative_path: "/book.epub".into(), published: false, fingerprint: None },
+                published: PublishedStagedBook { physical_size_bytes: None, name: "book.epub".into(), relative_path: "/book.epub".into(), published: false, fingerprint: None },
                 request_thumbnail: false,
                 restore_paths: vec![],
             })
@@ -357,7 +357,7 @@ mod failure_tests {
         database.record_remote_asset(BlobKind::Book, &hash).await.unwrap();
         database.sync_request_book_downloads(&[hash], origin).await.unwrap();
         let (events, state) = LibraryEventRouter::new();
-        let placement = Arc::new(tokio::sync::RwLock::new(LibraryState::new(database.clone(), AssetStore::open(root.path().to_str().unwrap()).unwrap(), events)));
+        let placement = Arc::new(tokio::sync::RwLock::new(LibraryState::new(database.clone(), AssetStore::open(root.path().to_str().unwrap(), &root.path().join(".bokheim/private-assets")).unwrap(), events)));
         let executor = AssetExecutor::new(
             placement.clone(),
             database,

@@ -366,11 +366,12 @@ fn metadata_url() -> Result<Url, String> {
 /// found the book: only then do the record's authors carry its identities.
 fn enrich(http: &Client, record: BookRecord, file_name: &str, needs_cover: bool) -> Result<(BookRecord, Option<String>, bool), String> {
     let _timing = timing::measure("metadata_enrich", file_name);
-    // The file's own description always wins, so the server needs none.
+    // Keep the file's description local; request one only when it is missing.
     let mut facts = record.clone();
     facts.description.clear();
+    let needs_description = record.description.trim().is_empty();
     let readings = book_inspection::title_readings(&record, &[file_name.to_owned()]);
-    let body = serde_json::to_vec(&BookEnrichmentRequest { books: vec![BookFacts { key: String::new(), record: facts, audiobook: false, needs_cover, readings, recording: None }] }).map_err(|e| e.to_string())?;
+    let body = serde_json::to_vec(&BookEnrichmentRequest { books: vec![BookFacts { key: String::new(), record: facts, needs_description, audiobook: false, needs_cover, readings, recording: None }] }).map_err(|e| e.to_string())?;
     let url = metadata_url()?.join("v3/books").map_err(|e| e.to_string())?;
     let response = http.post(url.clone()).header(reqwest::header::CONTENT_TYPE, "application/json").body(body).send().and_then(|r| r.error_for_status()).map_err(|error| IngestError::Fetch { url: url.clone(), error })?;
     let response: BookEnrichmentResponse = serde_json::from_slice(&response.bytes().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -387,7 +388,7 @@ fn enrichment_result(record: BookRecord, file_name: &str, answer: BookEnrichment
         (BookEnrichmentStatus::Failed, _) => Err(answer.detail),
         (BookEnrichmentStatus::Found, Some(mut found)) => {
             manifest::SourceMetadata::from_record(&record).retain_evidence(&mut found);
-            if !record.description.is_empty() {
+            if !record.description.trim().is_empty() {
                 found.description = record.description;
             }
             Ok((found, answer.cover.map(|cover| cover.id), true))

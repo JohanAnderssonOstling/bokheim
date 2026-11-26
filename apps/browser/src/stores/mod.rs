@@ -3,6 +3,6 @@
 pub(crate) mod preferences;
 
 pub(crate) use preferences::{
-    BookListViewSetting, CoverTextSetting, GeneratedCoversOnly, Preferences, current_book_list_view, current_catalog_grouping, current_catalog_languages, current_cover_text, generated_covers_only, save_book_list_view,
-    save_catalog_grouping, save_catalog_languages,
+    BrowseViewSetting, CoverTextSetting, GeneratedCoversOnly, Preferences, current_book_list_view, current_catalog_grouping, current_catalog_languages, current_cover_text, current_graph_view, generated_covers_only, save_book_list_view,
+    save_catalog_grouping, save_catalog_languages, save_graph_view,
 };

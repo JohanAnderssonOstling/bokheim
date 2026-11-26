@@ -9,7 +9,7 @@ pub(crate) mod updates;
 pub use updates::bind_worker as bind_update_worker;
 pub use updates::{PublishUpdate, UpdateAction, UpdateActionHandler, UpdateControls, UpdateEvent, UpdateView};
 mod format;
-pub(crate) use format::format_storage_bytes;
+pub(crate) use format::{download_byte_progress, format_storage_bytes};
 pub(crate) mod library_removal;
 pub use library_removal::{LibraryRemovalHook, LibraryRemovalPreparation, LibraryRemovalService, library_is_being_removed};
 mod book_transfer_error;

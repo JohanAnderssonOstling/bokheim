@@ -51,8 +51,8 @@ impl BrowseOptionsSelection {
     /// it changed anything. A choice the controls do not offer is ignored.
     pub(crate) fn apply(&mut self, event: BrowseOptionsEvent, controls: &BrowseControls) -> bool {
         match event {
-            BrowseOptionsEvent::SelectChipSort(sort) => controls.collection_sorts.contains(&sort) && std::mem::replace(&mut self.chip_sort, sort) != sort,
-            BrowseOptionsEvent::SelectBookSort(sort) => controls.book_sorts.contains(&sort) && std::mem::replace(&mut self.book_sort, sort) != sort,
+            BrowseOptionsEvent::SelectChipSort(sort) => controls.collection_menu_sorts().any(|offered| offered == sort) && std::mem::replace(&mut self.chip_sort, sort) != sort,
+            BrowseOptionsEvent::SelectBookSort(sort) => controls.book_menu_sorts().any(|offered| offered == sort) && std::mem::replace(&mut self.book_sort, sort) != sort,
             BrowseOptionsEvent::SelectTableSort(sort) => {
                 if !controls.book_sorts.contains(&sort) {
                     return false;
@@ -138,6 +138,7 @@ pub(crate) struct BrowseControls {
     pub(crate) hide_finished: bool,
     /// The catalog offers to group its books by subject or by author.
     pub(crate) groupings: bool,
+    /// Supported ordering, including the additional table-column directions.
     pub(crate) collection_sorts: Vec<BrowseChipSort>,
     pub(crate) book_sorts: Vec<BrowseBookSort>,
     formats: Vec<Facet<LibraryFileTypeFilter>>,
@@ -145,6 +146,15 @@ pub(crate) struct BrowseControls {
 }
 
 impl BrowseControls {
+    /// Menu choices stay independent of the ordering supported by table columns.
+    fn book_menu_sorts(&self) -> impl Iterator<Item = BrowseBookSort> + '_ {
+        self.book_sorts.iter().copied().filter(|sort| matches!(sort, BrowseBookSort::DefaultOrder | BrowseBookSort::Alphabetical | BrowseBookSort::RecentlyRead))
+    }
+
+    fn collection_menu_sorts(&self) -> impl Iterator<Item = BrowseChipSort> + '_ {
+        self.collection_sorts.iter().copied().filter(|sort| matches!(sort, BrowseChipSort::DefaultOrder | BrowseChipSort::Alphabetical | BrowseChipSort::BookCount))
+    }
+
     pub(crate) fn library() -> Self {
         Self { hide_finished: true, groupings: false, collection_sorts: BrowseChipSort::ALL.to_vec(), book_sorts: BrowseBookSort::ALL.to_vec(), formats: Vec::new(), languages: Vec::new() }
     }
@@ -160,11 +170,12 @@ impl BrowseControls {
 /// on wide pointer-driven windows. Compact windows and touch targets use
 /// `browse_options_sheet` below.
 /// `menu_anchor` is the menu's corner at the trigger.
-pub(super) fn browse_options_control(page: Entity<BrowsePage>, selection: &BrowseOptionsSelection, compact: bool, menu_anchor: Anchor, theme: components::BrowserTheme) -> AnyElement {
+pub(super) fn browse_options_control(page: Entity<BrowsePage>, selection: &BrowseOptionsSelection, sorting_in_headers: bool, compact: bool, menu_anchor: Anchor, theme: components::BrowserTheme) -> AnyElement {
     // A filter narrowing the books is state the page holds, so the trigger
     // takes the solid accent while one is on — the same mark as an open search.
     let filtered = selection.is_filtered();
-    let trigger = components::selectable_button(components::outlined_icon_button("browse-options", text!(browse::sort_filter), IconName::Settings2), filtered, theme);
+    let title = options_title(sorting_in_headers);
+    let trigger = components::selectable_button(components::outlined_icon_button("browse-options", title, IconName::Settings2), filtered, theme);
 
     if compact || components::touch_ui() || cfg!(feature = "kobo") {
         return trigger.on_click(move |_, _, cx| page.update(cx, |page, cx| page.toggle_browse_options_sheet(cx))).into_any_element();
@@ -183,7 +194,11 @@ pub(super) fn browse_language_control(page: Entity<BrowsePage>, controls: &Brows
 
 fn options_menu(menu: PopupMenu, page: Entity<BrowsePage>, languages_only: bool, cx: &mut Context<PopupMenu>) -> PopupMenu {
     let (controls, selection) = page.read(cx).options_state(cx);
-    let sections = if languages_only { vec![OptionSection { divided: false, title: Some(text!(browse::languages).into()), options: controls.language_options(&selection) }] } else { controls.options(&selection) };
+    let sections = if languages_only {
+        vec![OptionSection { divided: false, title: Some(text!(browse::languages).into()), options: controls.language_options(&selection) }]
+    } else {
+        controls.visible_options(&selection, page.read(cx).sorting_in_headers(cx))
+    };
     let mut menu = menu.scrollable(true).dismiss_on_select(false);
     for section in sections {
         if section.divided {
@@ -219,10 +234,10 @@ fn options_menu(menu: PopupMenu, page: Entity<BrowsePage>, languages_only: bool,
 /// sections, events, and read of `controls`/`selection`, laid out as full-width
 /// rows in a bottom sheet instead of a small anchored popup, since the popup
 /// menu widget used above has no bottom-sheet mode of its own.
-pub(super) fn browse_options_sheet(page: Entity<BrowsePage>, controls: BrowseControls, selection: BrowseOptionsSelection, theme: components::BrowserTheme) -> AnyElement {
+pub(super) fn browse_options_sheet(page: Entity<BrowsePage>, controls: BrowseControls, selection: BrowseOptionsSelection, sorting_in_headers: bool, theme: components::BrowserTheme) -> AnyElement {
     let mut rows = div().flex().flex_col();
 
-    for section in controls.options(&selection) {
+    for section in controls.visible_options(&selection, sorting_in_headers) {
         if section.divided {
             rows = rows.child(components::bottom_sheet_divider(theme));
         }
@@ -239,12 +254,16 @@ pub(super) fn browse_options_sheet(page: Entity<BrowsePage>, controls: BrowseCon
     }
 
     let header_dismiss_target = page.clone();
-    let header = components::bottom_sheet_header(text!(browse::sort_filter), theme)
+    let header = components::bottom_sheet_header(options_title(sorting_in_headers), theme)
         .child(components::bottom_sheet_close_button("browse-options-sheet-close", theme).on_click(move |_, _, cx| header_dismiss_target.update(cx, |page, cx| page.close_browse_options_sheet(cx))));
 
     let sheet = components::bottom_sheet_surface(theme).id("browse-options-sheet").child(header).child(div().id("browse-options-sheet-rows").flex_1().min_h_0().overflow_y_scroll().child(rows));
 
     components::bottom_sheet_overlay().child(components::modal_scrim("browse-options-sheet-scrim", theme).on_click(move |_, _, cx| page.update(cx, |page, cx| page.close_browse_options_sheet(cx)))).child(sheet).into_any_element()
+}
+
+fn options_title(sorting_in_headers: bool) -> &'static str {
+    if sorting_in_headers { text!(browse::filters) } else { text!(browse::sort_filter) }
 }
 
 /// Choices are data shared by desktop menus and mobile sheets, not operations.
@@ -263,18 +282,29 @@ struct OptionSection {
 }
 
 impl BrowseControls {
+    fn visible_options(&self, selection: &BrowseOptionsSelection, sorting_in_headers: bool) -> Vec<OptionSection> {
+        let mut sections = self.options(selection);
+        if sorting_in_headers {
+            sections.retain(|section| section.options.iter().all(|option| !matches!(&option.event, BrowseOptionsEvent::SelectBookSort(_) | BrowseOptionsEvent::SelectChipSort(_))));
+        }
+        if let Some(first) = sections.first_mut() {
+            first.divided = false;
+        }
+        sections
+    }
+
     fn options(&self, selection: &BrowseOptionsSelection) -> Vec<OptionSection> {
         use BrowseOptionsEvent::*;
         // The grouping comes first: it decides what the rest sorts and filters.
         [
             (Some(text!(browse::show_by)), if self.groupings { vec![ShowByAuthor(false), ShowByAuthor(true)] } else { Vec::new() }),
-            (Some(text!(browse::sort_books)), self.book_sorts.iter().copied().map(SelectBookSort).collect::<Vec<_>>()),
-            (Some(text!(browse::sort_collections)), self.collection_sorts.iter().copied().map(SelectChipSort).collect()),
+            (Some(text!(browse::sort_books)), self.book_menu_sorts().map(SelectBookSort).collect::<Vec<_>>()),
+            (Some(text!(browse::sort_collections)), self.collection_menu_sorts().map(SelectChipSort).collect()),
             (Some(text!(browse::format)), facet_events(&self.formats, &selection.formats, ToggleFormat)),
             (None, self.hide_finished.then_some(ToggleHideFinished).into_iter().collect()),
         ]
         .into_iter()
-        .filter(|(_, events)| !events.is_empty())
+        .filter(|(_, events)| !matches!(events.as_slice(), [] | [SelectBookSort(_) | SelectChipSort(_)]))
         .enumerate()
         .map(|(index, (title, events))| OptionSection {
             divided: index > 0 || !matches!(title, Some(text!(browse::show_by) | text!(browse::sort_books))),

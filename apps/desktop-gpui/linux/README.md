@@ -68,6 +68,22 @@ mounting. The optional browser still needs the system WebKitGTK runtime
 described below. Installation extracts only the menu icon and does not open a
 GUI window or require FUSE.
 
+## Local desktop development
+
+Use `release-dev` for local rebuilding and launching. It inherits release
+optimization, disables LTO, and enables incremental compilation with 16 codegen
+units. Published releases continue to use the full-LTO `release` profile.
+After preparing the Linux SDK as described below:
+
+```sh
+source .tmp/desktop-sdk-env.sh
+python3 scripts/ci/build-native.py cargo desktop-app --profile release-dev
+```
+
+The executable is `target/release-dev/bokheim` unless `CARGO_TARGET_DIR` is set.
+Stage PDFium, speech assets and the optional browser beside it as for `release`;
+these resources can be reused between local builds.
+
 ## AppImage
 
 Linux desktop and Kobo installer releases target glibc 2.17. The main app,

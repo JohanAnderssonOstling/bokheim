@@ -1,4 +1,4 @@
-//! The ISBN key shared by snapshot, provider, and crawl tables.
+//! The ISBN key shared by snapshot and archived provider tables.
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use std::fmt;
 
@@ -13,8 +13,7 @@ impl Isbn13 {
         let compact = value.bytes().filter(|byte| byte.is_ascii_digit() || matches!(byte, b'X' | b'x')).collect::<Vec<_>>();
         match compact.len() {
             10 => {
-                let valid = compact[..9].iter().all(u8::is_ascii_digit)
-                    && compact.iter().enumerate().map(|(index, byte)| (10 - index as u32) * if byte.is_ascii_digit() { u32::from(byte - b'0') } else { 10 }).sum::<u32>() % 11 == 0;
+                let valid = compact[..9].iter().all(u8::is_ascii_digit) && compact.iter().enumerate().map(|(index, byte)| (10 - index as u32) * if byte.is_ascii_digit() { u32::from(byte - b'0') } else { 10 }).sum::<u32>() % 11 == 0;
                 let first_twelve = 978_000_000_000 + digits(&compact[..9]);
                 valid.then(|| Self(first_twelve * 10 + check_digit(first_twelve)))
             }
@@ -25,17 +24,6 @@ impl Isbn13 {
 
     fn from_digits(value: i64) -> Option<Self> {
         ((0..10_000_000_000_000).contains(&value) && check_digit(value / 10) == value % 10).then_some(Self(value))
-    }
-
-    /// The ISBN-10 of a 978-prefixed ISBN.
-    pub(crate) fn to_isbn10(self) -> Option<String> {
-        if self.0 / 10_000_000_000 != 978 {
-            return None;
-        }
-        let body = format!("{:09}", self.0 / 10 % 1_000_000_000);
-        let sum = body.bytes().enumerate().map(|(index, byte)| u32::from(byte - b'0') * (10 - index as u32)).sum::<u32>();
-        let check = (11 - sum % 11) % 11;
-        Some(format!("{body}{}", if check == 10 { 'X' } else { char::from(b'0' + check as u8) }))
     }
 }
 

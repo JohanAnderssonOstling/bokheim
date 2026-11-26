@@ -34,7 +34,7 @@ fn archive(mode: &str, root: &Path) -> Result<()> {
 }
 
 async fn review(mode: &str, root: &Path, count: usize) -> Result<()> {
-    let store = AssetStore::open(root.to_str().unwrap())?;
+    let store = AssetStore::open(root.to_str().unwrap(), &root.join(".bokheim/private-assets"))?;
     let mut hasher = blake3::Hasher::new();
     hasher.update_reader(File::open(root.join("book-0.epub"))?)?;
     let hash = BookId::from(hasher.finalize());

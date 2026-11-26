@@ -33,6 +33,8 @@ pub struct LibraryOpenOptions {
     pub id: LibraryId,
     pub root: String,
     pub database_locator: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub assets_locator: String,
     pub default_sync_server_url: Url,
     pub metadata_server_url: String,
     pub storage: LibraryStorage,
@@ -81,7 +83,7 @@ pub(crate) struct LibraryResources {
 
 impl LibraryResources {
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) async fn open_assets(root: String, database: &DatabaseClient) -> Result<AssetStore, BackendError> {
+    pub(super) async fn open_assets(root: String, assets_locator: String, database: &DatabaseClient) -> Result<AssetStore, BackendError> {
         use client_platform_runtime::filesystem as fs;
         use content_address::hash_file;
         use library_files::import_move::recover_import_moves;
@@ -100,7 +102,7 @@ impl LibraryResources {
                 for error in unresolved {
                     log::warn!("interrupted import move needs recovery: {error}");
                 }
-                AssetStore::open(&root).map_err(DatabaseError::operation)
+                AssetStore::open(&root, Path::new(&assets_locator)).map_err(DatabaseError::operation)
             })
             .await?)
     }
@@ -120,7 +122,7 @@ impl LibraryResources {
         let database = DatabaseClient::open(&options.database_locator, executor).await?;
         let cpu = options.cpu;
         #[cfg(not(target_arch = "wasm32"))]
-        let assets = Self::open_assets(options.root.clone(), &database).await?;
+        let assets = Self::open_assets(options.root.clone(), options.assets_locator.clone(), &database).await?;
         #[cfg(target_arch = "wasm32")]
         let assets = crate::asset_store::open(&options.root, cpu.clone()).map_err(BackendError::operation)?;
         // `DatabaseClient::open` already configured the connection (pragmas, sync

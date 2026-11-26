@@ -442,6 +442,7 @@ impl TableDelegate for BookTable {
         div()
             .id(("book-table-row", index))
             .relative()
+            .when(item.is_some(), |row| row.cursor_pointer())
             .when(selected, |row| row.bg(theme.accent_wash))
             .when(self.cursor == Some(index), |row| row.child(div().absolute().inset_0().border_1().border_color(theme.accent)))
             .on_mouse_down(MouseButton::Right, move |event, window, cx| {
@@ -579,17 +580,7 @@ impl TableDelegate for BookTable {
                 _ => String::new(),
             },
         };
-        div()
-            .w_full()
-            .min_w_0()
-            .text_size(rems(components::TEXT_SM))
-            .text_color(theme.text_muted)
-            .whitespace_normal()
-            .when(field == Field::Size, |cell| cell.text_right().whitespace_nowrap())
-            .line_clamp(2)
-            .text_ellipsis()
-            .child(value)
-            .into_any_element()
+        div().w_full().min_w_0().text_size(rems(components::TEXT_SM)).text_color(theme.text_muted).whitespace_normal().when(field == Field::Size, |cell| cell.whitespace_nowrap()).line_clamp(2).text_ellipsis().child(value).into_any_element()
     }
 }
 

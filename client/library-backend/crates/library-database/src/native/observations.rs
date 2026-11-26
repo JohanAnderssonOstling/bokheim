@@ -44,6 +44,13 @@ pub(crate) fn record_file(connection: &Connection, directory: &str, hash: &BookI
     Ok(())
 }
 
+pub(crate) fn record_physical_size(connection: &Connection, hash: &BookId, directory: &str, size: Option<u64>) -> Result<(), DatabaseError> {
+    if let Some(size) = size {
+        connection.execute("UPDATE local_file_projection SET physical_size_bytes=?3 WHERE content_hash=?1 AND dir_id=?2", rusqlite::params![hash, directory, i64::try_from(size).map_err(DatabaseError::operation)?])?;
+    }
+    Ok(())
+}
+
 /// Forget one observed file without changing synchronized membership.
 pub(crate) fn forget_file(connection: &Connection, directory: &str, hash: &BookId) -> Result<(), DatabaseError> {
     connection.observations_mark_missing(&directory, &(&hash))?;

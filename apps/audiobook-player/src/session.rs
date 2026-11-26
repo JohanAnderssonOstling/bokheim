@@ -292,6 +292,10 @@ impl PlaybackSession {
     }
 
     pub(super) fn transport_playing(&self) -> bool {
+        #[cfg(target_os = "android")]
+        if let Some(audio) = &self.audio {
+            return audio.playback_requested();
+        }
         self.is_playing() || self.is_buffering() || (self.source_pending && self.playback_requested)
     }
 
@@ -865,7 +869,7 @@ impl PlaybackSession {
     /// only when this changes, so ticks that would redraw identical pixels
     /// draw nothing.
     fn shown_state(&self) -> ShownState {
-        (shown_position(self.position), self.observed_playing, self.observed_buffering, self.rate, self.sleep_label())
+        (shown_position(self.position), self.transport_playing(), self.observed_buffering, self.rate, self.sleep_label())
     }
 
     pub(super) fn refresh_playback_state(&mut self) -> bool {
@@ -889,6 +893,11 @@ impl PlaybackSession {
                 control.set_paused(true);
             }
         }
+        #[cfg(target_os = "android")]
+        if let Some(audio) = &self.audio {
+            self.playback_requested = audio.playback_requested();
+        }
+        #[cfg(not(target_os = "android"))]
         if self.observed_playing && !playing && !self.is_buffering() {
             self.playback_requested = false;
             #[cfg(not(target_arch = "wasm32"))]
@@ -1023,7 +1032,14 @@ impl PlaybackSession {
         };
         match audio.toggle() {
             Ok(()) => {
-                self.playback_requested = audio.is_playing() || audio.is_buffering();
+                #[cfg(target_os = "android")]
+                {
+                    self.playback_requested = audio.playback_requested();
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    self.playback_requested = audio.is_playing() || audio.is_buffering();
+                }
                 self.error = None;
                 self.persist_position(true);
             }

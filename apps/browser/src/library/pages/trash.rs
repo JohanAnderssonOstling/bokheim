@@ -481,13 +481,13 @@ impl TrashPage {
             TrashItem::Folder(_) => components::trash_folder_thumbnail(theme),
             TrashItem::Book(book) => components::trash_book_thumbnail(self.render_cover(book.book_id, theme)),
         };
-        let restore = components::topbar_action_button(format!("trash-restore-{key}"), text!(browse::restore), IconName::Undo2, theme).debug_selector(move || format!("trash-restore-{key}")).disabled(self.ui.files_busy(cx)).on_click({
+        let restore = components::action_button(format!("trash-restore-{key}"), text!(browse::restore)).icon(IconName::Undo2).debug_selector(move || format!("trash-restore-{key}")).disabled(self.ui.files_busy(cx)).on_click({
             let page = page.clone();
             move |_, _, cx| {
                 let _ = page.update(cx, |page, cx| page.restore(vec![key], cx));
             }
         });
-        let delete = components::delete_icon_button(format!("trash-delete-{key}"), text!(browse::delete_permanently_action), theme).disabled(self.ui.files_busy(cx)).on_click(move |_, window, cx| {
+        let delete = components::delete_icon_button(format!("trash-delete-{key}"), text!(browse::delete_permanently_action)).disabled(self.ui.files_busy(cx)).on_click(move |_, window, cx| {
             let _ = page.update(cx, |page, cx| page.confirm_purge(vec![key], false, window, cx));
         });
         components::row(components::SPACE_MD)
@@ -509,7 +509,7 @@ impl TrashPage {
     fn render_group(&self, index: usize, theme: components::BrowserTheme, target: &Entity<Self>) -> Div {
         let all_selected = self.group_keys(index).iter().all(|key| self.selection.contains(key));
         let page = target.downgrade();
-        let toggle = components::browser_settings_header_button(format!("trash-select-group-{index}"), if all_selected { text!(browse::clear_selection) } else { text!(browse::select_all) }, false, theme)
+        let toggle = components::action_button(format!("trash-select-group-{index}"), if all_selected { text!(browse::clear_selection) } else { text!(browse::select_all) })
             .debug_selector(move || format!("trash-select-group-{index}"))
             .on_click(move |_, _, cx| {
                 let _ = page.update(cx, |page, cx| {
@@ -540,13 +540,13 @@ impl TrashPage {
                 });
             }
         });
-        let restore = components::topbar_action_button("trash-restore-selection", text!(browse::restore), IconName::Undo2, theme).disabled(self.ui.files_busy(cx)).on_click({
+        let restore = components::action_button("trash-restore-selection", text!(browse::restore)).icon(IconName::Undo2).disabled(self.ui.files_busy(cx)).on_click({
             let page = page.clone();
             move |_, _, cx| {
                 let _ = page.update(cx, |page, cx| page.restore(page.selected_keys(), cx));
             }
         });
-        let delete = components::topbar_danger_button("trash-delete-selection", text!(browse::delete_permanently_action), IconName::Delete, theme).disabled(self.ui.files_busy(cx)).on_click(move |_, window, cx| {
+        let delete = components::action_button("trash-delete-selection", text!(browse::delete_permanently_action)).icon(IconName::Delete).danger().disabled(self.ui.files_busy(cx)).on_click(move |_, window, cx| {
             let _ = page.update(cx, |page, cx| page.confirm_purge(page.selected_keys(), false, window, cx));
         });
         Some(components::selection_bar(format!(text!(browse::selected), count_label(self.selection.iter().copied())), components::row(components::SPACE_SM).child(clear).child(restore).child(delete), theme))
@@ -642,7 +642,7 @@ impl Render for TrashPage {
         };
         let search = has_items.then(|| components::browser_search_control(self.search_input(window, cx)));
         let empty_trash = has_items.then(|| {
-            components::topbar_danger_button("empty-trash", text!(browse::empty_trash_action), IconName::Delete, theme).disabled(self.ui.files_busy(cx)).on_click(move |_, window, cx| {
+            components::action_button("empty-trash", text!(browse::empty_trash_action)).icon(IconName::Delete).danger().disabled(self.ui.files_busy(cx)).on_click(move |_, window, cx| {
                 let _ = page.update(cx, |page, cx| page.confirm_purge(page.all_keys(), true, window, cx));
             })
         });
@@ -654,7 +654,7 @@ impl Render for TrashPage {
             Some(_) => div().size_full().min_h_0().flex().justify_center().child(self.render_list(theme, now, &cx.entity(), window, cx)).into_any_element(),
         };
         let page = cx.weak_entity();
-        let body = with_retry_banner(body, self.error.clone(), "retry-section", theme, move |_, _, cx| {
+        let body = with_retry_banner(body, self.error.clone(), "retry-section", move |_, _, cx| {
             let _ = page.update(cx, |page, cx| page.refresh(cx));
         });
         components::library_section_content()

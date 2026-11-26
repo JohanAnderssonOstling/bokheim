@@ -1,53 +1,45 @@
 //! The tree a graph draws.
 
-/// Nodes by index: node 0 is the root, and every other node names its parent.
-/// Children keep the order the caller lists them in. Construction validates
-/// that every node reaches the root; callers cannot mutate the topology.
+use std::ops::Range;
+
+/// Breadth-first nodes: node zero is the root, and every other node names an
+/// earlier parent. Each parent's children form one consecutive group.
 pub struct GraphTree {
     pub(super) parents: Vec<Option<usize>>,
-    pub(super) children: Vec<Vec<usize>>,
+    first_child: Vec<usize>,
 }
 
 impl GraphTree {
-    /// Rejects empty trees, invalid parent indices, extra roots, and cycles.
+    /// Rejects empty trees, extra roots and parents outside breadth-first order.
     pub fn new(parents: Vec<Option<usize>>) -> Result<Self, &'static str> {
         if parents.first() != Some(&None) {
             return Err("Graph must have a root at index zero");
         }
-        for parent in parents.iter().skip(1) {
-            let Some(parent) = parent else { return Err("Each non-root graph node must have a parent") };
-            if *parent >= parents.len() {
-                return Err("Graph parent index is out of bounds");
+        let mut first_child = vec![0; parents.len()];
+        let mut previous = 0;
+        for (node, parent) in parents.iter().enumerate().skip(1) {
+            let Some(parent) = *parent else { return Err("Each non-root graph node must have a parent") };
+            if parent >= node || parent < previous {
+                return Err("Graph parents must follow breadth-first order");
             }
+            first_child[parent] += 1;
+            previous = parent;
         }
-        // Parent indices are now in bounds. Mark each chain once so cycle
-        // validation is linear and does not recurse on deeply nested trees.
-        let mut state = vec![0_u8; parents.len()];
-        state[0] = 2;
-        for start in 1..parents.len() {
-            let mut node = start;
-            while state[node] == 0 {
-                state[node] = 1;
-                let Some(parent) = parents[node] else { return Err("Graph node does not reach the root") };
-                node = parent;
-            }
-            if state[node] == 1 {
-                return Err("Graph contains a parent cycle");
-            }
-            node = start;
-            while state[node] == 1 {
-                state[node] = 2;
-                let Some(parent) = parents[node] else { break };
-                node = parent;
-            }
+        let mut next = 1;
+        for offset in &mut first_child {
+            let count = *offset;
+            *offset = next;
+            next += count;
         }
-        let mut children = vec![Vec::new(); parents.len()];
-        for (node, parent) in parents.iter().enumerate() {
-            if let Some(parent) = parent {
-                children[*parent].push(node);
-            }
-        }
-        Ok(Self { parents, children })
+        Ok(Self { parents, first_child })
+    }
+
+    pub(super) fn children(&self, node: usize) -> Range<usize> {
+        self.first_child[node]..self.first_child.get(node + 1).copied().unwrap_or(self.parents.len())
+    }
+
+    pub(super) fn traversal(&self) -> Range<usize> {
+        0..self.parents.len()
     }
 
     /// The path from the root to `id`, both included.
@@ -71,9 +63,9 @@ mod tests {
     }
 
     #[test]
-    fn valid_forward_references_have_a_bounded_path_to_the_root() {
-        let tree = GraphTree::new(vec![None, Some(2), Some(0)]).unwrap();
-        assert_eq!(tree.ancestry(1), Some(vec![0, 2, 1]));
-        assert_eq!(tree.ancestry(3), None);
+    fn breadth_first_nodes_have_a_bounded_path_to_the_root() {
+        let tree = GraphTree::new(vec![None, Some(0), Some(0), Some(1)]).unwrap();
+        assert_eq!(tree.ancestry(3), Some(vec![0, 1, 3]));
+        assert_eq!(tree.ancestry(4), None);
     }
 }

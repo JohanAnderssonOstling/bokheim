@@ -11,7 +11,7 @@ fn path(value: &str) -> library_model::RelativeBookPath {
 #[tokio::test]
 async fn readers_and_availability_use_only_selected_paths() {
     let root = tempfile::tempdir().unwrap();
-    let assets = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+    let assets = AssetStore::open(root.path().to_str().unwrap(), &root.path().join(".bokheim/private-assets")).unwrap();
     let bytes = b"selected book";
     let hash = BookId::from(blake3::hash(bytes));
     std::fs::write(root.path().join("book.epub"), bytes).unwrap();
@@ -32,7 +32,7 @@ async fn readers_and_availability_use_only_selected_paths() {
 #[tokio::test]
 async fn common_book_opener_archives_folder_tracks_and_cover() {
     let root = tempfile::tempdir().unwrap();
-    let assets = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+    let assets = AssetStore::open(root.path().to_str().unwrap(), &root.path().join(".bokheim/private-assets")).unwrap();
     let folder = root.path().join("Story");
     std::fs::create_dir(&folder).unwrap();
     std::fs::write(folder.join("01.mp3"), b"opening").unwrap();
@@ -51,7 +51,7 @@ async fn common_book_opener_archives_folder_tracks_and_cover() {
 #[tokio::test]
 async fn m4b_cover_uses_the_selected_book_path() {
     let root = tempfile::tempdir().unwrap();
-    let assets = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+    let assets = AssetStore::open(root.path().to_str().unwrap(), &root.path().join(".bokheim/private-assets")).unwrap();
     std::fs::write(root.path().join("Story.m4b"), include_bytes!("fixtures/embedded-cover.m4b")).unwrap();
     std::fs::write(root.path().join("Story.jpg"), b"selected artwork").unwrap();
     assert!(assets.m4b_sidecar_cover(Vec::new()).await.unwrap().is_none());

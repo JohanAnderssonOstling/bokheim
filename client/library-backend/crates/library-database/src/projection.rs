@@ -6,6 +6,7 @@ use crate::SqlParam;
 use crate::annotations::AnnotationsSql;
 use crate::books::audiobook::AudiobookSql;
 use crate::books::toc::TocSql;
+use crate::contributors::ContributorResolver;
 use crate::import::ImportCommitSql;
 use crate::purge::remove_book;
 use crate::query_methods::{parse_uuid_column, query_rows, text_column};
@@ -25,6 +26,10 @@ mod metadata;
 
 /// Project canonical winners inside the same transaction as their admission.
 pub(crate) fn project_dirty(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
+    project_dirty_with_contributors(tx, &mut ContributorResolver::default())
+}
+
+pub(crate) fn project_dirty_with_contributors(tx: &Transaction<'_>, contributors: &mut ContributorResolver) -> Result<(), DatabaseError> {
     let _profile = ProfileSpan::new("metadata_projection", "transaction");
     let dirty = query_rows(|callback| tx.projection_dirty_addresses(callback), |r| Ok((r.get::<_, String>(0)?, r.get::<_, StateKey>(1)?, r.get::<_, String>(2)?)))?;
     if dirty.is_empty() {
@@ -104,6 +109,7 @@ pub(crate) fn project_dirty(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
     let tables = ProfileSpan::new("metadata_tables", "projection");
     metadata::project(
         tx,
+        contributors,
         pending.iter().filter_map(|(hash, changed, values)| {
             let needs_metadata = changed.contains("book_projection") || changed.contains("book_add");
             (needs_metadata && !book_is_purged(values)).then(|| (hash, book_addition(values)))

@@ -250,6 +250,12 @@ impl LocalRegistry {
         #[cfg(not(target_arch = "wasm32"))]
         {
             platform::remove_library_state(library_id, &locator)?;
+            let assets = join_locator(&self.app_data_locator, &format!("assets/{library_id}"));
+            match fs::remove_dir_all(&assets) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
             let database = self.library_database_locator(library_id, &locator);
             for suffix in ["", "-wal", "-shm"] {
                 match fs::remove_file(format!("{database}{suffix}")) {
@@ -511,7 +517,7 @@ mod platform {
         let metadata = root.join(METADATA_DIRECTORY);
         match fs::create_dir(&metadata) {
             Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::AlreadyExists && metadata.is_dir() => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists && fs::is_dir(&metadata) => {}
             Err(error) => return Err(error.into()),
         }
         write_manifest_file(entry, &root.join(METADATA_DIRECTORY).join("library.json"))?;

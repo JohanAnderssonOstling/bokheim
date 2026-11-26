@@ -84,7 +84,7 @@ async fn copied_imports_and_scanned_files_have_identical_ingestion_results() {
             let root = tempfile::tempdir().unwrap();
             let db = DatabaseClient::open(root.path().join("library.db"), &BackendExecutor::new().unwrap()).await.unwrap();
             db.initialize_library().await.unwrap();
-            let store = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+            let store = AssetStore::open(root.path().to_str().unwrap(), &root.path().join(".bokheim/private-assets")).unwrap();
             let host: Arc<dyn CpuHost> = Arc::new(InspectHost);
             let (name, copied) = asset_workflow::stage_import(&store, &db, ROOT_DIR_ID, name, Box::new(Cursor::new(bytes.to_vec())), ImportOptions { direct }).await.unwrap();
             assert_eq!(std::fs::read(copied.path()).unwrap(), bytes, "copy must leave ingestion to the shared function");
@@ -117,7 +117,7 @@ async fn failed_ingestion_cleans_up_copied_files() {
         let root = tempfile::tempdir().unwrap();
         let db = DatabaseClient::open(root.path().join("library.db"), &BackendExecutor::new().unwrap()).await.unwrap();
         db.initialize_library().await.unwrap();
-        let store = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+        let store = AssetStore::open(root.path().to_str().unwrap(), &root.path().join(".bokheim/private-assets")).unwrap();
         let (name, copied) = asset_workflow::stage_import(&store, &db, ROOT_DIR_ID, "invalid.epub", Box::new(Cursor::new(b"invalid epub")), ImportOptions { direct }).await.unwrap();
         let path = copied.path().to_owned();
         assert!(filesystem_scanner::ingestion::ingest_file(path.clone(), name, &InspectHost).await.is_err());

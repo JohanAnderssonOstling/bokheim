@@ -18,9 +18,7 @@ pub fn queries(base: &EditionIdentityQuery, readings: &[TitleReading]) -> Vec<Ed
             query.author_surname = reading.surname.clone().filter(|_| query.authors.is_empty());
             query.book_year = query.book_year.or(reading.year);
             let equivalent = |other: &EditionIdentityQuery| {
-                metadata_contract::matching::NormalizedTitle::new(&query.title).full == metadata_contract::matching::NormalizedTitle::new(&other.title).full
-                    && query.authors == other.authors
-                    && query.author_surname == other.author_surname
+                metadata_contract::matching::NormalizedTitle::new(&query.title).full == metadata_contract::matching::NormalizedTitle::new(&other.title).full && query.authors == other.authors && query.author_surname == other.author_surname
             };
             if equivalent(base) || queries.iter().any(equivalent) {
                 continue;

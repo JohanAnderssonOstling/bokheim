@@ -319,12 +319,41 @@ struct ScanRetry {
     file_progress: u64,
 }
 
-/// Scans on open, on folder changes, and after failures.
+/// Android scans on selection; other native hosts also watch and retry changes.
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
 async fn run_scan_worker(session: &LibraryResources) {
+    let wake = session.events.scan.clone();
+    if cfg!(target_os = "android") {
+        let mut changes = wake.subscribe();
+        loop {
+            changes.borrow_and_update();
+            if wake.take_pending().wake_requested_at.is_none() {
+                if changes.changed().await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            let _ = recover_pass("filesystem scan", async {
+                match session.scan_folder().await {
+                    Ok(super::import::filesystem_scan::FolderScan::Incomplete) => {
+                        log::warn!("filesystem scan was incomplete; it will retry when the library is opened again");
+                        Ok(())
+                    }
+                    Ok(_) => Ok(()),
+                    Err(error) => {
+                        log::warn!("filesystem scan failed; it will retry when the library is opened again: {error}");
+                        Err(())
+                    }
+                }
+            })
+            .await;
+            // Opening the same library during its scan shares that pass.
+            // Android does not poll or retry scans after file-worker progress.
+            wake.take_pending();
+        }
+    }
     #[cfg(feature = "watcher")]
     let assets = session.state.read().await.assets().clone();
-    let wake = session.events.scan.clone();
     #[cfg(feature = "watcher")]
     let watcher = {
         let root = assets.native_library_root();

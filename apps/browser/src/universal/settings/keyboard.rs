@@ -1,5 +1,3 @@
-use ui_text::text;
-
 use super::*;
 use gpui::{Div, Point};
 
@@ -13,30 +11,12 @@ impl SettingsPage {
 
     pub(super) fn settings_container(&self, content: impl IntoElement, desktop: bool, cx: &Context<Self>) -> Div {
         let theme = components::browser_theme(cx);
-        let tabs = components::row(0.0)
-            .w_full()
-            .max_w(px(if self.keyboard_tab { 640.0 } else { 1080.0 }))
-            .key_context("BrowserSettingsHeader")
-            .child(
-                components::base_button("settings-general-tab")
-                    .label(text!(common::general))
-                    .ghost()
-                    .no_fill()
-                    .flex_1()
-                    .border_b_2()
-                    .border_color(if !self.keyboard_tab { theme.accent } else { theme.rule })
-                    .on_click(cx.listener(|page, _, _, cx| page.select_settings_tab(false, cx))),
-            )
-            .child(
-                components::base_button("settings-keyboard-tab")
-                    .label(text!(common::keyboard))
-                    .ghost()
-                    .no_fill()
-                    .flex_1()
-                    .border_b_2()
-                    .border_color(if self.keyboard_tab { theme.accent } else { theme.rule })
-                    .on_click(cx.listener(|page, _, _, cx| page.select_settings_tab(true, cx))),
-            );
+        let target = cx.entity();
+        let tabs = components::settings_tabs("settings", self.keyboard_tab, theme, move |keyboard, _, cx| {
+            target.update(cx, |page, cx| page.select_settings_tab(keyboard, cx));
+        })
+        .max_w(px(1080.0))
+        .key_context("BrowserSettingsHeader");
         div()
             .size_full()
             .min_h_0()

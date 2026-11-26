@@ -1,10 +1,8 @@
 use library_management::management::ManagementClient;
 use ui_text::text;
 
-use ui_components::user_facing_error;
-
 use crate::BOOK_IMPORT_EXTENSIONS;
-use crate::services::{book_transfer_error_message, import_failure_message, notify_error, notify_warning};
+use crate::services::{book_transfer_error_message, notify_error};
 use gpui::{App, Context, Entity, FileDialogFilter, PathPromptOptions, WeakEntity, Window};
 use library_backend::{BackendError, DownloadState, ImportFailure, LibraryClient, ThumbnailResolution};
 use library_model::{BookCardRow, BookDetail, BookLocator, BookSource};
@@ -145,8 +143,10 @@ impl LibraryContext {
             return;
         }
         let extensions = BOOK_IMPORT_EXTENSIONS.into_iter().map(str::to_owned).collect();
-        let selection = cx
-            .prompt_for_files_with_filters(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some(text!(browse::add_book).into()) }, vec![FileDialogFilter { name: text!(browse::books).to_owned(), extensions }]);
+        let selection = cx.prompt_for_files_with_filters(
+            PathPromptOptions { directory: None, files: true, directories: false, multiple: false, prompt: Some(text!(browse::add_book).into()) },
+            vec![FileDialogFilter { name: text!(browse::books).to_owned(), extensions }],
+        );
         let library = self.backend.clone();
         self.run_import(
             async move {
@@ -188,7 +188,7 @@ impl LibraryContext {
         #[cfg(not(target_arch = "wasm32"))]
         let extensions = extensions.chain(["mp3folder", "mp3", "nfo", "cue", "jpg", "jpeg", "png", "webp"]);
         let selection = cx.prompt_for_directories_with_filters(
-            PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(text!(browse::add_folder).into()) },
+            PathPromptOptions { directory: None, files: false, directories: true, multiple: false, prompt: Some(text!(browse::add_folder).into()) },
             vec![FileDialogFilter { name: text!(browse::books).to_owned(), extensions: extensions.map(str::to_owned).collect() }],
         );
         let library = self.backend.clone();
@@ -215,23 +215,10 @@ impl LibraryContext {
 
     /// One lifetime and feedback policy for imports from pickers and drops.
     fn run_import<C: 'static>(&self, operation: impl Future<Output = Result<Vec<ImportFailure>, BackendError>> + 'static, cx: &mut Context<C>) {
-        if self.files_busy(cx) || self.importing(cx) {
+        if self.files_busy(cx) {
             return;
         }
-        let updates = self.updates.downgrade();
-        let task = cx.spawn(async move |_, cx| {
-            let result = operation.await;
-            let _ = updates.update(cx, |updates, cx| {
-                updates.set_import_task(None, cx);
-                let owner = cx.entity_id();
-                cx.with_window(owner, |window, cx| match result {
-                    Ok(failures) if !failures.is_empty() => notify_warning("library-import", failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n"), window, cx),
-                    Ok(_) => {}
-                    Err(error) => notify_error("library-import", user_facing_error(&error, text!(browse::could_not_import_items)), window, cx),
-                });
-            });
-        });
-        self.updates.update(cx, |updates, cx| updates.set_import_task(Some(task), cx));
+        self.updates.update(cx, |updates, cx| updates.enqueue_import(Box::pin(operation), cx));
     }
 
     /// Opens the book where the reader asked for it — a contents entry rather

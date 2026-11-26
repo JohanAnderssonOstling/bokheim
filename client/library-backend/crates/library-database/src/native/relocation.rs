@@ -64,8 +64,10 @@ impl Database {
                 }
             }
             // Retained observations can outlive their logical placement.
-            let retained =
-                tx.prepare("SELECT content_hash,dir_id,relative_path FROM local_file_projection")?.query_map([], |row| Ok((row.get::<_, BookId>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+            let retained = tx
+                .prepare("SELECT content_hash,dir_id,relative_path,physical_size_bytes FROM local_file_projection")?
+                .query_map([], |row| Ok((row.get::<_, BookId>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<i64>>(3)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
             tx.execute_batch(
                 "UPDATE book_dir SET is_downloaded=0,local_hash=NULL;
                               DELETE FROM local_file_projection;
@@ -80,9 +82,9 @@ impl Database {
                 (&source, &source_identity, &source_library),
             )?;
             tx.execute("UPDATE local_file_work SET source_root=?1,source_identity=?2,source_library=?3 WHERE operation='remove' AND source_root IS NULL", (&source, &source_identity, &source_library))?;
-            for (book, directory, old) in retained {
+            for (book, directory, old, size) in retained {
                 if let Some(new) = paths.get(&stored_book_path(&old)?) {
-                    tx.execute("INSERT OR IGNORE INTO local_file_projection(content_hash,dir_id,relative_path) VALUES(?1,?2,'/'||ltrim(?3,'/'))", (book, directory, new.as_str()))?;
+                    tx.execute("INSERT OR IGNORE INTO local_file_projection(content_hash,dir_id,relative_path,physical_size_bytes) VALUES(?1,?2,'/'||ltrim(?3,'/'),?4)", (book, directory, new.as_str(), size))?;
                 }
             }
             for (directory, path) in directories {

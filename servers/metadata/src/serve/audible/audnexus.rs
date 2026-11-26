@@ -3,13 +3,45 @@ use super::*;
 
 impl AudibleClient {
     pub(super) async fn audnexus_product(&self, region: &str, asin: &str, source: DiscoverySource) -> Result<Candidate, String> {
-        let value = self.json(&self.audnexus_origin, &format!("/books/{asin}"), &[("region", region)]).await?;
-        parse_book(&value, region, asin, source)
+        self.audnexus_book(region, asin, source).await.map(|(candidate, _)| candidate)
+    }
+
+    pub(super) async fn audnexus_book(&self, region: &str, asin: &str, source: DiscoverySource) -> Result<(Candidate, Value), String> {
+        let (url, bytes, cached) = self.audnexus_response(&format!("/books/{asin}"), region).await?;
+        let value = serde_json::from_slice(&bytes).map_err(|error| format!("Invalid Audnexus response: {error}"))?;
+        let candidate = parse_book(&value, region, asin, source)?;
+        self.persist_audnexus(url, bytes, cached).await?;
+        Ok((candidate, value))
     }
 
     pub(super) async fn audnexus_chapters(&self, candidate: &Candidate) -> Result<(Vec<AudiobookChapter>, u64), String> {
-        let value = self.json(&self.audnexus_origin, &format!("/books/{}/chapters", candidate.asin), &[("region", &candidate.region)]).await?;
-        parse_timeline(&value, &candidate.region, &candidate.asin)
+        let (url, bytes, cached) = self.audnexus_response(&format!("/books/{}/chapters", candidate.asin), &candidate.region).await?;
+        let value = serde_json::from_slice(&bytes).map_err(|error| format!("Invalid Audnexus response: {error}"))?;
+        let timeline = parse_timeline(&value, &candidate.region, &candidate.asin)?;
+        self.persist_audnexus(url, bytes, cached).await?;
+        Ok(timeline)
+    }
+
+    async fn audnexus_response(&self, path: &str, region: &str) -> Result<(String, Arc<Vec<u8>>, bool), String> {
+        let mut url = reqwest::Url::parse(&format!("{}{path}", self.audnexus_origin)).map_err(|error| error.to_string())?;
+        url.query_pairs_mut().append_pair("region", region);
+        let key = url.to_string();
+        if let Some(cache) = &self.persistent {
+            if let Some(bytes) = cache.get(&key).await? {
+                tracing::debug!(url = %key, "using persisted Audnexus response");
+                return Ok((key, bytes, true));
+            }
+        }
+        Ok((key, self.get(url).await?, false))
+    }
+
+    async fn persist_audnexus(&self, url: String, bytes: Arc<Vec<u8>>, cached: bool) -> Result<(), String> {
+        if !cached {
+            if let Some(cache) = &self.persistent {
+                cache.put(url, bytes).await?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -72,7 +104,6 @@ fn parse_timeline(value: &Value, region: &str, asin: &str) -> Result<(Vec<Audiob
 mod tests {
     use super::*;
     use serde_json::json;
-
 
     #[test]
     fn chapter_validation_rejects_inaccurate_partial_and_wrong_recording_data() {

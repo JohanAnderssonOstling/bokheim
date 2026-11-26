@@ -38,6 +38,7 @@ pub(in crate::library) async fn fixture(root: &std::path::Path, url: account_cli
             id: LibraryId::new_v4(),
             root: root.to_string_lossy().into_owned(),
             database_locator: root.join("library.sqlite").to_string_lossy().into_owned(),
+            assets_locator: root.join(".bokheim/private-assets").to_string_lossy().into_owned(),
             default_sync_server_url: url,
             metadata_server_url: "http://127.0.0.1:1".into(),
             storage: sync_common::storage::LibraryStorage::Bokheim,
@@ -163,7 +164,7 @@ async fn saving_a_reading_position_refreshes_the_library_before_delayed_sync() {
                 metadata: book_model::BookRecord { metadata: book_model::BookDetails { title: "Book".into(), ..Default::default() }, description: String::new() },
                 toc: Vec::new(),
             }),
-            published: library_model::PublishedStagedBook { name: "Book.epub".into(), relative_path: "/Book.epub".into(), published: false, fingerprint: None },
+            published: library_model::PublishedStagedBook { physical_size_bytes: None, name: "Book.epub".into(), relative_path: "/Book.epub".into(), published: false, fingerprint: None },
             request_thumbnail: false,
             restore_paths: Vec::new(),
         })

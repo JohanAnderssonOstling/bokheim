@@ -173,10 +173,7 @@ where
         let content = self.element.id((self.id.clone(), "content")).flex_none().h_auto().min_h_full().when(self.fit_content, |content| content.min_h_0());
         let scroll_area = div().id((self.id.clone(), "area")).size_full().flex().track_scroll(&scroll_handle).flex_col().overflow_y_scroll().when(self.fit_content, |area| area.h_auto().min_h_0().flex_auto()).child(content);
 
-        // Scrollbar is absolute but supplies no inset of its own. Anchor its
-        // layer to the viewport so its static position cannot follow the
-        // preceding scroll area and extend below a popup.
-        let scrollbar = self.show_scrollbar.then(|| div().absolute().inset_0().child(Scrollbar::new(&scroll_handle).id((self.id.clone(), "scrollbar")).axis(ScrollbarAxis::Vertical)));
+        let scrollbar = self.show_scrollbar.then(|| Scrollbar::new(&scroll_handle).id((self.id.clone(), "scrollbar")).axis(ScrollbarAxis::Vertical));
         div()
             .id(self.id)
             .size_full()

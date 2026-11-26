@@ -21,10 +21,12 @@ JOIN book ON book.row_id=placement.book_row_id AND book.deleted_at IS NULL;
 -- param: hide_finished: i32
 -- param: finished_threshold: f64
 -- Each row aggregates one directory's live placements, including duplicate books.
+-- Availability follows the book list: a book available anywhere in this library
+-- is downloaded, even if a separate copy in this directory is not materialized.
 -- Size follows the same metadata precedence as book cards. Sized counts keep
 -- incomplete totals from looking like the size of the entire folder.
 WITH eligible AS (
-SELECT selected.value AS directory_id,book.row_id,placement.is_downloaded,
+SELECT selected.value AS directory_id,book.row_id,COALESCE(presence.downloaded,0) AS is_downloaded,transfer.book_download IS NOT NULL AS download_requested,
        CASE WHEN book.row_id IS NOT NULL THEN
          COALESCE(content.size_bytes,transfer.upload_size,placement.size_bytes,
            (SELECT max(size_bytes) FROM book_dir
@@ -40,12 +42,14 @@ LEFT JOIN book ON book.row_id=placement.book_row_id
       WHERE language.book_row_id=book.row_id AND instr(:languages,',' || language.language || ',')>0))
 LEFT JOIN book_content content ON content.book_id=book.content_hash
 LEFT JOIN book_transfer transfer ON transfer.content_hash=book.content_hash
+LEFT JOIN library_book_presence presence ON presence.book_row_id=book.row_id
 )
 SELECT directory_id,count(row_id),
        count(CASE WHEN is_downloaded=1 THEN row_id END),
        COALESCE(sum(CASE WHEN size_bytes>0 THEN size_bytes ELSE 0 END),0),
        count(CASE WHEN size_bytes>0 THEN row_id END),
        COALESCE(sum(CASE WHEN is_downloaded=1 AND size_bytes>0 THEN size_bytes ELSE 0 END),0),
-       count(CASE WHEN is_downloaded=1 AND size_bytes>0 THEN row_id END)
+       count(CASE WHEN is_downloaded=1 AND size_bytes>0 THEN row_id END),
+       count(CASE WHEN is_downloaded=0 AND download_requested THEN row_id END)
 FROM eligible
 GROUP BY directory_id;

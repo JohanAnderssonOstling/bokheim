@@ -2,17 +2,19 @@
 //! orders them for playback, and reads MP3 tags. A device keeps ordinary MP3
 //! files; `audiobook_archive` packs them for transfer and server storage.
 
+use client_platform_runtime::filesystem as fs;
 #[cfg(not(target_arch = "wasm32"))]
 use client_platform_runtime::filesystem::temporary;
-use client_platform_runtime::filesystem::{self as fs, File};
 use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 use symphonia::core::io::MediaSource;
 use symphonia::core::units::TimeBase;
 
-use audiobook_archive::{Cover, Cue, MAX_COVER_BYTES, MAX_CUE_BYTES, MAX_NFO_BYTES, MAX_TRACKS, Nfo, Track, audio_file, natural_cmp, valid_sidecar_name};
+use audiobook_archive::{Cover, Cue, MAX_COVER_BYTES, MAX_TRACKS, Nfo, Track, audio_file, natural_cmp};
 
+mod inventory;
+pub use inventory::FolderInventory;
 mod local_names;
 mod mp3_frames;
 pub use local_names::{PATH_MAPPING_FILE, copy_path_mapping, extract_download, resolve_track_path};
@@ -246,47 +248,16 @@ fn finish_duration(mut facts: Mp3Facts, time_base: TimeBase, samples: u64) -> io
     Ok(facts)
 }
 
-fn discover_sidecar(folder: &Path, accepts: impl Fn(&str) -> bool, maximum: u64) -> io::Result<Option<Nfo>> {
-    let mapping = local_names::load(folder)?;
-    let mut files = Vec::new();
-    for entry in fs::read_dir(folder)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let Ok(name) = entry.file_name().into_string() else { continue };
-        if name.starts_with('.') || !accepts(&name) {
-            continue;
-        }
-        if !valid_sidecar_name(&name) || entry.metadata()?.len() > maximum {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid or oversized audiobook sidecar"));
-        }
-        let name = mapping.as_ref().map_or(name.clone(), |mapping| mapping.logical_name(&name).to_owned());
-        files.push(Nfo { name, path: entry.path() });
-    }
-    if files.len() > 1 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "audiobook has multiple matching sidecars"));
-    }
-    Ok(files.pop())
-}
-
 pub fn discover_nfo(folder: &Path) -> io::Result<Option<Nfo>> {
-    discover_sidecar(folder, |name| name.to_ascii_lowercase().ends_with(".nfo"), MAX_NFO_BYTES)
+    FolderInventory::read(folder)?.nfo()
 }
 
 pub fn discover_cue(folder: &Path) -> io::Result<Option<Cue>> {
-    discover_sidecar(folder, |name| name.to_ascii_lowercase().ends_with(".cue"), MAX_CUE_BYTES)
+    FolderInventory::read(folder)?.cue()
 }
 
 pub fn discover_cover(folder: &Path) -> io::Result<Option<Cover>> {
-    for stem in ["cover", "folder"] {
-        for extension in ["jpg", "jpeg", "png", "webp"] {
-            if let Some(cover) = discover_sidecar(folder, |name| name.eq_ignore_ascii_case(&format!("{stem}.{extension}")), MAX_COVER_BYTES)? {
-                return Ok(Some(cover));
-            }
-        }
-    }
-    Ok(None)
+    FolderInventory::read(folder)?.cover()
 }
 
 /// A matching sibling belongs to this M4B. A generic cover is unambiguous
@@ -294,16 +265,18 @@ pub fn discover_cover(folder: &Path) -> io::Result<Option<Cover>> {
 pub fn discover_m4b_cover(path: &Path) -> io::Result<Option<Cover>> {
     let folder = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "M4B has no parent directory"))?;
     let stem = path.file_stem().and_then(|stem| stem.to_str()).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "M4B filename is not UTF-8"))?;
+    let mut inventory = FolderInventory::read(folder)?;
     for extension in ["jpg", "jpeg", "png", "webp"] {
-        if let Some(cover) = discover_sidecar(folder, |name| name.eq_ignore_ascii_case(&format!("{stem}.{extension}")), MAX_COVER_BYTES)? {
+        if let Some(cover) = inventory.sidecar(|name| name.eq_ignore_ascii_case(&format!("{stem}.{extension}")), MAX_COVER_BYTES)? {
             return Ok(Some(cover));
         }
     }
-    let m4b_count = fs::read_dir(folder)?
-        .filter_map(Result::ok)
+    let m4b_count = inventory
+        .entries(folder)?
+        .iter()
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()) && entry.path().extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("m4b")))
         .count();
-    if m4b_count == 1 { discover_cover(folder) } else { Ok(None) }
+    if m4b_count == 1 { inventory.cover() } else { Ok(None) }
 }
 
 fn disc_number(name: &str) -> Option<u32> {
@@ -378,8 +351,8 @@ fn order_from_tags(tracks: &mut [Track], use_disc_tags: bool) {
     }
 }
 
-fn order_from_cue(folder: &Path, tracks: &mut Vec<Track>) -> io::Result<()> {
-    let Some(cue) = discover_cue(folder)? else { return Ok(()) };
+fn order_from_cue(cue: Option<Cue>, tracks: &mut Vec<Track>) -> io::Result<()> {
+    let Some(cue) = cue else { return Ok(()) };
     let bytes = fs::read(cue.path)?;
     let text = match std::str::from_utf8(&bytes) {
         Ok(text) => text.trim_start_matches('\u{feff}').to_owned(),
@@ -415,19 +388,22 @@ fn order_from_cue(folder: &Path, tracks: &mut Vec<Track>) -> io::Result<()> {
 /// Finds the tracks belonging to this book folder. Only numbered disc folders
 /// are folded into the book; other child folders remain separate scan targets.
 pub fn discover(folder: &Path) -> io::Result<Vec<Track>> {
-    let mapping = local_names::load(folder)?;
-    let mut tracks = discover_physical(folder)?;
-    if let Some(mapping) = mapping {
-        mapping.apply_tracks(folder, &mut tracks)?;
-    }
-    Ok(tracks)
+    FolderInventory::read(folder)?.tracks()
 }
 
-fn discover_physical(folder: &Path) -> io::Result<Vec<Track>> {
+impl FolderInventory {
+    pub fn tracks(&mut self) -> io::Result<Vec<Track>> {
+        let mut tracks = discover_physical(self)?;
+        self.apply_track_mapping(&mut tracks)?;
+        Ok(tracks)
+    }
+}
+
+fn discover_physical(inventory: &mut FolderInventory) -> io::Result<Vec<Track>> {
+    let folder = inventory.folder().to_owned();
     let mut tracks = Vec::new();
     let mut discs = Vec::new();
-    for entry in fs::read_dir(folder)? {
-        let entry = entry?;
+    for entry in inventory.entries(&folder)? {
         let path = entry.path();
         let kind = entry.file_type()?;
         if kind.is_file() && audio_file(&path) && !entry.file_name().to_string_lossy().starts_with('.') {
@@ -445,8 +421,7 @@ fn discover_physical(folder: &Path) -> io::Result<Vec<Track>> {
     discs.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| natural_cmp(&left.1, &right.1)));
     for (_, disc_name, path) in discs {
         let mut disc_tracks = Vec::new();
-        for entry in fs::read_dir(path)? {
-            let entry = entry?;
+        for entry in inventory.entries(&path)? {
             let path = entry.path();
             if entry.file_type()?.is_file() && audio_file(&path) && !entry.file_name().to_string_lossy().starts_with('.') {
                 let filename = entry.file_name().into_string().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "MP3 filename is not UTF-8"))?;
@@ -458,7 +433,7 @@ fn discover_physical(folder: &Path) -> io::Result<Vec<Track>> {
         tracks.extend(disc_tracks);
     }
     if !tracks.is_empty() {
-        order_from_cue(folder, &mut tracks)?;
+        order_from_cue(inventory.cue()?, &mut tracks)?;
     }
     if tracks.len() > MAX_TRACKS {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "audiobook has too many MP3 tracks"));
@@ -476,23 +451,32 @@ pub fn folder_hash(folder: &Path) -> io::Result<blake3::Hash> {
 
 /// Inspect content identity without creating or checksumming ZIP payloads.
 pub fn folder_content_with_reader<R: io::Read>(folder: &Path, tracks: &[Track], open: impl FnMut(&Path) -> io::Result<R>) -> io::Result<audiobook_archive::ContentManifest> {
-    let nfo = discover_nfo(folder)?;
-    let cue = discover_cue(folder)?;
-    let cover = discover_cover(folder)?;
-    let mapping = local_names::load(folder)?;
-    let formats = mapping.as_ref().map_or(&[][..], |mapping| mapping.formats.as_slice());
-    audiobook_archive::folder_content_with_reader(tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref(), formats, open)
+    FolderInventory::read(folder)?.content_with_reader(tracks, open)
+}
+
+impl FolderInventory {
+    /// Reuse the sidecars and mapping discovered for this operation.
+    pub fn content_with_reader<R: io::Read>(&mut self, tracks: &[Track], open: impl FnMut(&Path) -> io::Result<R>) -> io::Result<audiobook_archive::ContentManifest> {
+        let nfo = self.nfo()?;
+        let cue = self.cue()?;
+        let cover = self.cover()?;
+        let mapping = self.mapping()?;
+        let formats = mapping.as_ref().map_or(&[][..], |mapping| mapping.formats.as_slice());
+        audiobook_archive::folder_content_with_reader(tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref(), formats, open)
+    }
 }
 
 pub fn folder_content_hash(folder: &Path) -> io::Result<blake3::Hash> {
-    let tracks = discover(folder)?;
-    Ok(folder_content_with_reader(folder, &tracks, |path| fs::open(path))?.checksum)
+    let mut inventory = FolderInventory::read(folder)?;
+    let tracks = inventory.tracks()?;
+    Ok(inventory.content_with_reader(&tracks, |path| fs::open(path))?.checksum)
 }
 
 /// Retain the original transport's metadata precedence for mapped downloads.
 pub fn metadata_sidecars(folder: &Path) -> io::Result<Vec<Nfo>> {
-    let mut sidecars = discover_nfo(folder)?.into_iter().chain(discover_cue(folder)?).collect::<Vec<_>>();
-    let mapping = local_names::load(folder)?;
+    let mut inventory = FolderInventory::read(folder)?;
+    let mut sidecars = inventory.nfo()?.into_iter().chain(inventory.cue()?).collect::<Vec<_>>();
+    let mapping = inventory.mapping()?;
     let formats = mapping.as_ref().map_or(&[][..], |mapping| mapping.formats.as_slice());
     sidecars.sort_by_key(|sidecar| formats.iter().position(|format| format.name == sidecar.name).unwrap_or(formats.len()));
     Ok(sidecars)
@@ -505,10 +489,11 @@ pub fn write_folder_archive<W: io::Write + io::Seek>(folder: &Path, writer: W, t
 
 /// Archive through caller-supplied member readers, preserving identical bytes.
 pub fn write_folder_archive_with_reader<W: io::Write + io::Seek, R: io::Read>(folder: &Path, writer: W, tracks: &[Track], open: impl FnMut(&Path) -> io::Result<R>) -> io::Result<W> {
-    let nfo = discover_nfo(folder)?;
-    let cue = discover_cue(folder)?;
-    let cover = discover_cover(folder)?;
-    let mapping = local_names::load(folder)?;
+    let mut inventory = FolderInventory::read(folder)?;
+    let nfo = inventory.nfo()?;
+    let cue = inventory.cue()?;
+    let cover = inventory.cover()?;
+    let mapping = inventory.mapping()?;
     let formats = mapping.as_ref().map_or(&[][..], |mapping| mapping.formats.as_slice());
     audiobook_archive::write_archive_with_formats_and_reader(writer, tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref(), formats, open)
 }

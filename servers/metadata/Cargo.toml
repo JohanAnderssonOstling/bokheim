@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 http-response = { workspace = true }
 axum = "0.7"
+blake3 = { workspace = true }
 book-model = { path = "../../shared/book-model" }
 flate2 = "1"
 futures-util = "0.3"
@@ -19,7 +20,6 @@ r2d2 = "0.8"
 r2d2_sqlite = "0.35"
 rayon = "1"
 reqwest = { workspace = true, features = ["rustls-no-provider", "stream"] }
-roxmltree = "0.20"
 rusqlite = { version = "0.40.0", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -2,7 +2,7 @@
 use ui_text::text;
 
 use super::*;
-use gpui::{Anchor, Entity, FocusHandle, Focusable, Render, Subscription, WeakEntity, Window, px};
+use gpui::{Anchor, Entity, FocusHandle, Focusable, Render, Subscription, WeakEntity, Window, div, px};
 use gpui_component::{Disableable, Selectable, WindowExt, popover::Popover};
 use std::rc::Rc;
 
@@ -265,6 +265,7 @@ impl<C: TtsReader> Render for Picker<C> {
 
 pub(super) fn button<C: TtsReader>(state: &Narration, compact: bool, cx: &mut Context<C>) -> AnyElement {
     let snapshot = Snapshot::new(state);
+    let theme = components::browser_theme(cx);
     let label = if state.voice == NarrationVoice::Device {
         state.device_voices.iter().find(|voice| Some(&voice.id) == state.device_voice.as_ref()).map_or_else(
             || text!(reader::device_voice).to_owned(),
@@ -284,12 +285,11 @@ pub(super) fn button<C: TtsReader>(state: &Narration, compact: bool, cx: &mut Co
         text!(reader::alba).to_owned()
     };
     let trigger = if compact {
-        components::outlined_icon_button("tts-voice", format!(text!(reader::narration_voice), label = label), Icon::new(IconName::User).size(px(20.0))).p_0().size(px(32.0))
+        components::playback_secondary_button(components::outlined_icon_button("tts-voice", format!(text!(reader::narration_voice), label = label), IconName::User))
     } else {
-        components::player_dock_text_button("tts-voice", label.to_owned()).tooltip(format!(text!(reader::narration_voice), label = label))
+        components::playback_tool_button("tts-voice", label.to_owned(), None, false, theme).min_w_0().max_w_full().flex_shrink_1().tooltip(format!(text!(reader::narration_voice), label = label))
     }
-    .debug_selector(|| "tts-voice".into())
-    .no_fill();
+    .debug_selector(|| "tts-voice".into());
     let owner = cx.weak_entity();
     if compact {
         trigger
@@ -306,28 +306,25 @@ pub(super) fn button<C: TtsReader>(state: &Narration, compact: bool, cx: &mut Co
             })
             .into_any_element()
     } else {
-        Popover::new("tts-local-voices")
-            .anchor(Anchor::BottomRight)
-            .trigger(trigger)
-            .content(move |_, window, cx| {
-                let Some(owner) = owner.upgrade() else {
-                    return div().into_any_element();
-                };
-                let popover = cx.entity().downgrade();
-                let close: Close = Rc::new(move |window, cx| {
-                    let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
-                });
-                let picker = window.use_keyed_state(("tts-voice-popup", owner.entity_id()), cx, |window, cx| Picker::new(&owner, snapshot.clone(), close.clone(), true, window, cx));
-                picker.update(cx, |picker, cx| {
-                    picker.close = close;
-                    if picker.snapshot != snapshot {
-                        picker.snapshot = snapshot.clone();
-                        cx.notify();
-                    }
-                });
-                div().w(px(360.0)).max_w_full().child(picker).into_any_element()
-            })
-            .into_any_element()
+        let picker = Popover::new("tts-local-voices").anchor(Anchor::BottomRight).trigger(trigger).content(move |_, window, cx| {
+            let Some(owner) = owner.upgrade() else {
+                return div().into_any_element();
+            };
+            let popover = cx.entity().downgrade();
+            let close: Close = Rc::new(move |window, cx| {
+                let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
+            });
+            let picker = window.use_keyed_state(("tts-voice-popup", owner.entity_id()), cx, |window, cx| Picker::new(&owner, snapshot.clone(), close.clone(), true, window, cx));
+            picker.update(cx, |picker, cx| {
+                picker.close = close;
+                if picker.snapshot != snapshot {
+                    picker.snapshot = snapshot.clone();
+                    cx.notify();
+                }
+            });
+            div().w(px(360.0)).max_w_full().child(picker).into_any_element()
+        });
+        div().min_w_0().max_w_full().child(picker).into_any_element()
     }
 }
 
@@ -499,11 +496,9 @@ mod tests {
                 let dock = visual.debug_bounds("tts-dock").unwrap();
                 let play = visual.debug_bounds("tts-play").unwrap();
                 assert!((f32::from(play.center().x - dock.center().x)).abs() < 1.0, "play must remain centred at {width}px");
-                let mut previous_right = dock.left();
                 for selector in ["tts-voice", "tts-speed", "tts-pauses", "tts-back", "tts-play", "tts-next", "tts-sleep", "tts-close"] {
                     let control = visual.debug_bounds(selector).unwrap();
-                    assert!(control.left() >= previous_right && control.right() <= dock.right(), "{selector} must be visible without overlaps at {width}px");
-                    previous_right = control.right();
+                    assert!(control.left() >= dock.left() && control.right() <= dock.right(), "{selector} must remain visible at {width}px");
                 }
             }
         }

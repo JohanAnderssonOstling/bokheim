@@ -3,18 +3,21 @@
 //! This module deliberately exposes bytes, paths, and directory entries only.
 //! It does not classify books or persist scan decisions.
 
+use audiobook_folder::FolderInventory;
 use client_platform_native::filesystem::retry_transient;
 #[cfg(not(target_arch = "wasm32"))]
 use client_platform_runtime::filesystem::temporary;
-#[cfg(not(target_arch = "wasm32"))]
-use client_platform_runtime::filesystem::walk;
 use client_platform_runtime::filesystem::{self as fs, File};
+use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::io::{self, Error, ErrorKind};
+use std::io::{self, Error, ErrorKind, Read};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub struct DirectoryWalk {
-    entries: walk::IntoIter,
+    levels: Vec<std::vec::IntoIter<io::Result<DirectoryEntry>>>,
+    descend: Option<(PathBuf, usize)>,
+    observed: HashMap<PathBuf, Vec<fs::DirEntry>>,
 }
 
 pub struct DirectoryEntry {
@@ -28,6 +31,19 @@ pub struct DirectoryEntry {
 }
 
 impl DirectoryEntry {
+    fn observe(entry: fs::DirEntry, depth: usize) -> io::Result<Self> {
+        let kind = entry.file_type()?;
+        Ok(Self {
+            path: entry.path(),
+            file_name: entry.file_name(),
+            directory: kind.is_dir(),
+            file: kind.is_file(),
+            symlink: kind.is_symlink(),
+            depth,
+            length: entry.metadata().ok().map(|metadata| metadata.len()),
+        })
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -54,31 +70,70 @@ impl DirectoryEntry {
 
 impl DirectoryWalk {
     pub fn next(&mut self) -> Option<Result<DirectoryEntry, Error>> {
-        self.entries.next().map(|entry| {
-            let entry = entry.map_err(|error| {
-                let message = error.to_string();
-                error.into_io_error().unwrap_or_else(|| Error::other(message))
-            })?;
-            let kind = entry.file_type();
-            Ok(DirectoryEntry {
-                path: entry.path().to_path_buf(),
-                file_name: entry.file_name().to_os_string(),
-                directory: kind.is_dir(),
-                file: kind.is_file(),
-                symlink: kind.is_symlink(),
-                depth: entry.depth(),
-                length: entry.metadata().ok().map(|metadata| metadata.len()),
-            })
-        })
+        loop {
+            if let Some((path, depth)) = self.descend.take() {
+                let observed = self.observed.remove(&path);
+                let entries = match observed {
+                    Some(entries) => entries.into_iter().map(|entry| DirectoryEntry::observe(entry, depth)).collect::<Vec<_>>(),
+                    None => match fs::read_dir(&path) {
+                        Ok(entries) => entries.map(|entry| entry.and_then(|entry| DirectoryEntry::observe(entry, depth))).collect(),
+                        Err(_) if depth == 1 && self.levels.is_empty() && fs::is_file(&path) => return None,
+                        Err(error) => return Some(Err(error)),
+                    },
+                };
+                // Keep owned observations rather than directory handles at each depth.
+                self.levels.push(entries.into_iter());
+            }
+            match self.levels.last_mut()?.next() {
+                Some(Ok(entry)) => {
+                    if entry.is_dir() {
+                        self.descend = Some((entry.path.clone(), entry.depth + 1));
+                    }
+                    return Some(Ok(entry));
+                }
+                Some(Err(error)) => return Some(Err(error)),
+                None => {
+                    self.levels.pop();
+                }
+            }
+        }
     }
 
     pub fn skip_current_dir(&mut self) {
-        self.entries.skip_current_dir();
+        if let Some((path, _)) = self.descend.take() {
+            self.observed.retain(|directory, _| !directory.starts_with(&path));
+        }
+    }
+
+    /// Temporarily lend already observed directories to audiobook classification.
+    pub fn directory_inventory(&mut self, folder: &Path) -> io::Result<FolderInventory> {
+        // Read before lending the map, so a failed listing cannot discard other observations.
+        if !self.observed.contains_key(folder) {
+            self.observed.insert(folder.to_owned(), fs::read_dir(folder)?.collect::<io::Result<Vec<_>>>()?);
+        }
+        Ok(FolderInventory::from_directories(folder, std::mem::take(&mut self.observed)))
+    }
+
+    pub fn reuse_inventory(&mut self, inventory: FolderInventory) {
+        self.observed.extend(inventory.into_directories());
     }
 }
 
 pub fn walk(root: impl AsRef<Path>) -> DirectoryWalk {
-    DirectoryWalk { entries: walk::WalkDir::new(root).follow_links(false).min_depth(1).into_iter() }
+    DirectoryWalk { levels: Vec::new(), descend: Some((root.as_ref().to_owned(), 1)), observed: HashMap::new() }
+}
+
+/// Physical folder bytes from directory listings, excluding symlink targets.
+pub fn directory_bytes(root: &Path) -> io::Result<u64> {
+    let mut total = 0u64;
+    let mut entries = walk(root);
+    while let Some(entry) = entries.next() {
+        let entry = entry?;
+        if entry.is_file() && !entry.is_symlink() {
+            total = total.checked_add(entry.length().ok_or_else(|| Error::other("file size is unavailable"))?).ok_or_else(|| Error::other("folder size overflow"))?;
+        }
+    }
+    Ok(total)
 }
 
 pub fn read_to_string(path: impl AsRef<Path>) -> std::io::Result<String> {
@@ -95,28 +150,39 @@ pub fn fingerprint(path: impl AsRef<Path>) -> std::io::Result<u64> {
     client_platform_native::file_fingerprint::file_fingerprint(path)
 }
 
-/// Fingerprint the ordered tracks as one scanned placement. Both the scanner
-/// and download publisher use this so a fresh download is already up to date.
-pub fn audiobook_fingerprint(folder: &Path, tracks: &[audiobook_archive::Track]) -> std::io::Result<u64> {
+/// Revision of an existing reader without another document-provider open.
+pub fn open_file_fingerprint(file: &File) -> io::Result<u64> {
+    client_platform_native::file_fingerprint::open_file_fingerprint(file)
+}
+
+/// Discover and fingerprint a fresh folder revision with one directory inventory.
+pub fn audiobook_fingerprint(folder: &Path) -> io::Result<u64> {
+    let mut inventory = FolderInventory::read(folder)?;
+    let tracks = inventory.tracks()?;
+    audiobook_inventory_fingerprint(&mut inventory, &tracks)
+}
+
+/// Reuse directory observations within a single fingerprinting operation.
+pub fn audiobook_inventory_fingerprint(inventory: &mut FolderInventory, tracks: &[audiobook_archive::Track]) -> io::Result<u64> {
     let mut hasher = blake3::Hasher::new();
     for track in tracks {
         hasher.update(track.name.as_bytes());
         hasher.update(&fingerprint(&track.path)?.to_le_bytes());
     }
-    let mapping = folder.join(audiobook_folder::PATH_MAPPING_FILE);
-    if fs::try_exists(&mapping)? {
+    let mapping = inventory.folder().join(audiobook_folder::PATH_MAPPING_FILE);
+    if inventory.has_mapping() {
         hasher.update(audiobook_folder::PATH_MAPPING_FILE.as_bytes());
         hasher.update(&fingerprint(mapping)?.to_le_bytes());
     }
-    if let Some(nfo) = audiobook_folder::discover_nfo(folder)? {
+    if let Some(nfo) = inventory.nfo()? {
         hasher.update(nfo.name.as_bytes());
         hasher.update(&fingerprint(&nfo.path)?.to_le_bytes());
     }
-    if let Some(cue) = audiobook_folder::discover_cue(folder)? {
+    if let Some(cue) = inventory.cue()? {
         hasher.update(cue.name.as_bytes());
         hasher.update(&fingerprint(&cue.path)?.to_le_bytes());
     }
-    if let Some(cover) = audiobook_folder::discover_cover(folder)? {
+    if let Some(cover) = inventory.cover()? {
         hasher.update(cover.name.as_bytes());
         hasher.update(&fingerprint(&cover.path)?.to_le_bytes());
     }
@@ -130,19 +196,25 @@ pub fn place_into_directory(source: &Path, directory: &Path, occupied: &[String]
     place_into_directory_with_intent(source, directory, occupied, moving, |_| Ok(()))
 }
 
+/// Report total bytes for the source file or folder, including nested files.
+/// Renames have no transfer work to report.
+pub fn place_into_directory_with_progress(source: &Path, directory: &Path, occupied: &[String], moving: bool, progress: &mut dyn FnMut(&Path, u64, u64)) -> io::Result<PathBuf> {
+    place_entry(source, directory, occupied, moving, true, &mut |_| Ok(()), progress)
+}
+
 /// Records each candidate destination before publishing it, so an owner can
 /// recover a move interrupted between the rename and its database acknowledgement.
 pub fn place_into_directory_with_intent(source: &Path, directory: &Path, occupied: &[String], moving: bool, mut before_publish: impl FnMut(&Path) -> io::Result<()>) -> io::Result<PathBuf> {
-    place_entry(source, directory, occupied, moving, true, &mut before_publish)
+    place_entry(source, directory, occupied, moving, true, &mut before_publish, &mut |_, _, _| {})
 }
 
 /// A same-filesystem move only. Never silently turn a failed rename into
 /// copying and deleting the caller's source.
 pub fn rename_into_directory_with_intent(source: &Path, directory: &Path, occupied: &[String], mut before_publish: impl FnMut(&Path) -> io::Result<()>) -> io::Result<PathBuf> {
-    place_entry(source, directory, occupied, true, false, &mut before_publish)
+    place_entry(source, directory, occupied, true, false, &mut before_publish, &mut |_, _, _| {})
 }
 
-fn place_entry(source: &Path, directory: &Path, occupied: &[String], moving: bool, copy_fallback: bool, before_publish: &mut dyn FnMut(&Path) -> io::Result<()>) -> io::Result<PathBuf> {
+fn place_entry(source: &Path, directory: &Path, occupied: &[String], moving: bool, copy_fallback: bool, before_publish: &mut dyn FnMut(&Path) -> io::Result<()>, progress: &mut dyn FnMut(&Path, u64, u64)) -> io::Result<PathBuf> {
     let metadata = fs::symlink_metadata(source)?;
     if !metadata.is_file() && !metadata.is_dir() {
         return Err(Error::other("only regular files and folders can be added to a library"));
@@ -181,7 +253,22 @@ fn place_entry(source: &Path, directory: &Path, occupied: &[String], moving: boo
             Some(temporary) => temporary,
             vacant @ None => {
                 let temporary = temporary::Builder::new().prefix(".bokheim-copy-").tempdir_in(&directory)?;
-                copy_entry(&source, &temporary.path().join("contents"))?;
+                let mut total = if metadata.is_file() { metadata.len() } else { 0 };
+                if metadata.is_dir() {
+                    let mut entries = walk(&source);
+                    while let Some(entry) = entries.next() {
+                        let entry = entry?;
+                        if entry.is_file() {
+                            total += entry.length().ok_or_else(|| Error::other("could not determine source file size"))?;
+                        }
+                    }
+                }
+                let mut copied = 0;
+                progress(&source, copied, total);
+                copy_entry_with_progress(&source, &temporary.path().join("contents"), &mut |bytes| {
+                    copied += bytes;
+                    progress(&source, copied, total);
+                })?;
                 vacant.insert(temporary)
             }
         };
@@ -220,20 +307,55 @@ pub(crate) fn rename_entry(source: &Path, destination: &Path) -> io::Result<()> 
 }
 
 pub(crate) fn copy_entry(source: &Path, destination: &Path) -> io::Result<()> {
+    copy_entry_with_progress(source, destination, &mut |_| {})
+}
+
+fn copy_entry_with_progress(source: &Path, destination: &Path, progress: &mut dyn FnMut(u64)) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     if metadata.is_dir() {
         fs::create_dir(destination)?;
         for entry in fs::read_dir(source)? {
             let entry = entry?;
-            copy_entry(&entry.path(), &destination.join(entry.file_name()))?;
+            copy_entry_with_progress(&entry.path(), &destination.join(entry.file_name()), progress)?;
         }
     } else if metadata.is_file() {
-        let mut reader = fs::open(source)?;
-        let mut writer = fs::OpenOptions::new().write(true).create_new(true).open(destination)?;
-        io::copy(&mut reader, &mut writer)?;
-        fs::set_permissions(destination, metadata.permissions())?;
+        let mut reported = 0;
+        copy_file_with_progress(source, destination, &mut |copied, _| {
+            progress(copied - reported);
+            reported = copied;
+        })?;
     } else {
         return Err(Error::other("cannot copy symbolic links or special files"));
     }
+    Ok(())
+}
+
+/// Copy into private staging, flushing the complete file before publication.
+/// Throttle observations so a fast disk cannot flood the presentation queue.
+pub fn copy_file_with_progress(source: &Path, destination: &Path, progress: &mut dyn FnMut(u64, u64)) -> io::Result<()> {
+    let mut reader = fs::open(source)?;
+    let metadata = reader.metadata()?;
+    let total = metadata.len();
+    let mut writer = fs::OpenOptions::new().write(true).create_new(true).open(destination)?;
+    let mut copied = 0;
+    let mut reported = Instant::now();
+    progress(0, total);
+    loop {
+        let count = io::copy(&mut reader.by_ref().take(1024 * 1024), &mut writer)?;
+        if count == 0 {
+            break;
+        }
+        copied += count;
+        if reported.elapsed() >= Duration::from_millis(100) {
+            progress(copied, total);
+            reported = Instant::now();
+        }
+    }
+    if copied != total {
+        return Err(Error::other("source size changed while copying"));
+    }
+    fs::set_permissions(destination, metadata.permissions())?;
+    writer.sync_all()?;
+    progress(copied, total);
     Ok(())
 }

@@ -1,6 +1,5 @@
 //! One owner for a filtered browse selection, its totals and its ordering.
 //! Navigation and source records remain separate; only page cards are hydrated.
-use super::books::MatchingBooks;
 use super::profile::Stage;
 use super::sections::SectionSelection;
 use super::subjects::Books;
@@ -441,13 +440,6 @@ impl Database {
         let result = Arc::new(BrowseResult::prepare(self, key.location, key.options.clone(), catalog, revision)?);
         self.browse_results.borrow_mut().insert(key, Arc::clone(&result));
         Ok(result)
-    }
-
-    fn result_matching(&self, catalog: Option<&Connection>, candidates: &BTreeSet<i64>, options: &BrowseOptions) -> Result<MatchingBooks, DatabaseError> {
-        match catalog {
-            Some(catalog) => super::catalog::matching_in(catalog, candidates, &self.library_book_hashes()?, options),
-            None => self.matching_books(candidates, options),
-        }
     }
 
     fn load_result_cards(&self, catalog: Option<&Connection>, ids: &[i64]) -> Result<Vec<BookCardRow>, DatabaseError> {

@@ -1,20 +1,13 @@
-//! Subject browsing: taxonomy. The same pages browse the library's books and
-//! the public-domain catalog's; only where the books come from differs.
+//! Subject browsing uses one immutable packed snapshot per prepared result.
 
-use crate::browse::books::MatchingBooks;
-#[cfg(test)]
-use crate::browse::sections::SectionSelection;
-use crate::browse::{BrowseOptions, BrowseRow, SubjectsSql};
+use library_model::{BrowseLocation, BrowsePathSegment};
+use rusqlite::Connection;
+
 use crate::{Database, DatabaseError};
-use library_model::BrowseLocation;
-#[cfg(test)]
-use library_model::BrowsePageRequest;
-use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) mod tree;
+mod snapshot;
 
-/// Whose books a subject page browses: the library's, by book row, or the
-/// catalog's, by row ID in the catalog browse projection.
+/// The database whose book row IDs occur in the subject assignments.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Books {
     Library,
@@ -30,205 +23,27 @@ impl Books {
     }
 }
 
-/// The crumbs from the root down to `route`, root first. Empty when `route`
-/// is not in the displayed tree, which is where compaction left it.
-pub(in crate::browse) fn subject_path(books: Books, route: i64, nodes: &BTreeMap<i64, SubjectNode>) -> Vec<library_model::BrowsePathSegment> {
-    let mut path = Vec::new();
-    let mut current = route;
-    while current != library_model::ROOT_SUBJECT_ROUTE_ID {
-        let Some(node) = nodes.get(&current) else { return Vec::new() };
-        path.push(library_model::BrowsePathSegment { id: books.location(current), name: node.label.clone() });
-        current = node.parent;
-    }
-    path.reverse();
-    path
-}
-
-fn route_of(location: BrowseLocation) -> Option<i64> {
-    match location {
-        BrowseLocation::Subject(route) | BrowseLocation::Catalog(route) => Some(route),
-        _ => None,
-    }
-}
-
-#[derive(Default)]
-pub(super) struct SubjectNode {
-    pub(super) label: String,
-    pub(super) parent: i64,
-    pub(super) children: BTreeSet<i64>,
-    pub(super) members: BTreeSet<i64>,
-    pub(super) direct: BTreeSet<i64>,
-}
-
 impl Database {
-    /// The subjects a book is listed under, as Browse shows them: one path
-    /// per displayed node that holds the book directly. Compaction can have
-    /// lifted the book to an ancestor of its assigned concept, and a concept
-    /// reached by several routes appears at each; both are what Browse lists.
-    /// A book compacted all the way to the root has no subject.
-    pub(crate) fn book_subjects(&self, books: Books, book: i64) -> Result<Vec<Vec<library_model::BrowsePathSegment>>, DatabaseError> {
-        let nodes = self.subject_tree_for(books)?;
-        Ok(nodes.iter().filter(|(route, node)| **route != library_model::ROOT_SUBJECT_ROUTE_ID && node.direct.contains(&book)).map(|(&route, _)| subject_path(books, route, &nodes)).filter(|path| !path.is_empty()).collect())
-    }
-
-    #[cfg(test)]
-    pub(super) fn browse_subject(
-        &self, books: Books, route: i64, query: &library_model::LibraryBrowseQuery, downloaded_only: bool, section_limit: Option<usize>, page: Option<BrowsePageRequest>,
-    ) -> Result<super::LibraryBrowseData, DatabaseError> {
-        self.with_subject_browse(books, route, query, downloaded_only, |route, nodes, matching, options| {
-            let children = Self::subject_children(books, route, nodes, matching, options);
-            let direct = Self::subject_selected_books(route, nodes, matching, options);
-            let mut selections = Vec::new();
-            if options.search.is_empty() {
-                for parent in &children {
-                    let Some(child_route) = route_of(parent.id) else { continue };
-                    let children = Self::subject_children(books, child_route, nodes, matching, options);
-                    let selected = Self::subject_selected_books(child_route, nodes, matching, options);
-                    if selected.is_empty() && children.is_empty() {
-                        continue;
-                    }
-                    selections.push(SectionSelection { parent: parent.clone(), children, books: selected });
-                }
-            }
-            let (cards, sections, page) = self.load_section_cards(books, &direct, selections, options, section_limit, page)?;
-            let contents = library_model::BrowseContents { children, books: cards };
-            let (language_counts, format_counts) = match books {
-                Books::Library => self.library_facets(options)?,
-                Books::Catalog => super::catalog::facets(options)?,
-            };
-            let path = subject_path(books, route, nodes);
-            let ancestors = self.subject_ancestors(books, &path, nodes, options)?;
-            Ok(super::LibraryBrowseData { contents, sections, path, ancestors, language_counts, format_counts, page })
-        })
-    }
-
-    /// Show immediate subject routes and books assigned directly to this route.
-    #[cfg(test)]
-    pub(super) fn browse_subject_contents(&self, books: Books, route: i64, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<library_model::BrowseContents, DatabaseError> {
-        self.with_subject_browse(books, route, query, downloaded_only, |route, nodes, matching, options| self.subject_contents(books, route, nodes, matching, options))
-    }
-
-    #[cfg(test)]
-    pub(super) fn browse_subject_book_page(&self, books: Books, route: i64, query: &library_model::LibraryBrowseQuery, downloaded_only: bool, offset: usize, limit: usize) -> Result<library_model::BrowseBookPage, DatabaseError> {
-        self.with_subject_browse(books, route, query, downloaded_only, |route, nodes, matching, options| {
-            let selected = Self::subject_selected_books(route, nodes, matching, options);
-            self.load_source_book_page(books, &selected, options, offset, limit)
-        })
-    }
-
-    /// One tree and filtering result serve the selected node and its sections.
-    #[cfg(test)]
-    fn with_subject_browse<T>(
-        &self, books: Books, route: i64, query: &library_model::LibraryBrowseQuery, downloaded_only: bool, read: impl FnOnce(i64, &BTreeMap<i64, SubjectNode>, &MatchingBooks, &BrowseOptions) -> Result<T, DatabaseError>,
-    ) -> Result<T, DatabaseError> {
-        let options = BrowseOptions::from_query(query, downloaded_only);
-        self.with_browse_snapshot(|| {
-            let nodes = self.subject_tree_for(books)?;
-            let candidates = nodes.get(&route).map(|node| &node.members);
-            let matching = self.matching(books, candidates.unwrap_or(&BTreeSet::new()), &options)?;
-            read(route, &nodes, &matching, &options)
-        })
-    }
-
-    #[cfg(test)]
-    fn matching(&self, books: Books, candidates: &BTreeSet<i64>, options: &BrowseOptions) -> Result<MatchingBooks, DatabaseError> {
-        match books {
-            Books::Library => self.matching_books(candidates, options),
-            Books::Catalog => super::catalog::matching(candidates, &self.library_book_hashes()?, options),
-        }
-    }
-
-    /// Node contents shared by downloads and card sections.
-    #[cfg(test)]
-    fn subject_contents(&self, books: Books, location: i64, nodes: &BTreeMap<i64, SubjectNode>, matching: &MatchingBooks, options: &BrowseOptions) -> Result<library_model::BrowseContents, DatabaseError> {
-        let selected_books = Self::subject_selected_books(location, nodes, matching, options);
-        let children = Self::subject_children(books, location, nodes, matching, options);
-        let cards = match books {
-            Books::Library => self.load_cards(&self.ordered_books(&selected_books, options)?)?,
-            Books::Catalog => super::catalog::cards(&selected_books, options)?,
+    /// Subject paths follow direct assignments after unfiltered compaction.
+    pub(crate) fn book_subjects(&self, source: Books, book: i64) -> Result<Vec<Vec<BrowsePathSegment>>, DatabaseError> {
+        let read = |catalog: Option<&Connection>| {
+            let snapshot = self.subject_snapshot(source, catalog, None)?;
+            let mut paths =
+                snapshot.hierarchy.nodes.iter().enumerate().filter(|(index, _)| *index != 0 && snapshot.direct(*index).binary_search(&book).is_ok()).map(|(index, node)| (node.row.id, snapshot.hierarchy.path(index))).collect::<Vec<_>>();
+            paths.sort_by_key(|(location, _)| *location);
+            Ok(paths.into_iter().map(|(_, path)| path).collect())
         };
-        Ok(library_model::BrowseContents { children, books: cards })
-    }
-
-    pub(super) fn subject_selected_books(location: i64, nodes: &BTreeMap<i64, SubjectNode>, matching: &MatchingBooks, options: &BrowseOptions) -> BTreeSet<i64> {
-        let Some(root) = nodes.get(&location) else { return BTreeSet::new() };
-        let searched = !options.search.is_empty();
-        let mut selected_books = if searched { root.members.intersection(&matching.text_matches).copied().collect() } else { root.direct.clone() };
-        selected_books.retain(|book| matching.books.contains(book));
-
-        selected_books
-    }
-
-    /// The routes a page at `location` lists: its children, or every match
-    /// below it when searching, each with a count of the books that pass.
-    pub(super) fn subject_children(books: Books, location: i64, nodes: &BTreeMap<i64, SubjectNode>, matching: &MatchingBooks, options: &BrowseOptions) -> Vec<BrowseRow> {
-        let Some(root) = nodes.get(&location) else { return Vec::new() };
-        let searched = !options.search.is_empty();
-        let routes = if searched { tree::subtree_routes(nodes, location) } else { root.children.clone() };
-        let mut children = Vec::new();
-        for route in routes {
-            let node = &nodes[&route];
-            if searched && (route == location || !book_model::normalize_search_text(&node.label).contains(&options.search)) {
-                continue;
-            }
-            if let Some(row) = Self::subject_child_row(books, route, node, matching, || {
-                if searched {
-                    let mut labels = Vec::new();
-                    let mut current = nodes.get(&route)?.parent;
-                    while current != location {
-                        let Some(node) = nodes.get(&current) else { break };
-                        labels.push(node.label.as_str());
-                        if node.parent == current {
-                            break;
-                        }
-                        current = node.parent;
-                    }
-                    labels.reverse();
-                    (!labels.is_empty()).then(|| labels.join(" \u{203a} "))
-                } else {
-                    None
-                }
-            }) {
-                children.push(row);
-            }
+        match source {
+            Books::Library => read(None),
+            Books::Catalog => crate::catalog::read(|catalog| read(Some(catalog))),
         }
-        super::ordering::sort_rows(&mut children, options.chip_sort);
-        if books == Books::Catalog {
-            super::ordering::prefer_rows(&mut children, &|row| route_of(row.id).is_some_and(|route| !nodes[&route].members.is_disjoint(&matching.preferred)));
-        }
-        children
-    }
-
-    /// The children of the root and of each route on `path` above the last.
-    /// The page's own matching covers only its subtree, so the root's is
-    /// matched for these.
-    #[cfg(test)]
-    fn subject_ancestors(&self, books: Books, path: &[library_model::BrowsePathSegment], nodes: &BTreeMap<i64, SubjectNode>, options: &BrowseOptions) -> Result<Vec<(BrowseLocation, Vec<BrowseRow>)>, DatabaseError> {
-        let Some((_, above)) = path.split_last() else { return Ok(Vec::new()) };
-        let options = BrowseOptions { search: String::new(), ..options.clone() };
-        let root = library_model::ROOT_SUBJECT_ROUTE_ID;
-        let none = BTreeSet::new();
-        let matching = self.matching(books, nodes.get(&root).map_or(&none, |node| &node.members), &options)?;
-        let mut ancestors = Vec::with_capacity(above.len() + 1);
-        for location in std::iter::once(books.location(root)).chain(above.iter().map(|segment| segment.id)) {
-            let Some(route) = route_of(location) else { continue };
-            ancestors.push((location, Self::subject_children(books, route, nodes, &matching, &options)));
-        }
-        Ok(ancestors)
-    }
-
-    fn subject_child_row(books: Books, route: i64, node: &SubjectNode, matching: &MatchingBooks, path: impl FnOnce() -> Option<String>) -> Option<BrowseRow> {
-        let book_count = node.members.intersection(&matching.books).count();
-        if book_count == 0 {
-            return None;
-        }
-        Some(BrowseRow { id: books.location(route), name: node.label.clone(), path: path(), book_count, downloaded_book_count: node.members.intersection(&matching.downloaded).count(), size_bytes: None })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transactions::WriteOutcome;
 
     #[test]
     fn subject_cards_navigate_by_id_and_breadcrumbs_follow_compacted_parents() {
@@ -267,6 +82,212 @@ mod tests {
         query.search = "fields".into();
         assert_eq!(db.browse(&query, false).unwrap().contents.children[0].id, BrowseLocation::Subject(3));
         assert!(db.connection.is_autocommit());
+    }
+    #[test]
+    fn read_time_compaction_restores_and_recascades_after_assignment_changes() {
+        let db = Database::open(":memory:").unwrap();
+        db.initialize_library().unwrap();
+        // This fixture owns derived rows directly; do not enqueue canonical edits.
+
+        db.connection.fixtures_detach_curated_taxonomy_meta().unwrap();
+        let insert = |first: i64, last: i64| {
+            db.with_write_transaction(|tx| {
+                for id in first..=last {
+                    tx.fixtures_insert_book_8(&id)?;
+                    tx.fixtures_insert_book_dir(&(sync_common::ROOT_DIR_ID.to_string()), &id, &(format!("book{id}.epub")))?;
+                    let concept = match id {
+                        1 | 4 | 5 => 3,
+                        2 => 4,
+                        3 => 5,
+                        _ => unreachable!(),
+                    };
+                    tx.fixtures_insert_book_unified_concept_3(&id, &concept)?;
+                }
+                Ok(WriteOutcome::Commit(()))
+            })
+            .unwrap();
+        };
+        let owners = || {
+            let snapshot = db.subject_snapshot(Books::Library, None, None).unwrap();
+            let mut owners = snapshot.hierarchy.nodes.iter().enumerate().flat_map(|(index, node)| snapshot.direct(index).iter().map(move |&book| (node.row.id, book))).collect::<Vec<_>>();
+            owners.sort();
+            owners
+                .into_iter()
+                .map(|(location, book)| match location {
+                    BrowseLocation::Subject(route) => (route, book),
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let visible = || {
+            let snapshot = db.subject_snapshot(Books::Library, None, None).unwrap();
+            let mut routes = snapshot
+                .hierarchy
+                .nodes
+                .iter()
+                .skip(1)
+                .map(|node| match node.row.id {
+                    BrowseLocation::Subject(route) => route,
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>();
+            routes.sort();
+            routes
+        };
+        insert(1, 2);
+        assert_eq!(visible(), Vec::<i64>::new());
+        assert_eq!(owners(), vec![(0, 1), (0, 2)]);
+        insert(3, 3);
+        assert_eq!(visible(), vec![1]);
+        assert_eq!(owners(), vec![(1, 1), (1, 2), (1, 3)]);
+        let query = |route: i64| library_model::LibraryBrowseQuery {
+            location: library_model::BrowseLocation::Subject(route),
+            search: String::new(),
+            file_types: vec![],
+            languages: vec![],
+            chip_sort: library_model::BrowseChipSort::Alphabetical,
+            book_sort: library_model::BrowseBookSort::Alphabetical,
+            hide_finished: false,
+        };
+        let writes = db.connection.total_changes();
+        let root = db.browse_contents(&query(0), false).unwrap();
+        assert_eq!(root.children.iter().map(|child| child.name.as_str()).collect::<Vec<_>>(), ["Transportation"]);
+        let transportation = db.browse_contents(&query(1), false).unwrap();
+        assert!(transportation.children.is_empty());
+        assert_eq!(transportation.books.len(), 3);
+        assert_eq!(db.connection.total_changes(), writes, "browsing must not perform compaction writes");
+        insert(4, 5);
+        assert_eq!(visible(), vec![1, 2, 3]);
+        assert_eq!(owners(), vec![(1, 3), (2, 2), (3, 1), (3, 4), (3, 5)]);
+        db.with_write_transaction(|tx| {
+            tx.fixtures_delete_book_unified_concept()?;
+            Ok(WriteOutcome::Commit(()))
+        })
+        .unwrap();
+        assert_eq!(visible(), vec![1]);
+        assert_eq!(owners(), vec![(1, 1), (1, 2), (1, 3)]);
+        db.with_write_transaction(|tx| {
+            tx.fixtures_delete_book_unified_concept_2()?;
+            Ok(WriteOutcome::Commit(()))
+        })
+        .unwrap();
+        assert_eq!(visible(), Vec::<i64>::new());
+        assert_eq!(owners(), vec![(0, 1), (0, 2)]);
+        assert_eq!(db.connection.fixtures_read_book_unified_concept_concept_id(|row| row.get::<_, i64>(0)).unwrap(), 3);
+    }
+
+    #[test]
+    fn empty_single_child_wrapper_absorbs_and_restores_grandchildren() {
+        let db = Database::open(":memory:").unwrap();
+        db.initialize_library().unwrap();
+        // This fixture owns derived rows directly; do not enqueue canonical edits.
+
+        db.connection.fixtures_detach_curated_taxonomy_meta_2().unwrap();
+        let insert = |range: std::ops::RangeInclusive<i64>| {
+            db.with_write_transaction(|tx| {
+                for id in range {
+                    tx.fixtures_insert_book_8(&id)?;
+                    tx.fixtures_insert_book_dir(&(sync_common::ROOT_DIR_ID.to_string()), &id, &(format!("book{id}.epub")))?;
+                    let concept = if id <= 3 {
+                        3
+                    } else if id <= 6 {
+                        4
+                    } else {
+                        1
+                    };
+                    tx.fixtures_insert_book_unified_concept_3(&id, &concept)?;
+                }
+                Ok(WriteOutcome::Commit(()))
+            })
+            .unwrap();
+        };
+        let visible = || {
+            let snapshot = db.subject_snapshot(Books::Library, None, None).unwrap();
+            let mut routes = snapshot
+                .hierarchy
+                .nodes
+                .iter()
+                .skip(1)
+                .map(|node| match (node.row.id, snapshot.hierarchy.nodes[node.parent.unwrap()].row.id) {
+                    (BrowseLocation::Subject(route), BrowseLocation::Subject(parent)) => (route, parent),
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>();
+            routes.sort();
+            routes
+        };
+        insert(1..=6);
+        assert_eq!(visible(), vec![(1, 0), (3, 1), (4, 1)]);
+        let query = library_model::LibraryBrowseQuery {
+            location: library_model::BrowseLocation::Subject(1),
+            search: String::new(),
+            file_types: vec![],
+            languages: vec![],
+            chip_sort: library_model::BrowseChipSort::Alphabetical,
+            book_sort: library_model::BrowseBookSort::Alphabetical,
+            hide_finished: false,
+        };
+        let contents = db.browse_contents(&query, false).unwrap();
+        assert_eq!(contents.children.iter().map(|child| child.name.as_str()).collect::<Vec<_>>(), ["Optics", "Quantum"]);
+        assert!(contents.books.is_empty());
+        insert(7..=7);
+        assert_eq!(visible(), vec![(1, 0), (2, 1), (3, 2), (4, 2)]);
+        db.with_write_transaction(|tx| {
+            tx.fixtures_delete_book_unified_concept_3()?;
+            Ok(WriteOutcome::Commit(()))
+        })
+        .unwrap();
+        assert_eq!(visible(), vec![(1, 0), (3, 1), (4, 1)]);
+        assert_eq!(db.connection.fixtures_read_book_unified_concept_concept_id(|row| row.get::<_, i64>(0)).unwrap(), 3);
+    }
+
+    #[test]
+    fn multiple_routes_filters_search_scope_and_taxonomy_edits_are_read_live() {
+        let db = Database::open(":memory:").unwrap();
+        db.initialize_library().unwrap();
+        db.connection.fixtures_detach_curated_concept_2().unwrap();
+        for id in 1..=3 {
+            db.connection.fixtures_insert_book_6(&id).unwrap();
+            db.connection.fixtures_insert_book_dir_2(&(sync_common::ROOT_DIR_ID.to_string()), &id, &(format!("book{id}.epub")), &(i64::from(id == 1))).unwrap();
+            db.connection.fixtures_insert_book_unified_concept_4(&id).unwrap();
+            db.connection.fixtures_insert_book_language_2(&id, &(if id == 1 { "en" } else { "sv" })).unwrap();
+        }
+        db.connection.fixtures_insert_book_unified_concept_5().unwrap();
+        let mut query = library_model::LibraryBrowseQuery {
+            location: library_model::BrowseLocation::Subject(0),
+            search: String::new(),
+            file_types: vec![],
+            languages: vec![],
+            chip_sort: Default::default(),
+            book_sort: Default::default(),
+            hide_finished: false,
+        };
+        db.connection.pragma_update(None, "query_only", true).unwrap();
+        let root = db.browse(&query, false).unwrap();
+        assert_eq!(root.contents.children.iter().map(|row| (row.name.as_str(), row.book_count)).collect::<Vec<_>>(), [("Other", 3), ("Science", 3)]);
+        assert_eq!(root.sections.len(), 2);
+        query.search = "book".into();
+        assert_eq!(db.browse_contents(&query, false).unwrap().books.len(), 3, "multiple routes must not duplicate cards");
+        query.location = library_model::BrowseLocation::Subject(1);
+        query.search = "Other".into();
+        let searched = db.browse_contents(&query, false).unwrap();
+        assert!(searched.books.is_empty() && searched.children.is_empty(), "search stays inside the selected subject");
+        query.location = library_model::BrowseLocation::Subject(0);
+        query.search.clear();
+        query.languages = vec!["en".into()];
+        let filtered = db.browse_contents(&query, false).unwrap();
+        assert_eq!(filtered.children.iter().map(|row| (row.name.as_str(), row.book_count)).collect::<Vec<_>>(), [("Other", 1), ("Science", 1)], "filters must not change compaction");
+        query.languages.clear();
+        let downloaded = db.browse_contents(&query, true).unwrap();
+        assert!(downloaded.children.iter().all(|row| row.book_count == 1 && row.downloaded_book_count == 1));
+        db.connection.pragma_update(None, "query_only", false).unwrap();
+        db.connection.fixtures_update_curated_concept_preferred_label_science().unwrap();
+        assert!(db.browse_contents(&query, false).unwrap().children.iter().any(|row| row.name == "Renamed science"));
+        db.connection.fixtures_delete_book_dir().unwrap();
+        let collapsed = db.browse_contents(&query, false).unwrap();
+        assert!(collapsed.children.is_empty());
+        assert_eq!(collapsed.books.len(), 2);
+        assert_eq!(db.connection.fixtures_read_book_unified_concept_count(|row| row.get::<_, i64>(0)).unwrap(), 4, "compaction never rewrites assignments");
     }
 }
 

@@ -12,8 +12,8 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::{Icon, IconName};
 
 use crate::{
-    BrowserTheme, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TEXT_MD, TEXT_SM, TEXT_XS, THEME_PICKER_WIDTH_REM, TITLE_MD, TOPBAR_ACTION_HORIZONTAL_PADDING, settings_control_size_rem,
-    topbar_action_gap, topbar_action_height_rem,
+    BrowserTheme, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TEXT_MD, TEXT_SM, TEXT_XS, THEME_PICKER_WIDTH_REM, TITLE_MD, settings_control_size_rem, topbar_action_gap,
+    topbar_action_height_rem,
 };
 
 /// A navigation destination, in the sidebar rail and the bottom bar alike: its
@@ -210,7 +210,7 @@ pub fn library_switcher_group() -> Div {
 /// it carries no underline: the breadcrumb and the actions already mark the
 /// boundary. See [`crate::nav_rail_destinations`].
 pub fn topbar(theme: BrowserTheme) -> Div {
-    div().w_full().min_w_0().h(gpui::rems(topbar_height_rem())).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).when(cfg!(feature = "kobo"), |bar| bar.px(px(CONTENT_INSET))).bg(theme.page_bg)
+    div().w_full().min_w_0().h(gpui::rems(topbar_height_rem())).flex_none().flex().flex_row().items_center().gap(px(if crate::touch_ui() { SPACE_XXS } else { SPACE_MD })).when(cfg!(feature = "kobo"), |bar| bar.px(px(CONTENT_INSET))).bg(theme.page_bg)
 }
 
 /// The reader's single-row topbar, sized to its controls without extra vertical
@@ -252,13 +252,14 @@ pub fn mobile_navigation_menu_heading(title: impl IntoElement, back: Option<Butt
 /// chevron saying it can be changed. Pulled left by its own padding so the
 /// text lines up with the plain titles of other pages.
 pub fn mobile_navigation_menu_title(id: impl Into<ElementId>, title: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    crate::base_button(id).ghost().min_w_0().h(gpui::rems(topbar_action_height_rem())).px(px(SPACE_XS)).ml(px(-SPACE_XS)).child(
+    crate::base_button(id).ghost().flex_1().min_w_0().max_w_full().h(gpui::rems(topbar_action_height_rem())).px(px(SPACE_XS)).ml(px(-SPACE_XS)).child(
         div()
+            .flex_1()
             .min_w_0()
             .flex()
             .items_center()
             .gap(px(SPACE_XS))
-            .child(div().min_w_0().truncate().when_some(theme.display_font_family(), |text, family| text.font_family(family)).text_size(gpui::rems(TEXT_MD)).child(title.into()))
+            .child(div().flex_1().min_w_0().truncate().when_some(theme.display_font_family(), |text, family| text.font_family(family)).text_size(gpui::rems(TEXT_MD)).child(title.into()))
             .child(Icon::new(IconName::ChevronDown).flex_none().text_color(theme.text_muted)),
     )
 }
@@ -323,10 +324,10 @@ pub fn library_switcher_header(title: impl Into<SharedString>, theme: BrowserThe
     div().h(gpui::rems(navigation_modal_row_height_rem())).w_full().flex().items_center().justify_between().pl(px(SPACE_SM)).pb(px(SPACE_XS)).text_size(gpui::rems(TEXT_MD)).text_color(theme.text).child(title.into())
 }
 
-/// The keyboard cursor uses the light accent, shared by every square icon
+/// The keyboard cursor uses an accent outline, shared by every square icon
 /// action in the library switcher list.
 fn library_switcher_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, cursor: bool, theme: BrowserTheme) -> Button {
-    crate::outlined_icon_button(id, crate::shortcut_tooltip(label, "enter"), icon).flex_none().when(cursor, |button| button.bg(theme.accent_wash))
+    crate::outlined_icon_button(id, crate::shortcut_tooltip(label, "enter"), icon).flex_none().when(cursor, |button| button.border_1().border_color(theme.accent))
 }
 
 pub fn library_switcher_add_button(cursor: bool, theme: BrowserTheme) -> Button {
@@ -357,23 +358,6 @@ pub fn library_switcher_row(library: impl IntoElement, actions: impl IntoElement
 
 pub fn library_switcher_menu_button(id: impl Into<ElementId>, label: impl Into<SharedString>, cursor: bool, theme: BrowserTheme) -> Button {
     library_switcher_action_button(id, format!(text!(common::manage), label.into()), IconName::EllipsisVertical, cursor, theme)
-}
-
-pub fn topbar_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
-    crate::outlined_button(id, theme)
-        .label(label)
-        .icon(icon)
-        .text_size(gpui::rems(TEXT_SM))
-        .font_weight(crate::TOPBAR_ACTION_LABEL_WEIGHT)
-        .h(gpui::rems(topbar_action_height_rem()))
-        .px(px(TOPBAR_ACTION_HORIZONTAL_PADDING))
-        .rounded(px(RADIUS_MD))
-}
-
-/// A topbar action that destroys something for good, told apart from the
-/// actions beside it by its colour.
-pub fn topbar_danger_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
-    topbar_action_button(id, label, icon, theme).text_color(theme.danger)
 }
 
 /// Base surface for a clickable row or card.
@@ -482,24 +466,6 @@ pub(crate) fn browser_settings_header(title: impl Into<SharedString>, theme: Bro
     div().w_full().pb(px(SPACE_SM)).flex().flex_row().flex_wrap().items_center().justify_between().gap(px(SPACE_SM)).child(
         browser_settings_legend(title, theme).flex_none().w_auto().min_h(rems(settings_control_size_rem())).flex().items_center(),
     )
-}
-
-/// An action in a settings group's header.
-///
-/// The same size as the controls in the rows below it, because it is read as
-/// one of them; `primary` highlights it, for the one of a pair a returning user
-/// almost always wants.
-pub fn browser_settings_header_button(id: impl Into<ElementId>, label: impl Into<SharedString>, primary: bool, theme: BrowserTheme) -> Button {
-    let button = crate::base_button(id)
-        .label(label)
-        .ghost()
-        .h(gpui::rems(settings_control_size_rem()))
-        .px(px(SPACE_MD))
-        .rounded(px(RADIUS_SM))
-        .border_1()
-        .border_color(if primary { theme.accent } else { theme.border })
-        .text_size(gpui::rems(TEXT_XS));
-    crate::selectable_button(button, primary, theme).when(primary && cfg!(feature = "kobo"), |button| button.border_1())
 }
 
 /// Section headings use the same small caps as headings over controls.

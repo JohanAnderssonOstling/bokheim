@@ -102,7 +102,7 @@ def prepare(args, rerun):
                 audio = table == 'external_book' and db.execute(
                     'SELECT format FROM external_book WHERE entry_key=?', (key,)).fetchone()[0] == 16
                 requests.append({'key': table + ':' + key, 'record': record,
-                                 'audiobook': audio, 'needs_cover': False,
+                                 'needs_description': False, 'audiobook': audio, 'needs_cover': False,
                                  'readings': [], 'recording': None})
         db.commit()
     assert set(high_counts) <= {row['key'] for row in selected}

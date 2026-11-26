@@ -38,7 +38,8 @@ impl LibraryEnrichment {
     /// Metadata and covers own their retry work; thumbnail completion wakes this lane.
     pub async fn run(&self) -> Result<(), ()> {
         let result: EnrichmentResult<()> = async {
-            self.enrich_books().await?;
+            futures_util::future::try_join(self.enrich_books(), self.fill_covers()).await?;
+            // Catch missing artwork introduced while metadata was arriving.
             self.fill_covers().await?;
             if let Some(retry_at) = self.database.enrichment_next_retry().await? {
                 self.events.enrichment.wake_after(retry_delay(retry_at, enrich::now()));

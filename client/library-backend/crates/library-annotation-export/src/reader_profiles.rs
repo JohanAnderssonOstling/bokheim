@@ -420,7 +420,7 @@ mod tests {
                 size_bytes: bytes.len() as u64,
                 inspection_version: 1,
                 inspection: Some(InspectedBook { metadata: BookRecord { metadata: BookDetails { title: "Book".into(), ..Default::default() }, description: String::new() }, pdf: None, audiobook: None, toc: vec![] }),
-                published: PublishedStagedBook { name: "Book.epub".into(), relative_path: "/Book.epub".into(), published: true, fingerprint: Some(1) },
+                published: PublishedStagedBook { physical_size_bytes: None, name: "Book.epub".into(), relative_path: "/Book.epub".into(), published: true, fingerprint: Some(1) },
                 request_thumbnail: false,
                 restore_paths: vec![],
             })
@@ -443,7 +443,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let assets = AssetStore::open(root.to_str().unwrap()).unwrap();
+        let assets = AssetStore::open(root.to_str().unwrap(), &root.join(".bokheim/private-assets")).unwrap();
         let output = temp.path().join("exports");
         let options = AnnotationExportOptions {
             destination: output.clone(),

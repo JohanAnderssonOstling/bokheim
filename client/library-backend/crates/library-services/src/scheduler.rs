@@ -37,7 +37,8 @@ impl SyncScheduler {
         let deadline = Instant::now() + delay;
         self.0.send_modify(|schedule| schedule.deadline = Some(schedule.deadline.map_or(deadline, |at| at.min(deadline))));
     }
-    fn take_pending(&self) -> Schedule {
+    /// Consume coalesced requests, including ones received before subscribing.
+    pub fn take_pending(&self) -> Schedule {
         let mut pending = Schedule::default();
         self.0.send_if_modified(|schedule| {
             if schedule.wake_requested_at.is_none() && schedule.deadline.is_none() && !schedule.refresh_remote {

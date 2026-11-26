@@ -1,6 +1,5 @@
 //! Native file observation shared by ingestion and local reader opening.
 use client_platform_runtime::filesystem as fs;
-#[cfg(windows)]
 use client_platform_runtime::filesystem::File;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -19,6 +18,32 @@ fn fingerprint_once(path: &Path) -> io::Result<u64> {
     let metadata = fs::metadata(path)?;
     #[cfg(target_os = "android")]
     let metadata = if fs::is_document_path(path) { fs::Metadata::Native(fs::open(path)?.metadata()?) } else { fs::metadata(path)? };
+    let hasher = fingerprint_hasher(&metadata)?;
+    #[cfg(windows)]
+    let hasher = {
+        let mut hasher = hasher;
+        hash_windows_revision(&file, &mut hasher)?;
+        hasher
+    };
+    Ok(finish_fingerprint(hasher))
+}
+
+/// Observe an already opened file without resolving its provider path again.
+pub fn open_file_fingerprint(file: &File) -> io::Result<u64> {
+    let metadata = file.metadata()?;
+    #[cfg(target_os = "android")]
+    let metadata = fs::Metadata::Native(metadata);
+    let hasher = fingerprint_hasher(&metadata)?;
+    #[cfg(windows)]
+    let hasher = {
+        let mut hasher = hasher;
+        hash_windows_revision(file, &mut hasher)?;
+        hasher
+    };
+    Ok(finish_fingerprint(hasher))
+}
+
+fn fingerprint_hasher(metadata: &fs::Metadata) -> io::Result<blake3::Hasher> {
     let modified = metadata.modified()?.duration_since(UNIX_EPOCH).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(&modified.as_nanos().to_le_bytes());
@@ -32,10 +57,12 @@ fn fingerprint_once(path: &Path) -> io::Result<u64> {
         hasher.update(&metadata.ctime().to_le_bytes());
         hasher.update(&metadata.ctime_nsec().to_le_bytes());
     }
-    #[cfg(windows)]
-    hash_windows_revision(&file, &mut hasher)?;
+    Ok(hasher)
+}
+
+fn finish_fingerprint(hasher: blake3::Hasher) -> u64 {
     let [a, b, c, d, e, f, g, h, ..] = *hasher.finalize().as_bytes();
-    Ok(u64::from_le_bytes([a, b, c, d, e, f, g, h]))
+    u64::from_le_bytes([a, b, c, d, e, f, g, h])
 }
 
 #[cfg(windows)]

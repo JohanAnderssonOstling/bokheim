@@ -1,6 +1,6 @@
 //! Immutable publication with bounded updates over the same imported snapshot.
 use super::{batch::WorkEvidenceCache, *};
-use rusqlite::{Row, params_from_iter};
+use rusqlite::{params_from_iter, Row};
 use std::cmp::Ordering as KeyOrder;
 
 // Bump when the stored resolution, candidate or queue rules change. Server-only
@@ -20,6 +20,8 @@ CREATE TABLE answer_demand(isbn13 INTEGER PRIMARY KEY,requests INTEGER NOT NULL)
 pub(super) struct InputIdentity {
     source: FileIdentity,
     descriptions: Option<FileIdentity>,
+    #[serde(default)]
+    edition_descriptions: Option<FileIdentity>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,7 +57,9 @@ impl InputIdentity {
         Ok(())
     }
     pub(super) fn read(source: &Path, descriptions: Option<&Path>) -> Result<Self, MetadataError> {
-        Ok(Self { source: FileIdentity::read(source)?, descriptions: descriptions.map(FileIdentity::read).transpose()? })
+        let source = FileIdentity::read(source)?;
+        let editions = super::edition_descriptions::validated_index_path(&source.path)?;
+        Ok(Self { source, descriptions: descriptions.map(FileIdentity::read).transpose()?, edition_descriptions: editions.as_deref().map(FileIdentity::read).transpose()? })
     }
 
     pub(super) fn verify(&self, source: &Path, descriptions: Option<&Path>) -> Result<(), MetadataError> {
@@ -239,8 +243,7 @@ pub fn build_answers_incremental(snapshot: &Path, providers: Option<&Path>, dema
                     removed += 1;
                 }
                 if included(&source, provider.as_ref(), demand_input.as_ref(), isbn)? {
-                    let requests = demand_input.as_ref().map(|c| c.query_row("SELECT requests FROM demand WHERE isbn13=?1", [isbn], |r| r.get::<_, i64>(0)).optional().map_err(error)).transpose()?.flatten().unwrap_or(0);
-                    rows.push((isbn, requests));
+                    rows.push(isbn);
                 }
             }
             stats.write_seconds += write_started.elapsed().as_secs_f64();
@@ -248,7 +251,7 @@ pub fn build_answers_incremental(snapshot: &Path, providers: Option<&Path>, dema
                 continue;
             }
             let lookup = Instant::now();
-            let mut response = resolver.enrich_build_batch_cached(rows.iter().map(|(isbn, _)| format!("{isbn:013}")).collect(), &mut cache)?;
+            let mut response = resolver.enrich_build_batch_cached(rows.iter().map(|isbn| format!("{isbn:013}")).collect(), &mut cache)?;
             stats.lookup_seconds += lookup.elapsed().as_secs_f64();
             let lookup = Instant::now();
             if let Some(c) = &provider {
@@ -270,23 +273,10 @@ pub fn build_answers_incremental(snapshot: &Path, providers: Option<&Path>, dema
         }
         super::identity::build_candidates_for(&source, &out, Some(&editions))?;
         stats.edition_index_seconds = index.elapsed().as_secs_f64();
-        let queue = Instant::now();
-        // Only refreshed ISBNs have been reinserted into wanted. Closing their
-        // work again also leaves previously pruned unaffected rows untouched.
-        for chunk in works.iter().copied().collect::<Vec<_>>().chunks(500) {
-            let sql = format!("DELETE FROM wanted WHERE work_id IN ({}) AND (work_id IN (SELECT work_id FROM answer_work_lcc) OR EXISTS(SELECT 1 FROM edition_candidate c WHERE c.work_id=wanted.work_id))", sql_placeholders(chunk.len()));
-            out.execute(&sql, params_from_iter(chunk)).map_err(error)?;
-        }
-        for &isbn in &demand_updates {
-            let requests = demand_input.as_ref().map(|c| c.query_row("SELECT requests FROM demand WHERE isbn13=?1", [isbn], |r| r.get::<_, i64>(0)).optional().map_err(error)).transpose()?.flatten().unwrap_or(0);
-            let rank = if requests > 0 { (-1_000_000_000_000_i64).saturating_sub(requests) } else { 0 };
-            out.execute("UPDATE wanted SET rank=?1 WHERE isbn13=?2", params![rank, isbn]).map_err(error)?;
-        }
         sync_inputs(&out, provider.as_ref(), demand_input.as_ref(), &changes)?;
         save_counts(&out, &inputs, count, bytes)?;
         out.execute("UPDATE snapshot SET built_at_ms=?1,provider_results_through_ms=?2 WHERE singleton=1", params![now_ms(), through]).map_err(error)?;
         inputs.verify(snapshot, descriptions)?;
-        stats.queue_seconds = queue.elapsed().as_secs_f64();
         out.execute_batch("COMMIT; PRAGMA main.optimize;").map_err(error)?;
         let integrity: String = out.query_row("PRAGMA main.quick_check", [], |r| r.get(0)).map_err(error)?;
         if integrity != "ok" {
@@ -324,7 +314,6 @@ fn report(mode: &'static str, started: Instant, count: u64, bytes: u64, resolved
         write_seconds: 0.0,
         edition_index_seconds: 0.0,
         authority_index_seconds: 0.0,
-        queue_seconds: 0.0,
     }
 }
 

@@ -14,7 +14,7 @@ const BOOK_BYTES: &[u8] = b"the only local copy of an unfinished upload";
 
 async fn local_book() -> (TempDir, AssetStore, DatabaseClient, BookId) {
     let root = TempDir::new().unwrap();
-    let assets = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+    let assets = AssetStore::open(root.path().to_str().unwrap(), &root.path().join(".bokheim/private-assets")).unwrap();
     let database = DatabaseClient::open(":memory:").unwrap();
     database.initialize_library().await.unwrap();
     let hash = BookId::from_bytes(*blake3::hash(BOOK_BYTES).as_bytes());
@@ -32,7 +32,7 @@ async fn local_book() -> (TempDir, AssetStore, DatabaseClient, BookId) {
             size_bytes: BOOK_BYTES.len() as u64,
             inspection_version: 1,
             inspection: Some(InspectedBook { pdf: None, audiobook: None, metadata: record.clone(), toc: vec![] }),
-            published: PublishedStagedBook { name: "book.epub".into(), relative_path: "/book.epub".into(), published: true, fingerprint: None },
+            published: PublishedStagedBook { physical_size_bytes: None, name: "book.epub".into(), relative_path: "/book.epub".into(), published: true, fingerprint: None },
             request_thumbnail: false,
             restore_paths: vec![],
         })

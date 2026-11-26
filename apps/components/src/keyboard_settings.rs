@@ -3,8 +3,26 @@
 use ui_text::text;
 
 use app_preferences::KeyboardShortcuts;
-use gpui::{Action, App, DummyKeyboardMapper, Global, KeyBinding, KeyBindingMetaIndex, Keystroke, SharedString, Task};
+use gpui::{Action, App, Div, DummyKeyboardMapper, Global, KeyBinding, KeyBindingMetaIndex, Keystroke, ParentElement, SharedString, Styled, Task, Window, rems};
 use std::rc::Rc;
+
+/// General and Keyboard navigation shares its geometry across settings surfaces.
+pub fn settings_tabs(id: &'static str, keyboard: bool, theme: crate::BrowserTheme, on_select: impl Fn(bool, &mut Window, &mut App) + 'static) -> Div {
+    let on_select = Rc::new(on_select);
+    crate::row(0.0).w_full().min_w_0().h(rems(2.75)).flex_none().children([(false, "general", text!(common::general)), (true, "keyboard", text!(common::keyboard))].map(|(is_keyboard, name, label)| {
+        let on_select = on_select.clone();
+        crate::base_button(format!("{id}-{name}-tab"))
+            .label(label)
+            .ghost()
+            .no_fill()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .border_b_2()
+            .border_color(if keyboard == is_keyboard { theme.accent } else { theme.rule })
+            .on_click(move |_, window, cx| on_select(is_keyboard, window, cx))
+    }))
+}
 
 const SHORTCUT_BINDING: KeyBindingMetaIndex = KeyBindingMetaIndex(0x424b);
 

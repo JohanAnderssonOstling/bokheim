@@ -82,9 +82,6 @@ type ContextMenuHandler = dyn Fn(Option<SharedString>, Point<Pixels>, &mut Windo
 const MARQUEE_THRESHOLD: f32 = 4.0;
 const SWIPE_AXIS_LOCK_DISTANCE: f32 = 12.0;
 const SWIPE_AXIS_DOMINANCE: f32 = 1.25;
-const SWIPE_VIEWPORT_FRACTION: f32 = 0.12;
-const SWIPE_MINIMUM_DISTANCE: f32 = 48.0;
-const SWIPE_MAXIMUM_DISTANCE: f32 = 120.0;
 
 #[derive(Default)]
 struct PaginatorSwipe {
@@ -344,6 +341,8 @@ pub struct Paginator {
     content_height: Option<Pixels>,
     direction: AssignmentDirection,
     visible_page: Option<VisiblePage>,
+    /// Keep controls stable while refreshed children await layout.
+    last_page_availability: (bool, bool),
     children_revision: usize,
     prefetched: Option<PrefetchKey>,
     animate_page_transitions: bool,
@@ -440,6 +439,7 @@ impl Paginator {
             content_height: None,
             direction: AssignmentDirection::Forward,
             visible_page: None,
+            last_page_availability: (false, false),
             children_revision: 0,
             prefetched: None,
             animate_page_transitions: !cfg!(feature = "kobo"),
@@ -605,6 +605,7 @@ impl Paginator {
         // headings — and cancelling here would leave that turn the only one
         // that never animates. The outgoing page's height rides along with it,
         // so a backward turn still pans by a measured page rather than a guess.
+        let page_availability = (self.has_previous(), self.has_next());
         let transition = self.transition.take();
         let content_height = self.content_height;
         // Compare the restored selection with the original, not the temporary
@@ -616,6 +617,9 @@ impl Paginator {
         self.direction = direction;
         self.transition = transition;
         self.content_height = content_height;
+        if !self.data.children.is_empty() {
+            self.last_page_availability = page_availability;
+        }
     }
 
     pub fn set_groups(&mut self, groups: impl IntoIterator<Item = PaginatorGroup>, cx: &mut Context<Self>) {
@@ -632,6 +636,7 @@ impl Paginator {
         self.content_height = None;
         self.direction = AssignmentDirection::Forward;
         self.visible_page = None;
+        self.last_page_availability = (false, false);
         self.children_revision = self.children_revision.wrapping_add(1);
         self.prefetched = None;
         self.cancel_page_transition();
@@ -989,13 +994,13 @@ impl Paginator {
     /// Whether a measured page exists before the page currently on screen.
     /// Unlike `can_previous`, this remains stable while a transition runs.
     pub fn has_previous(&self) -> bool {
-        self.visible_page.or_else(|| self.transition.as_ref().map(|transition| transition.outgoing_page)).is_some_and(|page| page.first_child > 0)
+        self.visible_page.or_else(|| self.transition.as_ref().map(|transition| transition.outgoing_page)).map_or(self.last_page_availability.0, |page| page.first_child > 0)
     }
 
     /// Whether a measured page exists after the page currently on screen.
     /// Unlike `can_next`, this remains stable while a transition runs.
     pub fn has_next(&self) -> bool {
-        self.visible_page.or_else(|| self.transition.as_ref().map(|transition| transition.outgoing_page)).is_some_and(|page| page.last_child.saturating_add(1) < self.data.children.len())
+        self.visible_page.or_else(|| self.transition.as_ref().map(|transition| transition.outgoing_page)).map_or(self.last_page_availability.1, |page| page.last_child.saturating_add(1) < self.data.children.len())
     }
 
     /// Defer asynchronous page turns until layout and any animation settle.
@@ -1142,6 +1147,7 @@ impl Paginator {
             return false;
         }
         self.visible_page = visible_page;
+        self.last_page_availability = visible_page.map_or((false, false), |page| (page.first_child > 0, page.last_child.saturating_add(1) < self.data.children.len()));
         // A cursor the reader can no longer see is not a selection. Turning the
         // page with the wheel leaves it behind, so it is dropped here rather
         // than dragged along invisibly; walking the cursor off the edge turns
@@ -1236,12 +1242,11 @@ impl Paginator {
                     return;
                 };
 
-                let (distance, viewport_extent) = match axis {
-                    PaginatorAxis::Horizontal => (swipe.x, f32::from(window.viewport_size().width)),
-                    PaginatorAxis::Vertical => (swipe.y, f32::from(window.viewport_size().height)),
+                let distance = match axis {
+                    PaginatorAxis::Horizontal => swipe.x,
+                    PaginatorAxis::Vertical => swipe.y,
                 };
-                let threshold = (viewport_extent * SWIPE_VIEWPORT_FRACTION).clamp(SWIPE_MINIMUM_DISTANCE, SWIPE_MAXIMUM_DISTANCE);
-                self.finish_swipe(axis, (distance.abs() >= threshold).then_some(distance), true, window, cx);
+                self.finish_swipe(axis, (distance.is_finite() && distance != 0.0).then_some(distance), true, window, cx);
             }
             TouchPhase::Cancelled => {
                 self.swipe_preview.settle();

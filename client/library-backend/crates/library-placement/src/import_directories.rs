@@ -128,7 +128,7 @@ mod tests {
     async fn placement(root: &std::path::Path) -> std::sync::Arc<tokio::sync::RwLock<LibraryState>> {
         let database = DatabaseClient::open(root.join("state.sqlite"), &BackendExecutor::new().unwrap()).await.unwrap();
         database.initialize_library().await.unwrap();
-        let assets = AssetStore::open(root.to_str().unwrap()).unwrap();
+        let assets = AssetStore::open(root.to_str().unwrap(), &root.join(".bokheim/private-assets")).unwrap();
 
         let (events, _) = LibraryEventRouter::new();
         std::sync::Arc::new(tokio::sync::RwLock::new(LibraryState::new(database, assets, events)))

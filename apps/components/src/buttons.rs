@@ -1,9 +1,9 @@
 use crate::Button;
 use gpui::prelude::*;
-use gpui::{ElementId, SharedString, px, rems};
+use gpui::{ElementId, FontWeight, SharedString, px, rems};
 use gpui_component::{Disableable, Icon, IconName, Sizable, Size};
 
-use crate::{BrowserTheme, SPACE_MD, TEXT_SM, topbar_action_height_rem};
+use crate::{RADIUS_SM, SPACE_MD, TEXT_SM, topbar_action_height_rem};
 
 /// Common entry point for interactive controls.
 ///
@@ -13,9 +13,9 @@ pub fn base_button(id: impl Into<ElementId>) -> Button {
     Button::new(id).cursor_pointer()
 }
 
-/// Square action with a quiet border and the page background.
-pub(crate) fn outlined_button(id: impl Into<ElementId>, theme: BrowserTheme) -> Button {
-    base_button(id).border_color(theme.rule)
+/// Standard labeled action. Variants and optional icons share the same geometry.
+pub fn action_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
+    base_button(id).label(label).h(rems(topbar_action_height_rem())).px(px(SPACE_MD)).text_size(rems(TEXT_SM)).font_weight(FontWeight::NORMAL).rounded(px(RADIUS_SM))
 }
 
 /// A borderless square icon action, `topbar_action_height_rem()` on a side (2rem,
@@ -44,8 +44,8 @@ pub fn back_text_button(id: impl Into<ElementId>, label: impl Into<SharedString>
 
 /// Deleting something for good: the standard icon button wearing `danger`, an
 /// icon where the actions beside it that keep things (Restore, Save) are words.
-pub fn delete_icon_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    outlined_icon_button(id, label, IconName::Delete).text_color(theme.danger)
+pub fn delete_icon_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
+    outlined_icon_button(id, label, IconName::Delete).danger()
 }
 
 /// The way out of a dialog, at the size of the primary action it stands beside.
@@ -57,7 +57,7 @@ pub fn delete_icon_button(id: impl Into<ElementId>, label: impl Into<SharedStrin
 pub fn dialog_cancel_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
     let label: SharedString = label.into();
     let tooltip = crate::shortcut_tooltip(label.clone(), "escape");
-    base_button(id).label(label).tooltip(tooltip)
+    action_button(id, label).tooltip(tooltip)
 }
 
 /// A dialog's primary action, paired with [`dialog_cancel_button`].
@@ -65,15 +65,7 @@ pub fn dialog_cancel_button(id: impl Into<ElementId>, label: impl Into<SharedStr
 pub fn dialog_confirm_button(id: impl Into<ElementId>, label: impl Into<SharedString>, shortcut: Option<&str>) -> Button {
     let label = label.into();
     let tooltip = shortcut.map(|shortcut| crate::shortcut_tooltip(label.clone(), shortcut));
-    base_button(id).primary().label(label).when_some(tooltip, |button, tooltip| button.tooltip(tooltip))
-}
-
-pub fn primary_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: impl Into<Icon>, disabled: bool) -> Button {
-    secondary_action_button(id, label, icon, disabled).primary()
-}
-
-pub fn secondary_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: impl Into<Icon>, disabled: bool) -> Button {
-    base_button(id).label(label).icon(icon).h(rems(topbar_action_height_rem())).px(px(SPACE_MD)).disabled(disabled)
+    action_button(id, label).primary().when_some(tooltip, |button, tooltip| button.tooltip(tooltip))
 }
 
 /// A text action that carries no frame of its own, for the way out of a form

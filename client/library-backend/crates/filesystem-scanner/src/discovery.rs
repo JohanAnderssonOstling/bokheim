@@ -1,9 +1,8 @@
 //! Book eligibility and tree discovery shared by explicit imports and scans.
 
 use audiobook_archive::Track;
+use audiobook_folder::FolderInventory;
 use book_model::BookFormat;
-#[cfg(not(target_arch = "wasm32"))]
-use client_platform_runtime::filesystem as fs;
 use library_files::filesystem::{DirectoryEntry, DirectoryWalk};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -40,10 +39,10 @@ pub fn next_book_entry(walk: &mut DirectoryWalk) -> Option<io::Result<DirectoryE
     None
 }
 
-fn other_book_in_audiobook_candidate(folder: &Path, root: &Path, excluded: impl Fn(&Path) -> bool) -> io::Result<bool> {
+fn other_book_in_audiobook_candidate(inventory: &mut FolderInventory, root: &Path, excluded: impl Fn(&Path) -> bool) -> io::Result<bool> {
+    let folder = inventory.folder().to_owned();
     let mut children = Vec::new();
-    for entry in fs::read_dir(folder)? {
-        let entry = entry?;
+    for entry in inventory.entries(&folder)? {
         if entry.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
@@ -59,8 +58,7 @@ fn other_book_in_audiobook_candidate(folder: &Path, root: &Path, excluded: impl 
         }
     }
     while let Some((directory, direct_disc)) = children.pop() {
-        for entry in fs::read_dir(directory)? {
-            let entry = entry?;
+        for entry in inventory.entries(&directory)? {
             if entry.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
@@ -84,16 +82,24 @@ fn other_book_in_audiobook_candidate(folder: &Path, root: &Path, excluded: impl 
 
 /// Classify an audiobook once and retain its tracks for scan fingerprinting.
 /// A mixed folder stays traversable even if unrelated audio sidecars are bad.
-pub fn audiobook_tracks(folder: &Path, root: &Path, excluded: impl Fn(&Path) -> bool) -> io::Result<Option<Vec<Track>>> {
-    let tracks = audiobook_folder::discover(folder);
-    if tracks.as_ref().is_ok_and(|tracks| tracks.is_empty()) || other_book_in_audiobook_candidate(folder, root, excluded)? {
+pub fn audiobook_tracks(inventory: &mut FolderInventory, root: &Path, excluded: impl Fn(&Path) -> bool) -> io::Result<Option<Vec<Track>>> {
+    let tracks = inventory.tracks();
+    if tracks.as_ref().is_ok_and(|tracks| tracks.is_empty()) || other_book_in_audiobook_candidate(inventory, root, excluded)? {
         return Ok(None);
     }
     tracks.map(Some)
 }
 
 pub fn is_audiobook_folder(folder: &Path) -> io::Result<bool> {
-    Ok(audiobook_tracks(folder, folder, |_| false)?.is_some())
+    Ok(audiobook_tracks(&mut FolderInventory::read(folder)?, folder, |_| false)?.is_some())
+}
+
+/// Classify using the walk's observations, then return them for normal descent.
+pub fn is_audiobook_folder_in_walk(walk: &mut DirectoryWalk, folder: &Path) -> io::Result<bool> {
+    let mut inventory = walk.directory_inventory(folder)?;
+    let result = audiobook_tracks(&mut inventory, folder, |_| false);
+    walk.reuse_inventory(inventory);
+    Ok(result?.is_some())
 }
 
 /// Eligible native book paths without importing or changing their contents.
@@ -105,7 +111,8 @@ pub fn book_files_at(root: &Path) -> io::Result<Vec<PathBuf>> {
         if entry.is_symlink() {
             continue;
         }
-        if entry.is_file() || (entry.is_dir() && is_audiobook_folder(entry.path())?) {
+        let audiobook = entry.is_dir() && is_audiobook_folder_in_walk(&mut walk, entry.path())?;
+        if entry.is_file() || audiobook {
             paths.push(entry.path().strip_prefix(root).map_err(io::Error::other)?.to_owned());
             if entry.is_dir() {
                 walk.skip_current_dir();

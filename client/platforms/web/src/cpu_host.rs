@@ -24,7 +24,6 @@ async fn send(mut request: CpuRequest, source: JsValue) -> Result<CpuResponse, B
     if let CpuRequest::Book { task: BookTask::Inspect { .. }, taxonomy } = &mut request {
         *taxonomy = TAXONOMY.with(|slot| slot.borrow().clone());
     }
-    let _permit = if matches!(&request, CpuRequest::Book { .. }) { Some(client_platform_runtime::executor::inspection_permit().await) } else { None };
     let bytes = rmp_serde::to_vec_named(&request).map_err(BackendError::operation)?;
     let response = cpu_client::request_with_source(bytes, source).map_err(BackendError::operation)?.await.map_err(BackendError::operation)?;
     rmp_serde::from_slice(&response).map_err(BackendError::operation)?

@@ -209,7 +209,7 @@ pub(crate) fn render_row(controls: &Entity<UpdateControls>, id: impl Into<Elemen
             let handler = controls.action.clone();
             let loading = busy && !controls.worker_failed;
             let label = if controls.worker_failed { text!(common::retry) } else { label };
-            content = content.child(components::browser_settings_header_button(id, label, true, theme).when(loading, |button| button.icon(IconName::LoaderCircle)).loading(loading).on_click(move |_, _, cx| handler(action.clone(), cx)));
+            content = content.child(components::action_button(id, label).primary().when(loading, |button| button.icon(IconName::LoaderCircle)).loading(loading).on_click(move |_, _, cx| handler(action.clone(), cx)));
         }
         content
     });

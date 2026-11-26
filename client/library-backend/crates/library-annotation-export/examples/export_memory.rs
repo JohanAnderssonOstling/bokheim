@@ -86,7 +86,7 @@ mod linux {
                 size_bytes: bytes.len() as u64,
                 inspection_version: 1,
                 inspection: Some(InspectedBook { metadata: BookRecord { metadata: BookDetails { title: format!("Book {index:05}"), ..Default::default() }, description: String::new() }, pdf: None, audiobook: None, toc: vec![] }),
-                published: PublishedStagedBook { name: file_name.clone(), relative_path: format!("/{file_name}"), published: true, fingerprint: Some(1) },
+                published: PublishedStagedBook { physical_size_bytes: None, name: file_name.clone(), relative_path: format!("/{file_name}"), published: true, fingerprint: Some(1) },
                 request_thumbnail: false,
                 restore_paths: vec![],
             })
@@ -111,7 +111,7 @@ mod linux {
                 db.upsert_annotation(annotation).await?;
             }
         }
-        let assets = AssetStore::open(root.to_str().ok_or("non-UTF8 fixture path")?)?;
+        let assets = AssetStore::open(root.to_str().ok_or("non-UTF8 fixture path")?, &root.join(".bokheim/private-assets"))?;
         let report = export(&db, &assets, library, options(&folder.join("exports"))).await?;
         ensure_written(&report.results)?;
         fs::write(folder.join("fixture.json"), serde_json::to_vec_pretty(&json!({"books":count, "annotations_per_book":annotations, "quote_bytes":246, "note_bytes":126}))?)?;
@@ -147,7 +147,7 @@ mod linux {
         let library = fs::read_to_string(folder.join("library-id"))?.trim().parse()?;
         let db = DatabaseClient::open(folder.join("metadata.sqlite"))?;
         let root = folder.join("library");
-        let assets = AssetStore::open(root.to_str().ok_or("non-UTF8 fixture path")?)?;
+        let assets = AssetStore::open(root.to_str().ok_or("non-UTF8 fixture path")?, &root.join(".bokheim/private-assets"))?;
         let mut options = options(&folder.join("exports"));
         match mode {
             "first" => options.destination = folder.join(format!("first-{}", std::process::id())),

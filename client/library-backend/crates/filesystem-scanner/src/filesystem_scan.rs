@@ -6,10 +6,8 @@
 pub use crate::discovery::is_audiobook_folder;
 use crate::discovery::{audiobook_member, audiobook_tracks, next_book_entry};
 use crate::ingestion::fingerprint as book_fingerprint;
-use crate::ingestion::{READER_EPUB_METADATA_VERSION, READER_PDF_METADATA_VERSION, ingest_audiobook_folder};
-#[cfg(not(target_arch = "wasm32"))]
-use client_platform_runtime::filesystem as fs;
-use futures_util::StreamExt;
+use crate::ingestion::{ingest_audiobook_folder, READER_EPUB_METADATA_VERSION, READER_PDF_METADATA_VERSION};
+use futures_util::future::join_all;
 use library_files::asset_store::import_in_progress;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -22,7 +20,6 @@ use library_database::{FilesystemScan, InspectedFilesystemScan, ScanDirectoryObs
 use sync_common::{DirId, ROOT_DIR_ID};
 
 pub const PUBLISH_BATCH_SIZE: usize = 32;
-const MAX_CONCURRENT_INSPECTIONS: usize = 2;
 
 /// Placement lookup for the immutable book inventory captured at scan startup.
 /// Batch publication updates the snapshot's write guards, not its book inventory.
@@ -76,10 +73,6 @@ fn excluded_audiobook_member(folder: &Path, excluded_paths: &[String]) -> bool {
         }
         audiobook_member(Path::new(&*name))
     })
-}
-
-fn folder_fingerprint(folder: &Path, tracks: &[audiobook_archive::Track]) -> std::io::Result<u64> {
-    library_files::filesystem::audiobook_fingerprint(folder, tracks)
 }
 
 // Database paths use forward slashes on every platform. Join native components
@@ -160,20 +153,32 @@ pub fn discover(root: impl Into<PathBuf>, snapshot: &ScanSnapshot) -> Filesystem
                 continue;
             };
             let marker = entry.path().join(".biblos_uuid");
-            if library_files::filesystem::read_to_string(&marker).ok().and_then(|marker| DirId::parse_str(marker.trim()).ok()).is_some_and(|id| known.get(&id).is_some_and(|known| known.deleted)) {
+            let marker_contents = library_files::filesystem::read_to_string(&marker);
+            if marker_contents.as_ref().ok().and_then(|marker| DirId::parse_str(marker.trim()).ok()).is_some_and(|id| known.get(&id).is_some_and(|known| known.deleted)) {
                 walk.skip_current_dir();
                 continue;
             }
-            match audiobook_tracks(entry.path(), &root, |path| excluded(snapshot, path)) {
+            let mut inventory = match walk.directory_inventory(entry.path()) {
+                Ok(inventory) => inventory,
+                Err(error) => {
+                    log::warn!("scanner could not list folder {}: {error}", entry.path().display());
+                    result.readable = false;
+                    walk.skip_current_dir();
+                    continue;
+                }
+            };
+            match audiobook_tracks(&mut inventory, &root, |path| excluded(snapshot, path)) {
                 Ok(Some(_)) if excluded_audiobook_member(relative, &snapshot.excluded_paths) => {
+                    walk.reuse_inventory(inventory);
                     walk.skip_current_dir();
                     continue;
                 }
                 Ok(Some(tracks)) => {
-                    match folder_fingerprint(entry.path(), &tracks) {
-                        Ok(fingerprint) => result.files.push(ScanFileObservation { directory: parent_id, name, path: relative_path, fingerprint }),
+                    match library_files::filesystem::audiobook_inventory_fingerprint(&mut inventory, &tracks).and_then(|fingerprint| Ok((fingerprint, inventory.physical_size_bytes()?))) {
+                        Ok((fingerprint, size)) => result.files.push(ScanFileObservation { directory_entry: true, physical_size_bytes: Some(size), directory: parent_id, name, path: relative_path, fingerprint }),
                         Err(_) => result.readable = false,
                     }
+                    walk.reuse_inventory(inventory);
                     walk.skip_current_dir();
                     continue;
                 }
@@ -181,11 +186,13 @@ pub fn discover(root: impl Into<PathBuf>, snapshot: &ScanSnapshot) -> Filesystem
                 Err(error) => {
                     log::warn!("scanner could not inspect audiobook folder {}: {error}", entry.path().display());
                     result.readable = false;
+                    walk.reuse_inventory(inventory);
                     walk.skip_current_dir();
                     continue;
                 }
             }
-            let mut id = match library_files::filesystem::read_to_string(&marker) {
+            walk.reuse_inventory(inventory);
+            let mut id = match marker_contents {
                 Ok(marker) => match DirId::parse_str(marker.trim()) {
                     Ok(id) => id,
                     Err(_) => {
@@ -232,7 +239,7 @@ pub fn discover(root: impl Into<PathBuf>, snapshot: &ScanSnapshot) -> Filesystem
                 continue;
             };
             match book_fingerprint(entry.path()) {
-                Ok(fingerprint) => result.files.push(ScanFileObservation { directory: parent_id, name: name.to_owned(), path: relative_path, fingerprint }),
+                Ok(fingerprint) => result.files.push(ScanFileObservation { directory_entry: false, physical_size_bytes: entry.length(), directory: parent_id, name: name.to_owned(), path: relative_path, fingerprint }),
                 Err(_) => result.readable = false,
             }
         }
@@ -266,7 +273,7 @@ pub async fn inspect_files(root: impl Into<PathBuf>, files: &[ScanFileObservatio
             // audiobooks can reuse complete synced playback facts. Reader-library
             // PDFs retain their supplied metadata and defer reader data to opening.
             // Other legacy records without an inspection must be populated once.
-            let format = if fs::is_dir(&root.join(&file.path)) { Some(BookFormat::Mp3Folder) } else { BookFormat::from_file_name(&file.name) };
+            let format = if file.directory_entry { Some(BookFormat::Mp3Folder) } else { BookFormat::from_file_name(&file.name) };
             let version = format.map(book_inspection::inspection_version);
             !known.get(snapshot, file.directory, &file.name).is_some_and(|book| {
                 book.fingerprint == file.fingerprint
@@ -291,7 +298,7 @@ pub async fn inspect_files(root: impl Into<PathBuf>, files: &[ScanFileObservatio
                         if import_in_progress(&path) {
                             return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "book publication is still being prepared"));
                         }
-                        let ingested = if fs::is_dir(&path) {
+                        let ingested = if file.directory_entry {
                             if excluded_audiobook_member(path.strip_prefix(&root).unwrap_or(&path), &snapshot.excluded_paths) {
                                 return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "audiobook contains a temporarily excluded file"));
                             }
@@ -302,6 +309,7 @@ pub async fn inspect_files(root: impl Into<PathBuf>, files: &[ScanFileObservatio
                         let crate::ingestion::IngestedFile { source_identity, audiobook_content_hash, byte_checksum, book_id, size_bytes, fingerprint, format, inspection } = ingested;
                         let extension = format.canonical_extension().to_owned();
                         Ok(ScannedBook {
+                            physical_size_bytes: if file.directory_entry { file.physical_size_bytes } else { Some(size_bytes) },
                             source_identity,
                             audiobook_content_hash,
                             byte_checksum,
@@ -330,8 +338,8 @@ pub async fn inspect_files(root: impl Into<PathBuf>, files: &[ScanFileObservatio
             }
         })
         .collect();
-    let mut inspections = futures_util::stream::iter(inspections).buffered(MAX_CONCURRENT_INSPECTIONS);
-    while let Some(inspection) = inspections.next().await {
+    // Inspect the batch concurrently and retain discovery order for publication.
+    for inspection in join_all(inspections).await {
         match inspection {
             Ok(book) => result.books.push(book),
             Err((path, error)) => {
@@ -391,6 +399,7 @@ mod tests {
                 let fingerprint = discovery.files[0].fingerprint;
                 let hash = BookId::from(blake3::hash(b"book"));
                 let book = ScannedBook {
+                    physical_size_bytes: None,
                     source_identity: None,
                     audiobook_content_hash: None,
                     byte_checksum: None,
@@ -686,7 +695,11 @@ mod tests {
     async fn fingerprints_skip_unchanged_files_but_not_changed_or_uninspected_files() {
         let root = tempfile::tempdir().unwrap();
         // Deliberately absent: a matching fingerprint must skip opening it.
-        let scan = FilesystemScan { files: vec![ScanFileObservation { directory: ROOT_DIR_ID, name: "book.epub".into(), path: "book.epub".into(), fingerprint: 42 }], readable: true, ..Default::default() };
+        let scan = FilesystemScan {
+            files: vec![ScanFileObservation { directory_entry: false, physical_size_bytes: None, directory: ROOT_DIR_ID, name: "book.epub".into(), path: "book.epub".into(), fingerprint: 42 }],
+            readable: true,
+            ..Default::default()
+        };
         let mut snapshot = ScanSnapshot {
             placements: Vec::new(),
             work_revision: 0,
@@ -730,7 +743,11 @@ mod tests {
     #[tokio::test]
     async fn reader_pdf_metadata_skips_only_unchanged_pdf_placements() {
         let root = tempfile::tempdir().unwrap();
-        let mut scan = FilesystemScan { files: vec![ScanFileObservation { directory: ROOT_DIR_ID, name: "book.pdf".into(), path: "book.pdf".into(), fingerprint: 42 }], readable: true, ..Default::default() };
+        let mut scan = FilesystemScan {
+            files: vec![ScanFileObservation { directory_entry: false, physical_size_bytes: None, directory: ROOT_DIR_ID, name: "book.pdf".into(), path: "book.pdf".into(), fingerprint: 42 }],
+            readable: true,
+            ..Default::default()
+        };
         let mut snapshot = ScanSnapshot {
             placements: vec![],
             work_revision: 0,
@@ -770,7 +787,8 @@ mod tests {
         // Empty on purpose: opening these files for inspection must fail. The
         // verified fingerprint and complete synced metadata avoid that work.
         std::fs::create_dir(root.path().join("Audio")).unwrap();
-        let scan = FilesystemScan { files: vec![ScanFileObservation { directory: ROOT_DIR_ID, name: "Audio".into(), path: "Audio".into(), fingerprint: 42 }], readable: true, ..Default::default() };
+        let scan =
+            FilesystemScan { files: vec![ScanFileObservation { directory_entry: true, physical_size_bytes: None, directory: ROOT_DIR_ID, name: "Audio".into(), path: "Audio".into(), fingerprint: 42 }], readable: true, ..Default::default() };
         let mut snapshot = ScanSnapshot {
             work_revision: 0,
             scan_id: 1,

@@ -94,7 +94,7 @@ impl AssetStore {
                 fs::OpenOptions::new().read(true).write(true).open(path)?.sync_all()?;
                 // Include ancestors: a newly created proof directory's name
                 // must survive along with the files inside it.
-                directories.extend(path.ancestors().skip(1).take_while(|directory| directory.starts_with(&self.0.library_root)).map(Path::to_path_buf));
+                directories.extend(path.ancestors().skip(1).take_while(|directory| directory.starts_with(&self.0.library_root) || directory.starts_with(self.0.assets_root.parent().unwrap_or(&self.0.assets_root))).map(Path::to_path_buf));
             }
             for directory in directories.iter().rev() {
                 client_platform_native::filesystem::sync_directory(directory)?;

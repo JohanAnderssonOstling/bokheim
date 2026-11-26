@@ -21,6 +21,10 @@ pub struct BookFacts {
     /// so the server only needs to report what it found.
     #[serde(with = "book_model::record_transport")]
     pub record: book_model::BookRecord,
+    /// Resolve a description only when requested. Older clients omit this
+    /// flag and retain the original description-enrichment behavior.
+    #[serde(default = "needs_description_by_default")]
+    pub needs_description: bool,
     pub audiobook: bool,
     /// Resolve artwork only when the caller still needs a cover. Older clients
     /// omit this flag and retain the original cover-enrichment behavior.
@@ -32,6 +36,10 @@ pub struct BookFacts {
     pub readings: Vec<TitleReading>,
     #[serde(default)]
     pub recording: Option<crate::audible::LookupRequest>,
+}
+
+fn needs_description_by_default() -> bool {
+    true
 }
 
 fn needs_cover_by_default() -> bool {
@@ -61,7 +69,7 @@ pub struct BookEnrichment {
     pub status: BookEnrichmentStatus,
     /// The file facts with everything the server resolved merged in. Present
     /// when `status` is `Found`. `description` is the server's description,
-    /// empty when none was found.
+    /// empty when none was requested or found.
     #[serde(default, with = "book_model::record_transport::optional")]
     pub record: Option<book_model::BookRecord>,
     /// An audiobook's chapters from its matched recording.

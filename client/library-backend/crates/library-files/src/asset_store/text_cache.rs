@@ -32,7 +32,7 @@ impl AssetStore {
             let root = self.lock_root_shared().await;
             run_blocking(move || {
                 let _root = root;
-                if !store.root_available() {
+                if store.is_retired() {
                     return Ok(None);
                 }
                 let mut reader = match fs::open(store.0.assets_root.join(name)) {
@@ -70,7 +70,7 @@ impl AssetStore {
             let root = self.lock_root_shared().await;
             run_blocking(move || {
                 let _root = root;
-                if !store.root_available() {
+                if store.is_retired() {
                     return Err(AssetStoreError::operation("library folder is unavailable"));
                 }
                 let destination = store.0.assets_root.join(name);
@@ -101,7 +101,7 @@ impl AssetStore {
                     return Ok(());
                 }
                 staged.as_file().sync_all()?;
-                if !store.root_available() {
+                if store.is_retired() {
                     return Err(AssetStoreError::operation("library folder changed while caching text"));
                 }
                 staged.persist(&destination).map_err(|error| error.error)?;

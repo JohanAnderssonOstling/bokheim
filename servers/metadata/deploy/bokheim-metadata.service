@@ -12,6 +12,8 @@ Group=johan
 ExecStart=/usr/local/bin/metadata-server serve
 Environment=BOKHEIM_METADATA_BIND=127.0.0.1:8091
 Environment=BOKHEIM_METADATA_ANSWERS=/home/johan/data/openlibrary/answers-current.sqlite
+Environment=BOKHEIM_METADATA_WORKS=/home/johan/data/openlibrary/works-current.sqlite
+Environment=BOKHEIM_RUNTIME_TAXONOMY=/usr/local/share/bokheim-metadata/taxonomy.sqlite3
 Environment=BOKHEIM_METADATA_DEMAND=/var/lib/bokheim-metadata/demand.sqlite
 StateDirectory=bokheim-metadata
 StateDirectoryMode=0700

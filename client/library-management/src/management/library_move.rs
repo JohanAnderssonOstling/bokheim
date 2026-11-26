@@ -75,7 +75,7 @@ impl LibraryService {
         if !cleanup_root_matches(&source, &active_identity, id)? {
             return Err("source storage changed before the move; original files were retained".into());
         }
-        let assets = AssetStore::open(source.to_string_lossy().as_ref())?;
+        let assets = AssetStore::open(source.to_string_lossy().as_ref(), Path::new(&self.config.registry.library_assets_locator(&id)))?;
         if assets.native_storage_identity() != active_identity {
             return Err("source storage changed before the move; original files were retained".into());
         }
@@ -95,7 +95,7 @@ impl LibraryService {
         let mut plan = MovePlan::prepare(source.clone(), destination.clone())?;
         let relocated_directories = plan.relocated_directories(&directory_ids)?;
         // Serialize against an independently running instance using this destination.
-        let destination_assets = AssetStore::open(destination.to_string_lossy().as_ref())?;
+        let destination_assets = AssetStore::open(destination.to_string_lossy().as_ref(), Path::new(&self.config.registry.library_assets_locator(&id)))?;
         let mut destination_leases = HashMap::new();
         if !lease_books(&destination_assets, leases.keys().copied(), &mut destination_leases)? {
             return Err("a destination book is in use; retry the library move".into());
@@ -185,7 +185,7 @@ impl LibraryService {
         if !fs::try_exists(&root)? || !cleanup_root_matches(&root, &cleanup.source_identity, cleanup.library)? {
             return Ok(());
         }
-        let source = AssetStore::open(root.to_string_lossy().as_ref())?;
+        let source = AssetStore::open(root.to_string_lossy().as_ref(), Path::new(&self.config.registry.library_assets_locator(&cleanup.library)))?;
         let mut leases = HashMap::new();
         if !lease_books(&source, cleanup.books.iter().copied(), &mut leases)? {
             return Ok(());

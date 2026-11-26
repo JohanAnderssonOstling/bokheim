@@ -69,6 +69,10 @@ impl SyncPage {
             }
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.open && std::mem::take(&mut self.local_usage_due) {
+            self.request_local_storage_usage(cx);
+        }
         self.activity = super::AccountActivity::Refreshing;
         self.error = None;
         // Signed out, this reloads the local library list, not anything

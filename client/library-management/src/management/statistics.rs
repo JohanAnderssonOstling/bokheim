@@ -2,7 +2,7 @@
 use super::LibraryService;
 use crate::library::StorageCopyProgress;
 use crate::{BackendError, LibraryId};
-use futures_util::{stream, StreamExt, TryStreamExt};
+use futures_util::{stream, StreamExt};
 use library_database::{Database, DatabaseError};
 use library_model::CloudQuotaBook;
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use std::sync::Arc;
 pub struct LocalLibraryStorageUsage {
     pub library_id: LibraryId,
     pub library_name: String,
-    pub used_bytes: u64,
+    pub used_bytes: Option<u64>,
     #[serde(default)]
     pub cloud_bytes: Option<u64>,
     #[serde(default)]
@@ -78,29 +78,52 @@ impl LibraryService {
     pub async fn local_storage_usage(self: &Arc<Self>) -> Result<Vec<LocalLibraryStorageUsage>, BackendError> {
         let libraries = self
             .run(|service| {
-                let mut libraries = Vec::new();
-                for entry in service.list_on_storage()? {
-                    let id = *entry.library_id();
-                    let Some(library) = service.try_handle(&id) else { continue };
-                    let journal: Option<StorageCopyJournal> = service.config.registry.read_value(&format!("storage-copy:v1:{id}:1"))?.map(|bytes| serde_json::from_slice(&bytes)).transpose().map_err(BackendError::operation)?;
-                    libraries.push((entry, library, journal));
-                }
-                Ok(libraries)
+                service
+                    .list_on_storage()?
+                    .into_iter()
+                    .map(|entry| {
+                        let id = *entry.library_id();
+                        let journal = service.config.registry.read_value(&format!("storage-copy:v1:{id}:1"))?.map(|bytes| serde_json::from_slice::<StorageCopyJournal>(&bytes)).transpose().map_err(BackendError::operation)?;
+                        Ok((entry, service.try_handle(&id), journal))
+                    })
+                    .collect::<Result<Vec<_>, BackendError>>()
             })
             .await?;
-        let started = web_time::Instant::now();
-        let entries: Vec<Option<LocalLibraryStorageUsage>> = stream::iter(libraries.into_iter().map(|(entry, library, journal)| async move {
-            let books: Vec<CloudQuotaBook> = library.cloud_quota_books().await?;
+        let mut usage = stream::iter(libraries.into_iter().map(|(entry, library, journal)| async move {
+            let id = *entry.library_id();
+            let observed: Result<_, BackendError> = async {
+                if let Some(library) = library {
+                    return Ok((library.local_storage_usage().await?, library.cloud_quota_books().await?));
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                return self
+                    .run(move |service| {
+                        let entry = service.entry_on_storage(&id)?;
+                        let path = service.config.registry.library_database_locator(&id, entry.storage_locator());
+                        if !Path::new(&path).is_file() {
+                            return Ok((None, Vec::new()));
+                        }
+                        let database = Database::open(path)?;
+                        database.initialize_library_for_deferred_taxonomy(id)?;
+                        Ok((database.local_book_storage_bytes()?, database.cloud_quota_books()?))
+                    })
+                    .await;
+                #[cfg(target_arch = "wasm32")]
+                Ok((None, Vec::new()))
+            }
+            .await;
+            let (used_bytes, books) = observed.unwrap_or_else(|error| {
+                log::warn!("could not read stored local usage for {id}: {error}");
+                (None, Vec::new())
+            });
             let cloud_bytes = books.iter().try_fold(0_u64, |bytes, book| bytes.checked_add(book.size_bytes));
             let cloud_copy_bytes = cloud_copy_remaining_bytes(&books, journal.as_ref());
-            Ok::<_, BackendError>(library.local_storage_usage().await?.map(|used_bytes| LocalLibraryStorageUsage { library_id: *entry.library_id(), library_name: entry.library_name().to_owned(), used_bytes, cloud_bytes, cloud_copy_bytes }))
+            LocalLibraryStorageUsage { library_id: id, library_name: entry.library_name().to_owned(), used_bytes, cloud_bytes, cloud_copy_bytes }
         }))
         .buffered(4)
-        .try_collect()
-        .await?;
-        let mut usage: Vec<_> = entries.into_iter().flatten().collect();
+        .collect::<Vec<_>>()
+        .await;
         usage.sort_by(|left, right| left.library_name.cmp(&right.library_name));
-        log::debug!("account local storage usage took {:?}", started.elapsed());
         Ok(usage)
     }
 }

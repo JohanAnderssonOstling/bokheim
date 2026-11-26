@@ -8,7 +8,7 @@ use crate::transactions::WriteOutcome::Rollback;
 use crate::{Database, DatabaseError};
 use library_model::RelativeBookPath;
 use rusqlite::OptionalExtension;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use sync_common::{BookId, DirId};
 
 #[derive(Clone)]
@@ -135,8 +135,8 @@ impl Database {
     /// may perform short renames only, and an I/O error rolls back the logical
     /// command. Remaining removal jobs retire a cross-device move's source
     /// only after the destination placement has committed.
-    pub fn commit_native_placement(&self, plan: &NativePlacementPlan, materialized_files: &[String], materialized_directories: &[DirId], publish: impl FnOnce() -> Result<(), DatabaseError>) -> Result<NativePlacementResult, DatabaseError> {
-        let materialized_files = materialized_files.iter().map(String::as_str).collect::<HashSet<_>>();
+    pub fn commit_native_placement(&self, plan: &NativePlacementPlan, materialized_files: &[(String, Option<u64>)], materialized_directories: &[DirId], publish: impl FnOnce() -> Result<(), DatabaseError>) -> Result<NativePlacementResult, DatabaseError> {
+        let materialized_files = materialized_files.iter().map(|(path, size)| (path.as_str(), *size)).collect::<HashMap<_, _>>();
         let materialized_directories = materialized_directories.iter().copied().collect::<HashSet<_>>();
         self.write(|tx| {
             let current = Revision::read(tx)?;
@@ -167,11 +167,12 @@ impl Database {
                 tx.native_set_directory_projection(&directory.id.to_string(), &directory.relative_path)?;
             }
             for file in &plan.files {
-                if file.work.operation != "materialize" || !materialized_files.contains(file.resolved_path.as_str()) {
+                if file.work.operation != "materialize" || !materialized_files.contains_key(file.resolved_path.as_str()) {
                     continue;
                 }
                 let (directory, _) = file.placement.as_ref().ok_or_else(|| DatabaseError::message("copy destination is no longer present"))?;
                 observations::record_file(tx, directory, &file.work.book_id, file.resolved_path.as_str(), None, FileRevision::Retained)?;
+                observations::record_physical_size(tx, &file.work.book_id, directory, materialized_files[file.resolved_path.as_str()])?;
                 // The preview's queue IDs were rolled back and can be reused by
                 // other work. Acknowledge the current job by its full identity.
                 tx.execute("DELETE FROM local_file_work WHERE operation='materialize' AND content_hash=?1 AND dir_id=?2", (&file.work.book_id, directory))?;
@@ -218,7 +219,7 @@ impl crate::DatabaseClient {
         Ok(())
     }
 
-    pub async fn commit_native_placement(&self, plan: NativePlacementPlan, files: Vec<String>, directories: Vec<DirId>, publish: impl FnOnce() -> Result<(), DatabaseError> + Send + 'static) -> Result<NativePlacementResult, DatabaseError> {
+    pub async fn commit_native_placement(&self, plan: NativePlacementPlan, files: Vec<(String, Option<u64>)>, directories: Vec<DirId>, publish: impl FnOnce() -> Result<(), DatabaseError> + Send + 'static) -> Result<NativePlacementResult, DatabaseError> {
         self.run(move |database| database.commit_native_placement(&plan, &files, &directories, publish)).await
     }
 }

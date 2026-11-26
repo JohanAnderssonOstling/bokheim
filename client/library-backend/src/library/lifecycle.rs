@@ -103,7 +103,7 @@ impl LibraryHandle {
                     };
                     // Keep the old handles inaccessible while opening the committed
                     // destination. A failed open leaves the complete pause in place.
-                    let assets = LibraryResources::open_assets(root.clone(), storage.database()).await?;
+                    let assets = LibraryResources::open_assets(root.clone(), storage.assets().native_assets_root().to_string_lossy().into_owned(), storage.database()).await?;
                     storage.database().apply_native_root_move(&root).await?;
                     if !moving {
                         resources.reset_local_storage(storage).await?;

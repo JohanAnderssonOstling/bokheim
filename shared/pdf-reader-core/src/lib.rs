@@ -348,6 +348,18 @@ pub fn visit_page_text<R: Read + Seek + Send + 'static, V: PdfPageTextVisitor>(r
     })
 }
 
+/// Read navigation and selected page text without collecting document-wide page dimensions.
+pub fn visit_page_text_with_outline<R: Read + Seek + Send + 'static, V: PdfPageTextVisitor>(reader: R, pages: Vec<usize>, max_text_bytes: usize, mut visitor: V) -> PdfResult<(Vec<BookTocEntry>, V)> {
+    runtime::run(move || {
+        let document = load_document(reader)?;
+        let outline = document_outline(&document);
+        if visit_document_page_text(&document, &pages, max_text_bytes, &mut visitor)? == 0 {
+            return Err(PdfError::new("the PDF has no pages"));
+        }
+        Ok((outline, visitor))
+    })
+}
+
 fn inspect_page_text_local(reader: impl Read + Seek + 'static, edge_pages: usize, max_text_bytes: usize) -> PdfResult<(usize, Vec<(usize, String)>)> {
     let document = load_document(reader)?;
     inspect_document_page_text(&document, edge_pages, max_text_bytes)

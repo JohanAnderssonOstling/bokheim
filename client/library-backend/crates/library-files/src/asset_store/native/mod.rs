@@ -73,9 +73,7 @@ pub(crate) fn lease(handle: &Handle, hash: &str, exclusive: bool) -> Result<Opti
     if !handle.enabled.load(Ordering::Acquire) {
         return Err(AssetStoreError::operation("library storage is unavailable"));
     }
-    let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(handle.leases_root.join(hash)).inspect_err(|_| {
-        root_available(handle);
-    })?;
+    let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(handle.leases_root.join(hash))?;
     let result = if exclusive { FileExt::try_lock_exclusive(&file) } else { FileExt::try_lock_shared(&file) };
     match result {
         Ok(()) => Ok(Some(Lease { _file: file })),
@@ -84,18 +82,14 @@ pub(crate) fn lease(handle: &Handle, hash: &str, exclusive: bool) -> Result<Opti
     }
 }
 
-pub(crate) fn open(library_locator: &str) -> Result<Handle, AssetStoreError> {
-    #[cfg(target_os = "android")]
-    let private_leases = Some(client_platform_android::book::lease_root()?);
-    #[cfg(not(target_os = "android"))]
-    let private_leases: Option<&Path> = None;
+pub(crate) fn open(library_locator: &str, assets_root: &Path) -> Result<Handle, AssetStoreError> {
     let library_root = PathBuf::from(library_locator);
+    #[cfg(target_os = "android")]
+    fs::recover_document_tree(&library_root)?;
     let root = library_root.join(APP_HIDDEN_DIR).join("assets");
     // Create children one level at a time. Never recreate a library root
     // that disappears after its identity was checked.
-    for directory in [parent_directory(&root)?.to_path_buf(), root.clone(), root.join("thumbnail")] {
-        create_child_directory(&directory)?;
-    }
+    create_child_directory(parent_directory(&root)?)?;
     let marker = parent_directory(&root)?.join("storage-identity");
     let identity = match fs::read_to_string(&marker) {
         Ok(value) => value,
@@ -114,19 +108,87 @@ pub(crate) fn open(library_locator: &str) -> Result<Handle, AssetStoreError> {
         }
         Err(error) => return Err(error.into()),
     };
-    // Android shared storage does not implement flock. Keep the same OS-backed
-    // shared/exclusive locks on private storage, namespaced by canonical library
-    // path so independently opened handles and processes coordinate correctly.
-    let leases = match private_leases {
-        Some(base) => base.join(blake3::hash(fs::canonicalize(&root)?.to_string_lossy().as_bytes()).to_hex().as_str()),
-        None => root.join("leases"),
+    // Book leases stay keyed by physical root, including during a move, but
+    // all platforms keep lock files on private storage rather than beside books.
+    let leases = parent_directory(assets_root)?.join("leases").join(blake3::hash(fs::canonicalize(&library_root)?.to_string_lossy().as_bytes()).to_hex().as_str());
+    fs::create_dir_all(&leases)?;
+    fs::create_dir_all(assets_root.join("thumbnail"))?;
+    let handle = Handle {
+        library_root,
+        assets_root: assets_root.to_owned(),
+        storage_identity: identity,
+        leases_root: leases,
+        enabled: Arc::new(AtomicBool::new(true)),
+        root_failure: Default::default(),
+        import_batch: None,
+        root_access: Default::default(),
     };
-    if private_leases.is_some() {
-        fs::create_dir_all(&leases)?;
-    } else {
-        create_child_directory(&leases)?;
+    migrate_assets(&handle, &root)?;
+    Ok(handle)
+}
+
+/// Preserve original artwork and durable identity proofs before using private
+/// storage. Prepared text is expendable and is rebuilt on demand.
+fn migrate_assets(handle: &Handle, legacy: &Path) -> Result<(), AssetStoreError> {
+    use std::io::Write as _;
+    let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(handle.assets_root.join("migration.lock"))?;
+    FileExt::lock_exclusive(&lock)?;
+    let marker = handle.assets_root.join(format!("migrated-assets-{}", blake3::hash(handle.storage_identity.as_bytes()).to_hex()));
+    if fs::try_exists(&marker)? {
+        return Ok(());
     }
-    Ok(Handle { library_root, assets_root: root, storage_identity: identity, leases_root: leases, enabled: Arc::new(AtomicBool::new(true)), root_failure: Default::default(), import_batch: None, root_access: Default::default() })
+    let mut sources = vec![("thumbnail", legacy.join("thumbnail")), ("local-proofs", legacy.join("local-proofs"))];
+    // Older nested libraries could rely on their enclosing library's proofs.
+    // Preserve that evidence once, then avoid ancestor probes during file work.
+    for ancestor in handle.library_root.ancestors().skip(1) {
+        let metadata = ancestor.join(APP_HIDDEN_DIR);
+        if fs::is_file(metadata.join("storage-identity")) {
+            sources.push(("local-proofs", metadata.join("assets/local-proofs")));
+        }
+    }
+    for (kind, source) in sources {
+        let directory = handle.assets_root.join(kind);
+        let entries = match fs::read_dir(source) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        fs::create_dir_all(&directory)?;
+        let existing = fs::read_dir(&directory)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<HashSet<_>, _>>()?;
+        let mut entries = entries.collect::<Result<Vec<_>, _>>()?;
+        // Selected masters own their variants and publish last.
+        entries.sort_unstable_by_key(|entry| !entry.file_name().to_string_lossy().contains('.'));
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || !entry.file_type()?.is_file() {
+                continue;
+            }
+            if kind == "thumbnail" && existing.contains(name.split('.').next().expect("cover name")) {
+                continue;
+            }
+            let destination = directory.join(&name);
+            if kind == "local-proofs" {
+                let id = name.parse::<BookId>().map_err(AssetStoreError::operation)?;
+                for checksum in read_local_proof(&entry.path())?.lines() {
+                    remember_local_checksum(handle, &id, checksum.parse::<ContentHash>().map_err(AssetStoreError::operation)?)?;
+                }
+            } else if !fs::try_exists(&destination)? {
+                let mut staged = temporary::Builder::new().prefix(".migration.part-").tempfile_in(&directory)?;
+                std::io::copy(&mut fs::open(entry.path())?, staged.as_file_mut())?;
+                staged.as_file().sync_all()?;
+                match staged.persist_noclobber(&destination) {
+                    Ok(_) => sync_parent(&destination)?,
+                    Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error.error.into()),
+                }
+            }
+        }
+    }
+    let mut staged = temporary::Builder::new().prefix(".migration.part-").tempfile_in(&handle.assets_root)?;
+    staged.write_all(b"1")?;
+    staged.as_file().sync_all()?;
+    staged.persist(&marker).map_err(|error| error.error)?;
+    sync_parent(&marker)
 }
 
 pub(crate) fn root_available(handle: &Handle) -> bool {
@@ -171,16 +233,8 @@ pub(crate) fn m4b_sidecar_cover(handle: &Handle, paths: &[RelativeBookPath]) -> 
     Ok(None)
 }
 
-pub(crate) fn content_matches(path: &Path, hash: &BookId) -> Result<bool, AssetStoreError> {
-    let mut proofs = Vec::new();
-    for ancestor in path.ancestors().skip(1) {
-        let metadata = ancestor.join(APP_HIDDEN_DIR);
-        if fs::is_file(&metadata.join("storage-identity")) {
-            let proof = metadata.join("assets").join("local-proofs").join(hash.to_hex());
-            proofs = read_local_proof(&proof)?.lines().take(64).filter_map(|line| line.parse::<ContentHash>().ok()).collect();
-            break;
-        }
-    }
+pub(crate) fn content_matches(path: &Path, hash: &BookId, assets_root: &Path) -> Result<bool, AssetStoreError> {
+    let proofs = if hash.content_hash().is_none() { read_local_proof(&assets_root.join("local-proofs").join(hash.to_hex()))?.lines().take(64).filter_map(|line| line.parse::<ContentHash>().ok()).collect::<Vec<_>>() } else { Vec::new() };
     let matches = |actual: ContentHash| hash.content_hash() == Some(actual) || proofs.contains(&actual);
     if fs::is_dir(&path) {
         let tracks = audiobook_folder::discover(path)?;
@@ -217,14 +271,16 @@ pub(crate) fn remember_local_checksum(handle: &Handle, id: &BookId, checksum: Co
     use std::io::Write;
 
     let _call = ProfileSpan::new("checksum_proof_persistence", "book");
-    let validation = ProfileSpan::new("checksum_proof_root_validation", "book");
-    if !root_available(handle) {
-        return Err(AssetStoreError::operation("library folder is unavailable"));
+    if !handle.enabled.load(Ordering::Acquire) {
+        return Err(AssetStoreError::operation("library storage is unavailable"));
     }
-    drop(validation);
     let directory = handle.assets_root.join("local-proofs");
     let creation = ProfileSpan::new("checksum_proof_directory_creation", "book");
-    fs::create_dir_all(&directory)?;
+    match fs::create_dir(&directory) {
+        Ok(()) => sync_parent(&directory)?,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
     drop(creation);
     let path = directory.join(id.to_hex());
     let read = ProfileSpan::new("checksum_proof_read", "book");
@@ -258,7 +314,7 @@ pub(crate) fn placement_conflicts(handle: &Handle, hash: &BookId, relative: &Rel
     let path = placement_path(handle, relative);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if !(metadata.is_file() || metadata.is_dir()) || metadata.file_type().is_symlink() => Ok(true),
-        Ok(_) => Ok(!content_matches(&path, hash)?),
+        Ok(_) => Ok(!content_matches(&path, hash, &handle.assets_root)?),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
     }
@@ -273,30 +329,31 @@ pub(crate) struct VerifiedPath {
     pub(crate) length: u64,
     pub(crate) modified: std::time::SystemTime,
     revision: u64,
+    assets_root: PathBuf,
 }
 
 impl VerifiedPath {
-    pub(crate) fn new(path: PathBuf, hash: &BookId) -> Result<Self, AssetStoreError> {
-        Self::matching(path, hash)?.ok_or_else(|| AssetStoreError::operation("file contains different book bytes"))
+    pub(crate) fn new(path: PathBuf, hash: &BookId, assets_root: &Path) -> Result<Self, AssetStoreError> {
+        Self::matching(path, hash, assets_root)?.ok_or_else(|| AssetStoreError::operation("file contains different book bytes"))
     }
 
     /// A different identity is distinct from an unreadable/invalid placement.
     /// Only cleanup may treat that identity mismatch as obsolete work.
-    pub(crate) fn matching(path: PathBuf, hash: &BookId) -> Result<Option<Self>, AssetStoreError> {
+    pub(crate) fn matching(path: PathBuf, hash: &BookId, assets_root: &Path) -> Result<Option<Self>, AssetStoreError> {
         if import_in_progress(&path) {
             return Err(AssetStoreError::operation("book publication is still being prepared"));
         }
-        Self::matching_unpublished(path, hash)
+        Self::matching_unpublished(path, hash, assets_root)
     }
 
-    fn matching_unpublished(path: PathBuf, hash: &BookId) -> Result<Option<Self>, AssetStoreError> {
+    fn matching_unpublished(path: PathBuf, hash: &BookId, assets_root: &Path) -> Result<Option<Self>, AssetStoreError> {
         let metadata = fs::symlink_metadata(&path)?;
         if metadata.file_type().is_symlink() || !(metadata.is_file() || metadata.is_dir()) {
             return Err(AssetStoreError::operation("unsupported book placement"));
         }
         let revision = placement_revision(&path, metadata.is_dir())?;
-        let verified = Self { path, hash: *hash, directory: metadata.is_dir(), length: metadata.len(), modified: metadata.modified()?, revision };
-        if !content_matches(&verified.path, hash)? {
+        let verified = Self { path, hash: *hash, directory: metadata.is_dir(), length: metadata.len(), modified: metadata.modified()?, revision, assets_root: assets_root.to_owned() };
+        if !content_matches(&verified.path, hash, assets_root)? {
             return Ok(None);
         }
         verified.check()?;
@@ -305,7 +362,7 @@ impl VerifiedPath {
 
     pub(crate) fn check(&self) -> Result<(), AssetStoreError> {
         self.check_metadata()?;
-        if self.directory && !content_matches(&self.path, &self.hash)? {
+        if self.directory && !content_matches(&self.path, &self.hash, &self.assets_root)? {
             return Err(AssetStoreError::operation("book changed while preparing file work"));
         }
         Ok(())
@@ -325,7 +382,7 @@ impl VerifiedPath {
 /// to a byte digest so otherwise readable placements remain usable.
 fn placement_revision(path: &Path, directory: bool) -> Result<u64, AssetStoreError> {
     if directory {
-        return Ok(crate::filesystem::audiobook_fingerprint(path, &audiobook_folder::discover(path)?)?);
+        return Ok(crate::filesystem::audiobook_fingerprint(path)?);
     }
     match crate::filesystem::fingerprint(path) {
         Ok(revision) => Ok(revision),
@@ -410,7 +467,7 @@ impl PreparedPlacement {
                         let staging = temporary::Builder::new().prefix(".bokheim-copy-").tempdir_in(parent_directory(&destination)?)?;
                         let staged = staging.path().join("contents");
                         copy_entry(&source, &staged)?;
-                        if !content_matches(&staged, &verified.hash)? {
+                        if !content_matches(&staged, &verified.hash, &verified.assets_root)? {
                             return Err(AssetStoreError::operation("book changed during copy"));
                         }
                         verified.check()?;
@@ -452,7 +509,7 @@ pub(crate) fn prepare_removal(handle: &Handle, hash: &BookId, relative: &Relativ
     }
     // The expected book is no longer at this path. Acknowledge only this
     // book's obsolete work/projection without touching the replacement bytes.
-    let Some(source) = VerifiedPath::matching(source, hash)? else { return Ok(PreparedPlacement::Absent) };
+    let Some(source) = VerifiedPath::matching(source, hash, &handle.assets_root)? else { return Ok(PreparedPlacement::Absent) };
     Ok(PreparedPlacement::Removed(source))
 }
 
@@ -519,7 +576,11 @@ pub(crate) struct PreparedFile {
 }
 
 impl PreparedFile {
-    pub(crate) fn prepare(temporary: temporary::TempPath, destination: PathBuf, hash: &BookId) -> Result<Self, AssetStoreError> {
+    pub(crate) fn physical_size_bytes(&self) -> Result<u64, AssetStoreError> {
+        Ok(fs::metadata(self.temporary.as_ref().expect("unpublished file"))?.len())
+    }
+
+    pub(crate) fn prepare(temporary: temporary::TempPath, destination: PathBuf, hash: &BookId, assets_root: &Path) -> Result<Self, AssetStoreError> {
         #[cfg(target_os = "android")]
         {
             let name = destination.file_name().ok_or_else(|| AssetStoreError::operation("book destination has no filename"))?;
@@ -533,12 +594,12 @@ impl PreparedFile {
             // runs off the library thread without the background job's gate.
             persist_book_noclobber(temporary, &destination).map_err(AssetStoreError::operation)?;
             let temporary = temporary::TempPath::try_from_path(&destination)?;
-            let verified = VerifiedPath::matching_unpublished(destination.clone(), hash)?.ok_or_else(|| AssetStoreError::operation("prepared file contains different book bytes"))?;
+            let verified = VerifiedPath::matching_unpublished(destination.clone(), hash, assets_root)?.ok_or_else(|| AssetStoreError::operation("prepared file contains different book bytes"))?;
             Ok(Self { temporary: Some(temporary), destination, verified, _direct: direct })
         }
         #[cfg(not(target_os = "android"))]
         {
-            let _ = hash;
+            let _ = (hash, assets_root);
             Ok(Self { temporary: Some(temporary), destination })
         }
     }
@@ -604,7 +665,9 @@ impl Drop for DirectBook {
 pub(crate) fn import_in_progress(path: &Path) -> bool {
     let Some(imports) = DIRECT_IMPORTS.get() else { return false };
     let imports = imports.lock().unwrap_or_else(PoisonError::into_inner);
-    !imports.is_empty() && fs::canonicalize(&path).is_ok_and(|path| imports.contains(&path))
+    // Document locators are already absolute and have no symlink aliases.
+    // Their canonicalization would issue a provider metadata query per entry.
+    !imports.is_empty() && (imports.contains(path) || (!fs::is_document_path(path) && fs::canonicalize(path).is_ok_and(|path| imports.contains(&path))))
 }
 
 pub(crate) fn write_import_bytes(handle: &Handle, file: &mut File, source: &mut (dyn std::io::Read + Send), directory: &Path) -> Result<(ContentHash, u64), AssetStoreError> {
@@ -778,14 +841,14 @@ pub(crate) async fn read_bytes(handle: &Handle, name: String) -> Result<Option<V
 pub(crate) fn update_thumbnail_cache(handle: &Handle, max_bytes: u64, incoming: Option<(&BookId, &[u8])>) -> Result<(), AssetStoreError> {
     use std::{fs, io::Write};
 
-    if !root_available(handle) {
+    if !handle.enabled.load(Ordering::Acquire) {
         return Err(AssetStoreError::operation("library folder is unavailable"));
     }
     // Serialize pruning and publication across handles and processes, while
     // callers download and decode different covers concurrently.
-    let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(handle.leases_root.join("thumbnail-cache"))?;
+    let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(handle.assets_root.join("thumbnail-cache.lock"))?;
     FileExt::lock_exclusive(&lock)?;
-    if !root_available(handle) {
+    if !handle.enabled.load(Ordering::Acquire) {
         return Err(AssetStoreError::operation("library folder is unavailable"));
     }
     let reserved = incoming.map_or(0, |(_, bytes)| bytes.len() as u64);
@@ -841,7 +904,7 @@ pub(crate) async fn write_files(handle: &Handle, files: Vec<(String, Vec<u8>)>, 
     run_blocking(move || {
         use std::io::Write as _;
         let _access = (root, lease);
-        if !root_available(&handle) {
+        if !handle.enabled.load(Ordering::Acquire) {
             return Err(AssetStoreError::operation("library folder is unavailable"));
         }
         let mut prepared = Vec::with_capacity(files.len());
@@ -852,7 +915,7 @@ pub(crate) async fn write_files(handle: &Handle, files: Vec<(String, Vec<u8>)>, 
             file.as_file().sync_all()?;
             prepared.push((file.into_temp_path(), destination));
         }
-        if !root_available(&handle) {
+        if !handle.enabled.load(Ordering::Acquire) {
             return Err(AssetStoreError::operation("library folder is unavailable"));
         }
         // Prepare every variant before publishing the set under its lease.
@@ -893,7 +956,7 @@ mod lease_location_tests {
     async fn missing_files_report_root_loss_once_and_leave_healthy_roots_alone() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let library = tempfile::tempdir().unwrap();
-        let store = super::super::AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let store = super::super::AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
         let failures = Arc::new(AtomicUsize::new(0));
         let reported = failures.clone();
         store.on_root_unavailable(move || {
@@ -918,7 +981,7 @@ mod lease_location_tests {
     async fn a_returning_mount_reports_its_changed_identity_even_when_the_book_exists() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let library = tempfile::tempdir().unwrap();
-        let store = super::super::AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let store = super::super::AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
         let failures = Arc::new(AtomicUsize::new(0));
         let reported = failures.clone();
         store.on_root_unavailable(move || {
@@ -937,7 +1000,7 @@ mod lease_location_tests {
     #[test]
     fn dropping_download_writer_removes_its_temporary_file() {
         let library = tempfile::tempdir().unwrap();
-        let store = super::super::AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let store = super::super::AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
         let destination = library.path().join("book.epub");
         std::fs::write(&destination, b"existing book").unwrap();
         let hash = BookId::from(blake3::hash(b"existing book"));
@@ -952,7 +1015,7 @@ mod lease_location_tests {
     #[test]
     fn admitted_thumbnail_write_finishes_after_cancellation_and_releases_its_lease() {
         let library = tempfile::tempdir().unwrap();
-        let handle = open(library.path().to_str().unwrap()).unwrap();
+        let handle = open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
         let hash = blake3::hash(b"thumbnail owner").to_hex().to_string();
         let destination = handle.assets_root.join("thumbnail").join(&hash);
         std::fs::write(&destination, b"original cover").unwrap();
@@ -982,7 +1045,7 @@ mod prepared_file_tests {
     #[test]
     fn prepared_removal_preserves_a_file_changed_before_publish() {
         let root = tempfile::tempdir().unwrap();
-        let handle = open(root.path().to_str().unwrap()).unwrap();
+        let handle = open(root.path().to_str().unwrap(), &root.path().join(".bokheim/private-assets")).unwrap();
         let path = root.path().join("book.epub");
         std::fs::write(&path, b"original").unwrap();
         let hash = BookId::from(blake3::hash(b"original"));
@@ -1006,17 +1069,17 @@ mod identity_tests {
         // A non-audio MP4 edit changes identity because all file bytes are hashed.
         use std::io::Write as _;
         OpenOptions::new().append(true).open(&path).unwrap().write_all(b"\0\0\0\x0cfreedata").unwrap();
-        assert!(!content_matches(&path, &original_identity).unwrap());
+        assert!(!content_matches(&path, &original_identity, directory.path()).unwrap());
         let identity = BookId::from(hash_file(&mut File::open(&path).unwrap()).unwrap());
-        assert!(content_matches(&path, &identity).unwrap());
-        let store = super::super::AssetStore::open(directory.path().to_str().unwrap()).unwrap();
+        assert!(content_matches(&path, &identity, directory.path()).unwrap());
+        let store = super::super::AssetStore::open(directory.path().to_str().unwrap(), &directory.path().join(".bokheim/private-assets")).unwrap();
         let copied = store.stage_book(RelativeBookPath::parse("copy.m4b").unwrap(), Box::new(File::open(&path).unwrap())).await.unwrap();
-        assert!(content_matches(copied.path(), &identity).unwrap());
+        assert!(content_matches(copied.path(), &identity, directory.path()).unwrap());
         // Renaming preserves bytes and therefore preserves identity.
         let renamed = directory.path().join("extensionless");
         std::fs::rename(path, &renamed).unwrap();
-        assert!(content_matches(&renamed, &identity).unwrap());
-        assert!(!content_matches(&renamed, &BookId::new(&"0".repeat(64))).unwrap());
+        assert!(content_matches(&renamed, &identity, directory.path()).unwrap());
+        assert!(!content_matches(&renamed, &BookId::new(&"0".repeat(64)), directory.path()).unwrap());
     }
 }
 

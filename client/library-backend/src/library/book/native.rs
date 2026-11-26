@@ -238,7 +238,7 @@ mod tests {
                     size_bytes: bytes.len() as u64,
                     inspection_version: 1,
                     inspection: Some(InspectedBook { pdf: None, audiobook: None, metadata: BookRecord { metadata: Default::default(), description: String::new() }, toc: Vec::new() }),
-                    published: PublishedStagedBook { name: name.clone(), relative_path: format!("/{name}"), published: true, fingerprint: None },
+                    published: PublishedStagedBook { physical_size_bytes: None, name: name.clone(), relative_path: format!("/{name}"), published: true, fingerprint: None },
                     request_thumbnail: false,
                     restore_paths: Vec::new(),
                 })

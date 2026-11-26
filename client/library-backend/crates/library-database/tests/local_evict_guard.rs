@@ -28,7 +28,7 @@ fn import() -> ImportCommit {
             },
             toc: vec![book_model::BookTocEntry { title: "Chapter".into(), target: "ch1".into(), children: vec![] }],
         }),
-        published: library_model::PublishedStagedBook { name: "book.epub".into(), relative_path: "/book.epub".into(), published: false, fingerprint: None },
+        published: library_model::PublishedStagedBook { physical_size_bytes: None, name: "book.epub".into(), relative_path: "/book.epub".into(), published: false, fingerprint: None },
         request_thumbnail: false,
         restore_paths: vec![],
     }

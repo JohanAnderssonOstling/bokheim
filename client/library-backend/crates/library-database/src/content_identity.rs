@@ -261,6 +261,7 @@ impl Database {
                 tx.execute("UPDATE book_transfer SET upload_checksum=?2,upload_prepared=NULL WHERE content_hash=?1", params![book, checksum])?;
                 tx.execute("INSERT OR IGNORE INTO local_book_work(content_hash) VALUES(?1)", [book])?;
             }
+            crate::native::observations::record_physical_size(tx, &book, &directory.to_string(), Some(size_bytes))?;
             Ok(())
         })
     }
@@ -383,7 +384,7 @@ mod tests {
             size_bytes: 400,
             inspection_version: 1,
             inspection: Some(book_inspection_contract::InspectedBook { metadata: book_model::BookRecord { metadata: Default::default(), description: String::new() }, pdf: None, audiobook: None, toc: vec![] }),
-            published: library_model::PublishedStagedBook { name: "Book.pdf".into(), relative_path: "/Book.pdf".into(), published: true, fingerprint: Some(1) },
+            published: library_model::PublishedStagedBook { physical_size_bytes: None, name: "Book.pdf".into(), relative_path: "/Book.pdf".into(), published: true, fingerprint: Some(1) },
             request_thumbnail: false,
             restore_paths: vec![],
         })

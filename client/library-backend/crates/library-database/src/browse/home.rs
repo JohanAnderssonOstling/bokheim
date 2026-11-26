@@ -99,7 +99,7 @@ impl Database {
         }
         let mut rows = shelves
             .iter()
-            .map(|shelf| BrowseRow { id: BrowseLocation::Home(Some(shelf.shelf)), name: shelf.shelf.label().to_owned(), path: None, book_count: shelf.books.len(), downloaded_book_count: 0, size_bytes: None })
+            .map(|shelf| BrowseRow { id: BrowseLocation::Home(Some(shelf.shelf)), name: shelf.shelf.label().to_owned(), path: None, book_count: shelf.books.len(), downloaded_book_count: 0, requested_book_count: None, size_bytes: None })
             .collect::<Vec<_>>();
         super::ordering::sort_rows(&mut rows, options.chip_sort);
         let positions: HashMap<_, _> = rows.iter().enumerate().map(|(index, row)| (row.id, index)).collect();
@@ -123,6 +123,7 @@ impl Database {
                         path: None,
                         book_count: shelf.books.len(),
                         downloaded_book_count: shelf.books.iter().filter(|book| matching.downloaded.contains(book)).count(),
+                        requested_book_count: None,
                         size_bytes: None,
                     })
                     .collect();

@@ -110,6 +110,11 @@ impl AssetStore {
         &self.0.storage_identity
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn native_assets_root(&self) -> &Path {
+        &self.0.assets_root
+    }
+
     /// Invalidate clones retained by cancelled work when switching roots.
     /// The caller holds exclusive root access after draining foreground work.
     #[cfg(not(target_arch = "wasm32"))]
@@ -281,8 +286,9 @@ impl AssetStore {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn open(library_locator: &str) -> Result<Self, AssetStoreError> {
-        imp::open(library_locator).map(Self)
+    /// `assets_root` belongs to application storage, independently of book folders.
+    pub fn open(library_locator: &str, assets_root: &Path) -> Result<Self, AssetStoreError> {
+        imp::open(library_locator, assets_root).map(Self)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -314,7 +320,7 @@ impl AssetStore {
                 for relative_path in paths {
                     let expected = checksum.or(hash.content_hash());
                     let path = imp::placement_path(&store.0, &relative_path);
-                    let folder_revision = if fs::is_dir(&path) { Some(crate::filesystem::audiobook_fingerprint(&path, &audiobook_folder::discover(&path)?)?) } else { None };
+                    let folder_revision = if fs::is_dir(&path) { Some(crate::filesystem::audiobook_fingerprint(&path)?) } else { None };
                     // A newly scanned audiobook has a recording identity but
                     // no ZIP-byte checksum yet. Verify its member proof before
                     // constructing the transport, and pin that source revision.
@@ -322,7 +328,7 @@ impl AssetStore {
                         if folder_revision.is_none() {
                             continue;
                         }
-                        let Some(source) = imp::VerifiedPath::matching(path.clone(), &hash)? else { continue };
+                        let Some(source) = imp::VerifiedPath::matching(path.clone(), &hash, &store.0.assets_root)? else { continue };
                         Some(source)
                     } else {
                         None
@@ -338,7 +344,7 @@ impl AssetStore {
                         source.check_metadata()?;
                     }
                     if let Some(revision) = folder_revision {
-                        if crate::filesystem::audiobook_fingerprint(&path, &audiobook_folder::discover(&path)?)? != revision {
+                        if crate::filesystem::audiobook_fingerprint(&path)? != revision {
                             return Err(AssetStoreError::operation("audiobook changed while preparing transfer"));
                         }
                     }
@@ -979,11 +985,12 @@ impl StagedBook {
         // A direct import already wrote its bytes to the final destination.
         // Finalize that file without treating it as its own duplicate.
         self.remember_content_proof(store)?;
+        let physical_size_bytes = Some(self.inner.size_bytes);
         let imp::StagedBook { temporary_path, direct, .. } = self.inner;
         let direct = direct.expect("direct import");
         let fingerprint = finalize_direct_import(temporary_path, &direct.path, |path| imp::sync_import_file(&store.0, path))?;
         let name = relative_path.file_name().to_owned();
-        Ok(PublishedStagedBook { name, relative_path: relative_path.to_string(), published: true, fingerprint })
+        Ok(PublishedStagedBook { physical_size_bytes, name, relative_path: relative_path.to_string(), published: true, fingerprint })
     }
 
     pub fn book_id(&self) -> BookId {
@@ -1069,7 +1076,7 @@ mod tests {
         use std::io::Cursor;
         for direct in [false, true] {
             let library = tempfile::tempdir().unwrap();
-            let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+            let store = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
             let bytes = b"verified local import";
             let checksum = ContentHash::from(blake3::hash(bytes));
             let identity = BookId::for_local_content(checksum);
@@ -1081,9 +1088,9 @@ mod tests {
             assert!(published.published);
             assert_eq!(std::fs::read_to_string(&proof).unwrap(), format!("{checksum}\n"));
             drop(store);
-            let reopened = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+            let reopened = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
             let destination = imp::placement_path(&reopened.0, &path("book.epub"));
-            assert!(imp::content_matches(&destination, &identity).unwrap());
+            assert!(imp::content_matches(&destination, &identity, &reopened.0.assets_root).unwrap());
         }
     }
 
@@ -1093,7 +1100,7 @@ mod tests {
         use std::io::Cursor;
         for direct in [false, true] {
             let library = tempfile::tempdir().unwrap();
-            let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+            let store = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
             let bytes = b"verified local import";
             let checksum = ContentHash::from(blake3::hash(bytes));
             let identity = BookId::for_local_content(checksum);
@@ -1113,7 +1120,7 @@ mod tests {
         use content_address::ContentHash;
         {
             let library = tempfile::tempdir().unwrap();
-            let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+            let store = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
             let bytes = b"downloaded revision";
             let checksum = ContentHash::from(blake3::hash(bytes));
             let identity = BookId::for_local_content(checksum);
@@ -1124,14 +1131,14 @@ mod tests {
             let staged = verified.finish_book().await.unwrap();
             assert!(!proof.exists());
             staged.publish_snapshot(&store, &path("book.epub"), &[], false).unwrap();
-            assert!(imp::content_matches(&library.path().join("book.epub"), &identity).unwrap());
+            assert!(imp::content_matches(&library.path().join("book.epub"), &identity, &store.0.assets_root).unwrap());
         }
     }
 
     #[tokio::test]
     async fn copied_digest_does_not_accept_modified_staging() {
         let library = tempfile::tempdir().unwrap();
-        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let store = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
         let copied = store.stage_book(path("book.epub"), Box::new(std::io::Cursor::new(b"original"))).await.unwrap();
         std::fs::write(copied.path(), b"replaced").unwrap();
         let temporary = copied.path().to_owned();
@@ -1142,7 +1149,7 @@ mod tests {
     #[tokio::test]
     async fn transferred_books_require_the_supplied_checksum_and_length() {
         let library = tempfile::tempdir().unwrap();
-        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let store = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
         let bytes = b"verified transfer";
         let digest = content_address::ContentHash::from(blake3::hash(bytes));
         let wrong = content_address::ContentHash::from(blake3::hash(b"different bytes"));
@@ -1188,7 +1195,7 @@ mod tests {
         use std::time::UNIX_EPOCH;
         for direct in [false, true] {
             let library = tempfile::tempdir().unwrap();
-            let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+            let store = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
             let bytes = b"verified book";
             let hash = BookId::from(blake3::hash(bytes));
             let (_, copied) = store.copy_import(path("book.epub"), Box::new(Cursor::new(bytes)), vec![], ImportOptions { direct }).await.unwrap();
@@ -1230,7 +1237,7 @@ mod tests {
         let library = tempfile::tempdir().unwrap();
         let archive = nonportable_audio_archive();
         let hash = BookId::from(blake3::hash(&archive));
-        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let store = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
         let mut writer = store.begin_book_write(&path("Story"), &hash).unwrap();
         writer.write_all(&archive).await.unwrap();
         let staged = writer.verify().await.unwrap().finish_book().await.unwrap();
@@ -1253,7 +1260,7 @@ mod tests {
         let archive = zip.finish().unwrap().into_inner();
         let hash = BookId::from(blake3::hash(&archive));
         let library = tempfile::tempdir().unwrap();
-        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let store = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
         let mut writer = store.begin_book_write(&path("Story"), &hash).unwrap();
         writer.write_all(&archive).await.unwrap();
         let staged = writer.verify().await.unwrap().finish_book().await.unwrap();
@@ -1286,7 +1293,7 @@ mod tests {
         let cover = audiobook_folder::discover_cover(source.path()).unwrap();
         let archive = audiobook_archive::write_archive_with_sidecars(std::io::Cursor::new(Vec::new()), &tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref()).unwrap().into_inner();
         assert_eq!(hash, BookId::from(blake3::hash(&archive)));
-        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let store = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
         let mut writer = store.begin_book_write(&path("Story"), &hash).unwrap();
         writer.write_all(&archive).await.unwrap();
         let staged = writer.verify().await.unwrap().finish_book().await.unwrap();
@@ -1309,7 +1316,7 @@ mod tests {
     #[tokio::test]
     async fn chunked_downloads_publish_the_verified_length_across_storage_checks() {
         let library = tempfile::tempdir().unwrap();
-        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let store = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
         let bytes = (0..8 * 1024 * 1024 + 17).map(|index| (index % 251) as u8).collect::<Vec<_>>();
         let hash = BookId::from(blake3::hash(&bytes));
         let relative = path("chunked.epub");
@@ -1328,7 +1335,7 @@ mod tests {
     #[tokio::test]
     async fn download_rejects_bytes_that_do_not_match_the_book_hash() {
         let library = tempfile::tempdir().unwrap();
-        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let store = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
         let hash = BookId::from(blake3::hash(b"expected book"));
         let mut writer = store.begin_book_write(&path("book.epub"), &hash).unwrap();
         writer.write_all(b"different book").await.unwrap();
@@ -1339,7 +1346,7 @@ mod tests {
     #[tokio::test]
     async fn thumbnail_set_includes_both_versioned_card_densities_and_invalidates_them_together() {
         let library = tempfile::tempdir().unwrap();
-        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let store = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
         let hash = BookId::from(blake3::hash(b"card variants"));
         store.write_thumbnail_set(&hash, b"original master", b"browse card", b"dense card").await.unwrap();
         assert!(store.thumbnail_set_exists(&hash).await.unwrap());
@@ -1359,10 +1366,10 @@ mod tests {
     #[tokio::test]
     async fn failed_thumbnail_book_preserves_the_browse_variant() {
         let library = tempfile::tempdir().unwrap();
-        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let store = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
         let hash = BookId::from(blake3::hash(b"thumbnail owner"));
         store.write_thumbnail_variant(&hash, thumbnail_contract::BROWSE_THUMBNAIL_WIDTH, b"previous browse cover").await.unwrap();
-        let destination = library.path().join(crate::APP_HIDDEN_DIR).join("assets/thumbnail").join(hash.to_hex().as_str());
+        let destination = store.0.assets_root.join("thumbnail").join(hash.to_hex().as_str());
         std::fs::create_dir(&destination).unwrap();
         assert!(store.write(BlobKind::Thumbnail, &hash, b"replacement cover").await.is_err());
         assert_eq!(store.read_named(thumbnail_variant_name(&hash, thumbnail_contract::BROWSE_THUMBNAIL_WIDTH)).await.unwrap().unwrap(), b"previous browse cover");
@@ -1372,7 +1379,7 @@ mod tests {
     #[tokio::test]
     async fn abandoned_and_invalid_downloads_remove_adjacent_temporary_files() {
         let library = tempfile::tempdir().unwrap();
-        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let store = AssetStore::open(library.path().to_str().unwrap(), &library.path().join(".bokheim/private-assets")).unwrap();
         let hash = BookId::from(blake3::hash(b"complete"));
         std::fs::write(library.path().join("book.epub"), b"existing user file").unwrap();
         for verify in [false, true] {

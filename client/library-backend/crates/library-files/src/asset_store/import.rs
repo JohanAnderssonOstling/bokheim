@@ -106,7 +106,7 @@ impl AssetStore {
             storage_call(move || async move {
                 let _lease = lease;
                 staged.commit().await?;
-                Ok(PublishedStagedBook { name: relative.file_name().to_owned(), relative_path: String::new(), published: true, fingerprint: None })
+                Ok(PublishedStagedBook { physical_size_bytes: None, name: relative.file_name().to_owned(), relative_path: String::new(), published: true, fingerprint: None })
             })
             .await
             .map_err(AssetStoreError::operation)?

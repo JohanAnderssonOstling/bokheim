@@ -156,6 +156,12 @@ impl LibraryRegistry {
         }
     }
 
+    /// App-owned assets belong to this device, independently of book folders.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn library_assets_locator(&self, id: &LibraryId) -> String {
+        join_locator(&self.0.app_data_locator, &format!("assets/{id}"))
+    }
+
     pub(super) fn run<T: Send + 'static>(&self, operation: impl FnOnce(&mut LocalRegistry) -> RegistryResult<T> + Send + 'static) -> RegistryResult<T> {
         let handle = self.0.clone();
         storage_queue::run_sync(move || {

@@ -79,7 +79,7 @@ def fetch_batch(args, targets):
                 raise ValueError('Selected catalog entry is missing')
             record = json.loads(row[0])
             record['description'] = ''
-            books.append({'key': table + ':' + target['key'], 'record': record, 'audiobook': False, 'needs_cover': False, 'readings': [], 'recording': None})
+            books.append({'key': table + ':' + target['key'], 'record': record, 'needs_description': False, 'audiobook': False, 'needs_cover': False, 'readings': [], 'recording': None})
     body = json.dumps({'books': books}, ensure_ascii=False).encode()
     for attempt in range(3):
         try:

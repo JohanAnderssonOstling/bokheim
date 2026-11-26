@@ -116,7 +116,7 @@ impl Render for KeyboardShortcutEditor {
         while self.rows.len() < settings.len() {
             self.rows.push(ShortcutRow { focus: cx.focus_handle(), bounds: Rc::new(Cell::new(Bounds::default())) });
         }
-        let restore = components::browser_settings_header_button(format!("restore-{}-shortcuts", self.page.label()), text!(common::restore_defaults), false, theme)
+        let restore = components::action_button(format!("restore-{}-shortcuts", self.page.label()), text!(common::restore_defaults))
             .w(rems(SHORTCUT_BUTTON_WIDTH_REM))
             .max_w_full()
             .disabled(!settings.iter().any(|setting| overrides.contains_key(setting.id)))
@@ -141,7 +141,7 @@ impl Render for KeyboardShortcutEditor {
                 keys.first().map(|key| Keystroke::parse(key).map(|key| Kbd::format(&key)).unwrap_or_else(|_| key.clone())).unwrap_or_else(|| text!(common::not_assigned).into())
             };
             let capture_focus = self.rows[row].focus.clone();
-            let control = components::browser_settings_header_button(format!("{id}-shortcut"), label, recording, theme)
+            let control = components::selectable_button(components::action_button(format!("{id}-shortcut"), label), recording, theme)
                 .w(rems(SHORTCUT_BUTTON_WIDTH_REM))
                 .max_w_full()
                 .tooltip(if self.saving.is_some() {

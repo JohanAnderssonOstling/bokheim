@@ -25,12 +25,19 @@ pub(crate) fn current_cover_text(cx: &App) -> CoverText {
     cx.try_global::<CoverTextSetting>().map(|setting| setting.0).unwrap_or_default()
 }
 
-pub(crate) struct BookListViewSetting(pub(crate) BookListView);
+pub(crate) struct BrowseViewSetting {
+    book_list: BookListView,
+    graph: bool,
+}
 
-impl gpui::Global for BookListViewSetting {}
+impl gpui::Global for BrowseViewSetting {}
 
 pub(crate) fn current_book_list_view(cx: &App) -> BookListView {
-    cx.try_global::<BookListViewSetting>().map(|setting| setting.0).unwrap_or_default()
+    cx.try_global::<BrowseViewSetting>().map(|setting| setting.book_list).unwrap_or_default()
+}
+
+pub(crate) fn current_graph_view(cx: &App) -> bool {
+    cx.try_global::<BrowseViewSetting>().is_some_and(|setting| setting.graph)
 }
 
 pub(crate) fn save_book_list_view(view: BookListView, cx: &mut App) {
@@ -38,12 +45,27 @@ pub(crate) fn save_book_list_view(view: BookListView, cx: &mut App) {
         return;
     }
     let Some(store) = cx.try_global::<PreferencesStore>().map(|store| store.0.clone()) else {
-        cx.set_global(BookListViewSetting(view));
+        cx.set_global(BrowseViewSetting { book_list: view, graph: current_graph_view(cx) });
         return;
     };
     store.update(cx, |preferences, cx| {
         if let Err(error) = preferences.update_browsing(BrowsingPreferencePatch::BookListView(view), cx) {
             log::error!("failed to save the book listing view: {error}");
+        }
+    });
+}
+
+pub(crate) fn save_graph_view(graph: bool, cx: &mut App) {
+    if current_graph_view(cx) == graph {
+        return;
+    }
+    let Some(store) = cx.try_global::<PreferencesStore>().map(|store| store.0.clone()) else {
+        cx.set_global(BrowseViewSetting { book_list: current_book_list_view(cx), graph });
+        return;
+    };
+    store.update(cx, |preferences, cx| {
+        if let Err(error) = preferences.update_browsing(BrowsingPreferencePatch::GraphView(graph), cx) {
+            log::error!("failed to save the graph view: {error}");
         }
     });
 }
@@ -113,7 +135,7 @@ impl Preferences {
         ui_components::apply_keyboard_shortcuts(browsing.keyboard_shortcuts(), cx);
         apply_appearance(&browsing, cx);
         cx.set_global(CoverTextSetting(browsing.cover_text()));
-        cx.set_global(BookListViewSetting(browsing.book_list_view()));
+        cx.set_global(BrowseViewSetting { book_list: browsing.book_list_view(), graph: browsing.graph_view() });
         cx.set_global(GeneratedCoversOnly(browsing.generated_covers_only()));
         #[cfg(feature = "kobo")]
         cx.set_global(gpui_kobo::KoboKeyboardLayouts(browsing.keyboard_layouts().to_vec()));
@@ -205,8 +227,8 @@ impl Preferences {
         if previous.cover_text() != browsing.cover_text() {
             cx.set_global(CoverTextSetting(browsing.cover_text()));
         }
-        if previous.book_list_view() != browsing.book_list_view() {
-            cx.set_global(BookListViewSetting(browsing.book_list_view()));
+        if previous.book_list_view() != browsing.book_list_view() || previous.graph_view() != browsing.graph_view() {
+            cx.set_global(BrowseViewSetting { book_list: browsing.book_list_view(), graph: browsing.graph_view() });
         }
         if previous.generated_covers_only() != browsing.generated_covers_only() {
             cx.set_global(GeneratedCoversOnly(browsing.generated_covers_only()));

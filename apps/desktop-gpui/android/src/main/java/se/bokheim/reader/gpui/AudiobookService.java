@@ -277,10 +277,12 @@ public final class AudiobookService extends MediaSessionService {
         } else if (id == bookId) {
             switch (action) {
                 case "pause":
+                    sequence = command.getLong("sequence");
                     player.pause();
                     break;
                 case "toggle":
-                    if (player.getPlayWhenReady() && player.getPlaybackState() != Player.STATE_ENDED) player.pause();
+                    sequence = command.getLong("sequence");
+                    if (!command.getBoolean("playWhenReady")) player.pause();
                     else {
                         if (player.getPlaybackState() == Player.STATE_ENDED) player.seekTo(0);
                         if (player.getPlaybackState() == Player.STATE_IDLE) player.prepare();
@@ -417,7 +419,7 @@ public final class AudiobookService extends MediaSessionService {
                 .append(",\"position\":").append(Math.max(0, player.getCurrentPosition()))
                 .append(",\"playing\":").append(!released && player.isPlaying())
                 .append(",\"requested\":").append(!released && player.getPlayWhenReady()
-                    && player.getPlaybackSuppressionReason() == Player.PLAYBACK_SUPPRESSION_REASON_NONE)
+                    && player.getPlaybackState() != Player.STATE_ENDED && player.getPlayerError() == null)
                 .append(",\"buffering\":").append(!released && player.getPlayWhenReady()
                     && player.getPlaybackState() == Player.STATE_BUFFERING
                     && player.getPlaybackSuppressionReason() == Player.PLAYBACK_SUPPRESSION_REASON_NONE)

@@ -1,25 +1,30 @@
-//! Bounded Audible discovery. No library paths, database connections or credentials.
+//! Bounded recording discovery with permanent successful Audnexus responses.
 
-use std::sync::OnceLock;
-use futures_util::StreamExt;
 use book_model::AudiobookChapter;
+use futures_util::StreamExt;
 use metadata_contract::audible::{self as contract, *};
 use serde_json::Value;
 use std::{
-    collections::HashMap,
-    sync::Arc,
+    collections::{HashMap, HashSet},
+    sync::{Arc, Weak},
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, Semaphore};
 
 mod audnexus;
+mod cache;
 mod covers;
 mod parsing;
+use cache::ResponseCache;
 use parsing::{parse_chapters, parse_product, website_asins};
+use rusqlite::Connection;
+use std::sync::Mutex as DatabaseMutex;
 
 const RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 const CANDIDATE_LIMIT: usize = 24;
 const GROUPS: &str = "product_desc,product_attrs,contributors,product_extended_attrs,product_details";
+// Bump when recording selection, parsing or chapter-plan rules change.
+const RECORDING_MATCH_POLICY: u32 = 1;
 
 struct CachedResponse {
     cached_at: Instant,
@@ -33,25 +38,28 @@ pub(crate) struct AudibleClient {
     origins: Arc<Vec<(String, String, String)>>,
     audnexus_origin: String,
     cache: Arc<Mutex<HashMap<String, CachedResponse>>>,
-    requests: Arc<Mutex<Option<Instant>>>,
+    persistent: Option<ResponseCache>,
+    requests: Arc<Mutex<HashMap<String, Arc<Mutex<Option<Instant>>>>>>,
     lookups: Arc<Semaphore>,
-}
-
-/// One process-wide client, so its request pacing and cache are shared.
-pub(crate) fn client() -> &'static AudibleClient {
-    static CLIENT: OnceLock<AudibleClient> = OnceLock::new();
-    CLIENT.get_or_init(AudibleClient::new)
+    matching: Arc<Mutex<HashMap<[u8; 32], Weak<Mutex<()>>>>>,
 }
 
 impl AudibleClient {
+    /// A service's clones share one client's request pacing and caches.
+    pub(crate) fn with_persistent_cache(database: Arc<DatabaseMutex<Connection>>) -> Self {
+        Self { persistent: Some(ResponseCache::new(database)), ..Self::new() }
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             http: http_response::client_builder().timeout(Duration::from_secs(8)).redirect(reqwest::redirect::Policy::none()).user_agent("Bokheim metadata enrichment").build().expect("HTTP client"),
             origins: Arc::new(vec![("us".into(), "https://api.audible.com".into(), "https://www.audible.com".into()), ("uk".into(), "https://api.audible.co.uk".into(), "https://www.audible.co.uk".into())]),
             audnexus_origin: "https://api.audnex.us".into(),
             cache: Arc::default(),
+            persistent: None,
             requests: Arc::default(),
             lookups: Arc::new(Semaphore::new(2)),
+            matching: Arc::default(),
         }
     }
 
@@ -61,13 +69,21 @@ impl AudibleClient {
 
     async fn get_response(&self, url: reqwest::Url) -> Result<Option<Arc<Vec<u8>>>, String> {
         let key = url.to_string();
-        if let Some(response) = self.cache.lock().await.get(&key) {
-            if response.cached_at.elapsed() < Duration::from_secs(6 * 3600) {
-                return Ok(response.bytes.clone());
+        // Audnexus uses disk after response validation. Do not retain a second
+        // expiring copy or temporarily cache malformed/partial responses.
+        let memory_cache = self.persistent.is_none() || url.origin() != reqwest::Url::parse(&self.audnexus_origin).map_err(|error| error.to_string())?.origin();
+        if memory_cache {
+            if let Some(response) = self.cache.lock().await.get(&key) {
+                if response.cached_at.elapsed() < Duration::from_secs(6 * 3600) {
+                    return Ok(response.bytes.clone());
+                }
             }
         }
         {
-            let mut previous = self.requests.lock().await;
+            // Pace each provider independently: a waiting Audible request must
+            // not hold up an Audnexus request or another regional provider.
+            let pacing = self.requests.lock().await.entry(url.origin().ascii_serialization()).or_default().clone();
+            let mut previous = pacing.lock().await;
             if let Some(at) = *previous {
                 tokio::time::sleep(Duration::from_millis(500).saturating_sub(at.elapsed())).await;
             }
@@ -79,7 +95,10 @@ impl AudibleClient {
         // and do not mistake login or other redirects for a definitive miss.
         if response.status() == reqwest::StatusCode::FOUND
             && response.url().path() == "/search"
-            && response.headers().get(reqwest::header::LOCATION).and_then(|location| location.to_str().ok())
+            && response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|location| location.to_str().ok())
                 .and_then(|location| response.url().join(location).ok())
                 .is_some_and(|target| target.origin() == response.url().origin() && target.path() == "/no-search-results")
         {
@@ -111,11 +130,13 @@ impl AudibleClient {
         if lower.contains("captcha") || lower.contains("<title>robot check") {
             return Err("Audible website challenge; retry later".into());
         }
-        let mut cache = self.cache.lock().await;
-        if cache.len() >= 256 || cache.values().filter_map(|response| response.bytes.as_ref()).map(|bytes| bytes.len()).sum::<usize>() + bytes.len() > 16 * 1024 * 1024 {
-            cache.clear();
+        if memory_cache {
+            let mut cache = self.cache.lock().await;
+            if cache.len() >= 256 || cache.values().filter_map(|response| response.bytes.as_ref()).map(|bytes| bytes.len()).sum::<usize>() + bytes.len() > 16 * 1024 * 1024 {
+                cache.clear();
+            }
+            cache.insert(key, CachedResponse { cached_at: Instant::now(), bytes: Some(bytes.clone()) });
         }
-        cache.insert(key, CachedResponse { cached_at: Instant::now(), bytes: Some(bytes.clone()) });
         Ok(Some(bytes))
     }
 
@@ -152,10 +173,69 @@ impl AudibleClient {
         if let Err(detail) = validate(&request) {
             return response(LookupStatus::NoMatch, Vec::new(), false, detail);
         }
-        let Ok(_permit) = self.lookups.try_acquire() else {
-            return response(LookupStatus::Unavailable, Vec::new(), false, "Audible lookup capacity is busy; retry later".into());
+        self.lookup_recording(&request).await
+    }
+
+    async fn lookup_recording(&self, request: &LookupRequest) -> LookupResponse {
+        let Some(cache) = &self.persistent else { return self.discover_queued(request).await };
+        let input = match serde_json::to_vec(&(RECORDING_MATCH_POLICY, &*self.origins, &self.audnexus_origin, request)) {
+            Ok(input) => Arc::new(input),
+            Err(error) => {
+                tracing::warn!(%error, "could not key recording decision");
+                return self.discover_queued(request).await;
+            }
         };
-        match tokio::time::timeout(Duration::from_secs(45), self.discover(&request)).await {
+        let key = *blake3::hash(input.as_slice()).as_bytes();
+        if let Some(result) = self.cached_match(cache, key, input.clone()).await {
+            return result;
+        }
+        let lock = {
+            let mut matching = self.matching.lock().await;
+            if let Some(lock) = matching.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                matching.retain(|_, lock| lock.strong_count() > 0);
+                let lock = Arc::new(Mutex::new(()));
+                matching.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        };
+        let _matching = lock.lock().await;
+        if let Some(result) = self.cached_match(cache, key, input.clone()).await {
+            return result;
+        }
+        let result = self.discover_queued(request).await;
+        if result.status == LookupStatus::Supported {
+            if let Err(error) = cache.put_match(key, input, result.clone()).await {
+                tracing::warn!(%error, "could not persist recording decision");
+            }
+        }
+        result
+    }
+
+    async fn cached_match(&self, cache: &ResponseCache, key: [u8; 32], input: Arc<Vec<u8>>) -> Option<LookupResponse> {
+        match cache.get_match(key, input).await {
+            Ok(Some(result)) => {
+                tracing::debug!(asin = ?result.selected_asin, region = ?result.selected_region, "using persisted recording decision");
+                Some(result)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(%error, "could not read recording decision");
+                None
+            }
+        }
+    }
+
+    async fn discover_queued(&self, request: &LookupRequest) -> LookupResponse {
+        let queued_at = Instant::now();
+        let Ok(_permit) = self.lookups.acquire().await else {
+            return response(LookupStatus::Unavailable, Vec::new(), false, "Audible lookup capacity is unavailable; retry later".into());
+        };
+        tracing::debug!(queue_ms = queued_at.elapsed().as_millis(), "starting recording discovery");
+        // The server owns outbound capacity. Waiting for a slot must not use
+        // up the provider's discovery deadline before any request starts.
+        match tokio::time::timeout(Duration::from_secs(45), self.discover(request)).await {
             Ok(result) => result,
             Err(_) => response(LookupStatus::Unavailable, Vec::new(), false, "Audible discovery timed out; retry later".into()),
         }
@@ -164,6 +244,7 @@ impl AudibleClient {
     async fn discover(&self, request: &LookupRequest) -> LookupResponse {
         let mut candidates = Vec::new();
         let mut errors = Vec::new();
+        let mut chapter_requests = HashSet::new();
         for (region, api, _) in self.origins.iter() {
             for asin in request.recording.asins.iter().take(2) {
                 match self.product(region, api, asin, DiscoverySource::EmbeddedAsin).await {
@@ -172,7 +253,7 @@ impl AudibleClient {
                 }
             }
         }
-        self.hydrate(request, &mut candidates, &mut errors).await;
+        self.hydrate(request, &mut candidates, &mut errors, &mut chapter_requests).await;
         if matches!(select_offthread(request, &candidates).await, contract::selection::Selection::Supported(_)) {
             return finish(request, candidates, false, errors).await;
         }
@@ -195,7 +276,7 @@ impl AudibleClient {
                 }
             }
         }
-        self.hydrate(request, &mut candidates, &mut errors).await;
+        self.hydrate(request, &mut candidates, &mut errors, &mut chapter_requests).await;
         if matches!(select_offthread(request, &candidates).await, contract::selection::Selection::Supported(_)) {
             return finish(request, candidates, false, errors).await;
         }
@@ -220,18 +301,22 @@ impl AudibleClient {
                         }
                         Err(error) => errors.push(error),
                     },
-                    Ok(None) => {},
+                    Ok(None) => {}
                     Err(error) => errors.push(error),
                 }
             }
         }
-        self.hydrate(request, &mut candidates, &mut errors).await;
+        self.hydrate(request, &mut candidates, &mut errors, &mut chapter_requests).await;
         finish(request, candidates, true, errors).await
     }
 
-    async fn hydrate(&self, request: &LookupRequest, candidates: &mut [Candidate], errors: &mut Vec<String>) {
+    async fn hydrate(&self, request: &LookupRequest, candidates: &mut [Candidate], errors: &mut Vec<String>, chapter_requests: &mut HashSet<(String, String)>) {
         for candidate in candidates {
             if candidate.duration_ms.is_some() || contract::selection::title_score(request, candidate) < 950 {
+                continue;
+            }
+            if !chapter_requests.insert((candidate.region.clone(), candidate.asin.clone())) {
+                tracing::debug!(asin = %candidate.asin, region = %candidate.region, "chapter lookup already attempted during recording discovery");
                 continue;
             }
             let Some((_, origin, _)) = self.origins.iter().find(|(region, _, _)| *region == candidate.region) else {
@@ -371,7 +456,6 @@ async fn finish(request: &LookupRequest, candidates: Vec<Candidate>, fallback: b
 mod tests {
     use super::*;
 
-
     #[test]
     fn website_credit_is_not_searched_as_a_narrator() {
         let mut r = request();
@@ -380,8 +464,8 @@ mod tests {
         assert_eq!(queries(&r)[0].0, "title");
     }
 
-    use axum::{extract::Path, response::IntoResponse, routing::get, Router};
     use axum::http::{header::LOCATION, StatusCode};
+    use axum::{extract::Path, response::IntoResponse, routing::get, Router};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -402,17 +486,20 @@ mod tests {
     async fn redirect_fixture(location: &'static str) -> (AudibleClient, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         let websites = Arc::new(AtomicUsize::new(0));
         let count = websites.clone();
-        let router = Router::new()
-            .route("/1.0/catalog/products", get(|| async { axum::Json(json!({"products":[]})) }))
-            .route("/search", get(move || {
+        let router = Router::new().route("/1.0/catalog/products", get(|| async { axum::Json(json!({"products":[]})) })).route(
+            "/search",
+            get(move || {
                 count.fetch_add(1, Ordering::SeqCst);
                 async move { (StatusCode::FOUND, [(LOCATION, location)]) }
-            }));
+            }),
+        );
         // There is deliberately no redirect destination: an empty search
         // must be recognized from the redirect, without another request.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
         let mut client = AudibleClient::new();
         client.audnexus_origin = origin.clone();
         client.origins = Arc::new(vec![("us".into(), origin.clone(), origin)]);
@@ -548,7 +635,6 @@ mod tests {
         web_server.abort();
     }
 
-
     #[tokio::test]
     async fn audnexus_supplies_recording_metadata_and_chapters_with_audible_discovery() {
         let (mut client, websites, server) = fixture(true, false).await;
@@ -588,16 +674,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unavailable_providers_are_retryable_and_capacity_does_not_queue() {
+    async fn unavailable_providers_are_retryable() {
         let (client, _, server) = fixture(false, true).await;
         assert_eq!(client.lookup(request()).await.status, LookupStatus::Unavailable);
-        let _permits = client.lookups.acquire_many(2).await.unwrap();
-        let result = client.lookup(request()).await;
-        assert_eq!(result.status, LookupStatus::Unavailable);
-        assert!(result.detail.contains("capacity"));
         server.abort();
     }
-
 }
 
 async fn select_offthread(request: &LookupRequest, candidates: &[Candidate]) -> contract::selection::Selection {

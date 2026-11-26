@@ -2,16 +2,22 @@
 
 use ui_text::text;
 
+#[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+use crate::navigation::library_session::reader_import::ReaderImportDialog;
 use app::LibraryEntry;
+#[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+use library_backend::{ReaderImportOptions, ReaderImportSource};
+#[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
+use std::path::PathBuf;
 use ui_components::user_facing_error;
 
 use gpui::prelude::*;
-use gpui::{Context, Entity, KeyDownEvent, MouseButton, PathPromptOptions, SharedString, Window};
+use gpui::{App, ClickEvent, Context, Entity, FocusHandle, KeyDownEvent, MouseButton, PathPromptOptions, SharedString, Window};
 use gpui::{Focusable, Subscription};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::PopupMenu;
-use gpui_component::{Disableable, WindowExt};
+use gpui_component::{Disableable, FocusTrapElement, WindowExt};
 use sync_common::LibraryId;
 use ui_components::{self as components, ScrollableElement};
 
@@ -19,6 +25,9 @@ use super::{Sidebar, SwitcherCursor};
 
 pub(super) struct LibraryNameDialog {
     id: Option<LibraryId>,
+    focus: FocusHandle,
+    #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    reader_import: Option<(ReaderImportSource, ReaderImportOptions)>,
     folders: Option<Vec<gpui::SelectedDirectory>>,
     estimate: Option<(u64, u64, u64)>,
     asset_storage_enabled: bool,
@@ -66,11 +75,8 @@ impl Sidebar {
                 .disabled(downloads.3),
             )
         });
-        let subscription = cx.subscribe_in(&menu, window, |navigation, _, _: &gpui::DismissEvent, window, cx| {
+        let subscription = cx.subscribe_in(&menu, window, |navigation, _, _: &gpui::DismissEvent, _, cx| {
             navigation.library_menu = None;
-            if navigation.library_name_dialog.is_none() {
-                navigation.switcher_focus.focus(window, cx);
-            }
             cx.notify();
         });
         menu.focus_handle(cx).focus(window, cx);
@@ -80,7 +86,8 @@ impl Sidebar {
 
     #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
     fn choose_move_library(&mut self, id: LibraryId, cx: &mut Context<Self>) {
-        let selection = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(text!(browse::choose_library_destination).into()) });
+        let directory = self.libraries.read(cx).entries().iter().find(|library| *library.library_id() == id).map(|library| PathBuf::from(library.storage_locator()));
+        let selection = cx.prompt_for_paths(PathPromptOptions { directory, files: false, directories: true, multiple: false, prompt: Some(text!(browse::choose_library_destination).into()) });
         cx.spawn(async move |navigation, cx| {
             let Ok(Ok(Some(mut paths))) = selection.await else { return };
             if paths.len() != 1 {
@@ -105,7 +112,7 @@ impl Sidebar {
 
     fn begin_library_name(&mut self, id: Option<LibraryId>, name: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(text!(browse::library_name)));
-        if id.is_some() {
+        if !name.is_empty() {
             input.update(cx, |input, cx| input.set_value(name, window, cx));
         }
         let subscription = cx.subscribe_in(&input, window, |navigation, _, event, _, cx| {
@@ -117,8 +124,44 @@ impl Sidebar {
         input.focus_handle(cx).focus(window, cx);
         let asset_storage_enabled = id.is_none() && self.sync_state.read(cx).account_status.signed_in();
         let sync_subscription = id.is_none().then(|| cx.observe(&self.sync_state, |_, _, cx| cx.notify()));
-        self.library_name_dialog = Some(LibraryNameDialog { id, folders: None, estimate: Some((0, 0, 0)), asset_storage_enabled, input, error: None, saving: false, _subscription: subscription, _sync_subscription: sync_subscription });
+        self.library_name_dialog = Some(LibraryNameDialog {
+            id,
+            focus: cx.focus_handle(),
+            #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+            reader_import: None,
+            folders: None,
+            estimate: Some((0, 0, 0)),
+            asset_storage_enabled,
+            input,
+            error: None,
+            saving: false,
+            _subscription: subscription,
+            _sync_subscription: sync_subscription,
+        });
         cx.notify();
+    }
+
+    #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    pub(super) fn open_reader_library_import(&mut self, source: ReaderImportSource, window: &mut Window, cx: &mut Context<Self>) {
+        let management = self.libraries.read(cx).folder_management();
+        let review = cx.new(|cx| ReaderImportDialog::new(management, source, cx));
+        cx.subscribe_in(&review, window, |sidebar, review, _: &gpui::DismissEvent, window, cx| {
+            let request = review.update(cx, |review, _| review.take_import());
+            window.close_dialog(cx);
+            if let Some((source, options, count)) = request {
+                sidebar.begin_library_name(None, source.name().into(), window, cx);
+                if let Some(dialog) = &mut sidebar.library_name_dialog {
+                    dialog.reader_import = Some((source, options));
+                    dialog.estimate = Some((count, 0, count));
+                }
+                cx.notify();
+            }
+        })
+        .detach();
+        let width = window.rem_size() * 26.25;
+        let focus = review.focus_handle(cx);
+        window.open_dialog(cx, move |dialog, _, _| dialog.w(width).close_button(false).keyboard(false).p_0().child(review.clone()));
+        focus.focus(window, cx);
     }
 
     fn cancel_library_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -135,7 +178,7 @@ impl Sidebar {
         if dialog.saving || dialog.estimate.is_none() {
             return;
         }
-        let asset_storage_enabled = dialog.id.is_none() && dialog.asset_storage_enabled && self.sync_state.read(cx).cloud_storage_blocker(dialog.estimate.filter(|(_, _, unavailable)| *unavailable == 0).map(|(_, bytes, _)| bytes)).is_none();
+        let asset_storage_enabled = dialog.id.is_none() && dialog.asset_storage_enabled && self.sync_state.read(cx).account_status.signed_in();
         if let Some(folders) = dialog.folders.take() {
             self.libraries.update(cx, |libraries, cx| libraries.create_selected_libraries(folders, asset_storage_enabled, cx));
             self.library_name_dialog = None;
@@ -151,20 +194,29 @@ impl Sidebar {
         }
         dialog.saving = true;
         dialog.error = None;
+        #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        let reader_import = dialog.reader_import.clone();
         let input_id = dialog.input.entity_id();
         let operation = self.libraries.read(cx).save_library_name(dialog.id, name, asset_storage_enabled);
         let selection_epoch = self.libraries.read(cx).selection_epoch();
         cx.spawn(async move |navigation, cx| {
             let result = operation.await;
-            let _ = navigation.update(cx, |navigation, cx| {
+            let _ = navigation.update_in(cx, |navigation, window, cx| {
                 match result {
                     Ok(created) => {
                         if navigation.library_name_dialog.as_ref().is_some_and(|dialog| dialog.input.entity_id() == input_id) {
                             navigation.library_name_dialog = None;
                             navigation.switcher_open = false;
                         }
-                        if let Some(id) = created.filter(|_| navigation.libraries.read(cx).selection_epoch() == selection_epoch) {
-                            navigation.libraries.update(cx, |libraries, cx| libraries.select_library(id, cx));
+                        if let Some(entry) = created {
+                            let id = *entry.library_id();
+                            navigation.libraries.update(cx, |libraries, cx| {
+                                libraries.finish_library_creation(entry, selection_epoch, cx);
+                                #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+                                if let Some((source, options)) = reader_import {
+                                    libraries.start_reader_import(id, source, options, window, cx);
+                                }
+                            });
                         }
                     }
                     Err(error) => {
@@ -193,37 +245,41 @@ impl Sidebar {
         let theme = components::browser_theme(cx);
         let cancel = emitter.clone();
         let submit = emitter.clone();
+        let dismiss = emitter.clone();
         let panel = components::modal_form_surface(theme)
+            .track_focus(&dialog.focus)
+            .key_context("Dialog")
+            .on_key_down(move |event, window, cx| {
+                if event.keystroke.key == "escape" {
+                    dismiss.update(cx, |navigation, cx| navigation.cancel_library_name(window, cx));
+                    cx.stop_propagation();
+                }
+            })
             .w(gpui::rems(22.5))
             .child(components::dialog_title(if dialog.id.is_none() { text!(browse::create_library) } else { text!(browse::rename_library) }, theme))
             .child(Input::new(&dialog.input).disabled(dialog.saving || dialog.folders.is_some()))
             .children(dialog.folders.as_ref().filter(|folders| folders.iter().any(|folder| folder.local_path.is_none())).map(|_| gpui::div().child(text!(browse::books_will_be_copied_into_bokheim_the_originals_will_stay_in_the))))
             .children((dialog.id.is_none()).then(|| {
                 let signed_in = self.sync_state.read(cx).account_status.signed_in();
-                let cloud_blocker = self.sync_state.read(cx).cloud_storage_blocker(dialog.estimate.filter(|(_, _, unavailable)| *unavailable == 0).map(|(_, bytes, _)| bytes));
                 let toggle = emitter.clone();
-                let estimate = match dialog.estimate {
-                    Some(estimate) => crate::navigation::folder_creation::estimate_label(estimate),
-                    None => text!(browse::estimating_book_size).to_owned(),
-                };
                 gpui::div()
                     .flex()
                     .flex_col()
                     .gap(gpui::px(components::SPACE_SM))
-                    .child(estimate)
-                    .children(signed_in.then(|| {
-                        Checkbox::new("library-upload-choice").label(text!(browse::cloud_storage)).checked(dialog.asset_storage_enabled && cloud_blocker.is_none()).disabled(dialog.saving || cloud_blocker.is_some()).on_click(
-                            move |checked, _, cx| {
-                                toggle.update(cx, |navigation, cx| {
-                                    if let Some(dialog) = &mut navigation.library_name_dialog {
-                                        dialog.asset_storage_enabled = *checked;
-                                    }
-                                    cx.notify();
-                                })
-                            },
-                        )
+                    .children((dialog.folders.is_some() || dialog.estimate.is_some_and(|(books, _, _)| books > 0)).then(|| match dialog.estimate {
+                        Some(estimate) => crate::navigation::folder_creation::estimate_label(estimate),
+                        None => text!(browse::estimating_book_size).to_owned(),
                     }))
-                    .children(signed_in.then_some(cloud_blocker).flatten().map(|message| components::form_hint(message, theme)))
+                    .children(signed_in.then(|| {
+                        Checkbox::new("library-upload-choice").label(text!(browse::cloud_storage)).checked(dialog.asset_storage_enabled).disabled(dialog.saving).on_click(move |checked, _, cx| {
+                            toggle.update(cx, |navigation, cx| {
+                                if let Some(dialog) = &mut navigation.library_name_dialog {
+                                    dialog.asset_storage_enabled = *checked;
+                                }
+                                cx.notify();
+                            })
+                        })
+                    }))
             }))
             .children(dialog.error.clone().map(|error| components::error_text(theme).child(error)))
             .child(
@@ -259,7 +315,7 @@ impl Sidebar {
         // painting.
         // Do not dismiss this dialog from the full-window scrim.
         // On Kobo, keyboard taps are outside the panel bounds.
-        Some(components::centered_modal(components::modal_scrim("library-rename-scrim", theme), panel, window).into_any_element())
+        Some(components::centered_modal(components::modal_scrim("library-rename-scrim", theme), panel.focus_trap("library-name-dialog", &dialog.focus), window).into_any_element())
     }
 
     pub(crate) fn is_library_switcher_open(&self, _cx: &gpui::App) -> bool {
@@ -309,25 +365,34 @@ impl Sidebar {
         let moved = match event.keystroke.key.as_str() {
             "up" => Some(match cursor {
                 SwitcherCursor::Add => SwitcherCursor::Add,
+                #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+                SwitcherCursor::Import => SwitcherCursor::Import,
                 SwitcherCursor::Library { index: 0, .. } => SwitcherCursor::Add,
                 SwitcherCursor::Library { index, menu } => SwitcherCursor::Library { index: index - 1, menu },
             }),
             "down" => Some(match cursor {
                 // Leaving the header lands on a library, never on its menu
                 // button: the column is a deliberate step sideways.
+                #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+                SwitcherCursor::Import if count > 0 => SwitcherCursor::Library { index: 0, menu: false },
                 SwitcherCursor::Add if count > 0 => SwitcherCursor::Library { index: 0, menu: false },
                 SwitcherCursor::Add => SwitcherCursor::Add,
                 SwitcherCursor::Library { index, menu } if index + 1 < count => SwitcherCursor::Library { index: index + 1, menu },
                 other => other,
             }),
             "left" => Some(match cursor {
+                #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+                SwitcherCursor::Add => SwitcherCursor::Import,
                 SwitcherCursor::Library { index, menu: true } => SwitcherCursor::Library { index, menu: false },
                 other => other,
             }),
             "right" => Some(match cursor {
+                #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+                SwitcherCursor::Import => SwitcherCursor::Add,
                 SwitcherCursor::Library { index, menu: false } => SwitcherCursor::Library { index, menu: true },
                 other => other,
             }),
+            "enter" | "space" if !self.switcher_focus.is_focused(window) => return,
             "enter" | "space" => {
                 self.activate_switcher_cursor(window, cx);
                 None
@@ -336,6 +401,7 @@ impl Sidebar {
         };
         if let Some(moved) = moved {
             self.switcher_cursor = moved;
+            self.switcher_focus.focus(window, cx);
             cx.notify();
         }
         cx.stop_propagation();
@@ -349,6 +415,8 @@ impl Sidebar {
 
     fn activate_switcher_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.switcher_cursor {
+            #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+            SwitcherCursor::Import => self.open_import_library_choices(window, cx),
             SwitcherCursor::Add => {
                 self.open_add_library_choices(window, cx);
             }
@@ -374,7 +442,7 @@ impl Sidebar {
             let theme = components::browser_theme(cx);
             let navigation = navigation.clone();
             let cancel = components::dialog_cancel_button("cancel-delete-library", text!(common::cancel)).on_click(|_, window, cx| window.close_dialog(cx));
-            let delete = components::base_button("delete-library").label(text!(browse::remove_library)).danger().on_click(move |_, window, cx| {
+            let delete = components::action_button("delete-library", text!(browse::remove_library)).danger().on_click(move |_, window, cx| {
                 window.close_dialog(cx);
                 // The switcher stays open: deleting is a management action,
                 // and there is usually more than one to do. Closing it also
@@ -428,7 +496,7 @@ impl Sidebar {
     }
 
     pub(crate) fn choose_library_folders(&mut self, cx: &mut Context<Self>) {
-        let selection = cx.prompt_for_directories(PathPromptOptions { files: false, directories: true, multiple: true, prompt: Some(text!(browse::choose_library_folders).into()) });
+        let selection = cx.prompt_for_directories(PathPromptOptions { directory: None, files: false, directories: true, multiple: true, prompt: Some(text!(browse::choose_library_folders).into()) });
         cx.spawn(async move |navigation, cx| {
             let Ok(Ok(Some(directories))) = selection.await else { return };
             if directories.is_empty() {
@@ -496,12 +564,17 @@ impl Sidebar {
         let libraries = self.libraries(cx);
         let library_count = libraries.len();
         let cursor = self.switcher_cursor;
+        let keyboard_cursor = window.last_input_was_keyboard() && self.switcher_focus.is_focused(window);
         let keys = emitter.clone();
-        let header = components::library_switcher_header(text!(common::libraries), theme).flex_none().child(self.render_add_library_control(
-            emitter.clone(),
-            components::library_switcher_add_button(matches!(cursor, SwitcherCursor::Add), theme),
-            true,
-        ));
+        let actions = gpui::div().flex().items_center().gap(gpui::px(components::SPACE_XS));
+        #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        let actions =
+            actions.child(self.render_import_library_control(
+                emitter.clone(),
+                components::action_button("library-switcher-import", text!(common::import)).when(keyboard_cursor && cursor == SwitcherCursor::Import, |button| button.border_color(theme.accent)),
+            ));
+        let actions = actions.child(self.render_add_library_control(emitter.clone(), components::library_switcher_add_button(keyboard_cursor && matches!(cursor, SwitcherCursor::Add), theme), true));
+        let header = components::library_switcher_header(text!(common::libraries), theme).flex_none().child(actions);
         let panel = components::library_switcher_panel()
             .flex_1()
             .min_h_0()
@@ -520,31 +593,39 @@ impl Sidebar {
             let select_id = library_id;
             let manage = emitter.clone();
             let menu_was_open = self.library_menu.as_ref().is_some_and(|(id, _, _)| *id == library_id);
+            let activate_menu = move |window: &mut Window, cx: &mut App| {
+                manage.update(cx, |navigation, cx| {
+                    navigation.switcher_cursor = SwitcherCursor::Library { index, menu: true };
+                    // Capture dismissal may have already removed the popup.
+                    if menu_was_open {
+                        navigation.library_menu = None;
+                        navigation.switcher_focus.focus(window, cx);
+                        cx.notify();
+                    } else {
+                        navigation.open_library_menu(library_id, window, cx);
+                    }
+                });
+            };
+            let pointer_activate = activate_menu.clone();
             list = list.child(components::library_switcher_row(
-                components::library_switcher_item(format!("library-switcher-{library_id}"), name.clone(), selected, cursor == SwitcherCursor::Library { index, menu: false }, theme).on_click(move |_, _window, cx| {
+                components::library_switcher_item(format!("library-switcher-{library_id}"), name.clone(), selected, keyboard_cursor && cursor == SwitcherCursor::Library { index, menu: false }, theme).on_click(move |_, _window, cx| {
                     select.update(cx, |navigation, cx| navigation.select_library(select_id, cx));
                 }),
                 gpui::div()
                     .flex_none()
                     .child(
-                        components::library_switcher_menu_button(format!("library-switcher-menu-{library_id}"), name, cursor == SwitcherCursor::Library { index, menu: true }, theme)
+                        components::library_switcher_menu_button(format!("library-switcher-menu-{library_id}"), name, keyboard_cursor && cursor == SwitcherCursor::Library { index, menu: true }, theme)
                             .debug_selector(move || format!("library-switcher-menu-{library_id}"))
                             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                                 cx.stop_propagation();
-                                manage.update(cx, |navigation, cx| {
-                                    navigation.switcher_cursor = SwitcherCursor::Library { index, menu: true };
-                                    // Outside-click dismissal runs during capture. Use the
-                                    // state from before this press so the trigger cannot reopen it.
-                                    if menu_was_open {
-                                        navigation.library_menu = None;
-                                        navigation.switcher_focus.focus(window, cx);
-                                        cx.notify();
-                                    } else {
-                                        navigation.open_library_menu(library_id, window, cx);
-                                    }
-                                });
+                                pointer_activate(window, cx);
                             })
-                            .on_click(|_, _, cx| cx.stop_propagation()),
+                            .on_click(move |event, window, cx| {
+                                cx.stop_propagation();
+                                if matches!(event, ClickEvent::Keyboard(_)) {
+                                    activate_menu(window, cx);
+                                }
+                            }),
                     )
                     .children(self.library_menu.as_ref().filter(|(id, _, _)| *id == library_id).map(|(_, menu, _)| {
                         if cx.supports_touch_input() {

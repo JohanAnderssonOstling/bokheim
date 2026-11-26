@@ -65,6 +65,11 @@ impl SyncState {
         let Some(bytes) = bytes else {
             return Some(text!(account::checking_the_library_size_before_adding_it_to_cloud_storage));
         };
+        // Empty libraries need no upload capacity, including before the
+        // account settings have loaded the cloud quota snapshot.
+        if bytes == 0 {
+            return None;
+        }
         let Some(usage) = self.storage_usage else {
             return Some(text!(account::checking_available_cloud_storage));
         };

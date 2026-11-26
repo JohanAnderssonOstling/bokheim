@@ -10,7 +10,7 @@ use sync_common::DirId;
 struct PreparedEdit {
     directories: Vec<PreparedDirectory>,
     files: Vec<PreparedPlacement>,
-    materialized_files: Vec<String>,
+    materialized_files: Vec<(String, Option<u64>)>,
     materialized_directories: Vec<DirId>,
 }
 
@@ -37,8 +37,9 @@ impl PreparedEdit {
         for file in plan.files.iter().filter(|file| file.work.operation == "materialize") {
             let movable = plan.files.iter().filter(|other| !copy_move && other.work.operation == "remove" && other.work.source_root.is_none() && other.work.book_id == file.work.book_id).filter_map(|other| other.work.cleanup_path.as_ref());
             if let Some(output) = assets.prepare_placement(&file.work.book_id, &file.resolved_path, &file.book_paths, movable)? {
+                let size = output.physical_size_bytes()?;
                 prepared.files.push(output);
-                prepared.materialized_files.push(file.resolved_path.to_string());
+                prepared.materialized_files.push((file.resolved_path.to_string(), size));
             }
         }
         Ok(prepared)
@@ -146,7 +147,7 @@ mod tests {
 
     async fn fixture() -> (TempDir, std::sync::Arc<tokio::sync::RwLock<LibraryState>>, BookId, DirId) {
         let root = TempDir::new().unwrap();
-        let assets = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+        let assets = AssetStore::open(root.path().to_str().unwrap(), &root.path().join(".bokheim/private-assets")).unwrap();
         let database = DatabaseClient::open(root.path().join("state.sqlite"), &BackendExecutor::new().unwrap()).await.unwrap();
         database.initialize_library().await.unwrap();
 
@@ -170,7 +171,7 @@ mod tests {
                 size_bytes: BYTES.len() as u64,
                 inspection_version: 1,
                 inspection: Some(InspectedBook { pdf: None, audiobook: None, metadata: BookRecord { metadata: BookDetails { title: "Book".into(), ..Default::default() }, description: String::new() }, toc: vec![] }),
-                published: PublishedStagedBook { name: "book.epub".into(), relative_path: "/book.epub".into(), published: true, fingerprint: None },
+                published: PublishedStagedBook { physical_size_bytes: None, name: "book.epub".into(), relative_path: "/book.epub".into(), published: true, fingerprint: None },
                 request_thumbnail: false,
                 restore_paths: vec![],
             })

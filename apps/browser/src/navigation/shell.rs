@@ -232,11 +232,11 @@ impl BrowserShell {
             .justify_center()
             .when(components::uses_mobile_navigation(window), |actions| actions.flex_col())
             .gap(gpui::px(components::SPACE_SM))
-            .child(components::primary_action_button("create-first-library", text!(browse::create_new_library), IconName::Plus, false).on_click(move |_, window, cx| {
+            .child(components::action_button("create-first-library", text!(browse::create_new_library)).primary().icon(IconName::Plus).on_click(move |_, window, cx| {
                 create.update(cx, |navigation, cx| navigation.open_create_library_dialog(window, cx));
             }))
             .when(cfg!(not(target_arch = "arm")), |actions| {
-                actions.child(components::secondary_action_button("open-first-library-folder", text!(browse::open_library_from_folder), IconName::FolderOpen, false).on_click(move |_, _, cx| {
+                actions.child(components::action_button("open-first-library-folder", text!(browse::open_library_from_folder)).icon(IconName::FolderOpen).on_click(move |_, _, cx| {
                     open.update(cx, |navigation, cx| navigation.choose_library_folders(cx));
                 }))
             });
@@ -498,28 +498,23 @@ impl Render for BrowserShell {
         let safe_area = window.insets().effective();
         let sidebar = self.navigation.clone();
         let navigation = sidebar.read(cx).render_navigation(sidebar.clone(), route, self.page_navigation.library_view(), compact_navigation, self.split_close_enabled, safe_area, window, cx);
-        // A plain flex sibling rather than an absolute overlay, so the dock
-        // takes its own space instead of painting over other content. On
-        // compact windows `page` is a column, so the dock goes between
-        // `content` and `navigation` to sit above the bottom nav bar rather
-        // than below it; on wide windows `page` is sidebar-beside-content
-        // row, so the dock instead goes below the whole row, at the outer level.
+        // The dock reserves space in the content column. Desktop navigation
+        // stays beside it at full height; compact navigation sits below it.
         let footer = || self.content_footer.clone().map(|footer| gpui::div().w_full().flex_none().child(footer));
         let page = if compact_navigation {
             gpui::div().flex_1().min_h_0().min_w_0().flex().flex_col().pt(safe_area.top).child(content).children(footer()).child(navigation).into_any_element()
         } else {
-            // A wide window may still be a phone in landscape, where the OS
-            // button bar sits beside the page or along its bottom edge. The
-            // dock clears the bottom edge when there is one.
-            let bottom = if self.content_footer.is_some() { gpui::px(0.0) } else { safe_area.bottom };
-            components::browser_body().when(self.split_close_enabled, |body| body.gap(gpui::px(components::SPACE_SM))).pt(safe_area.top).pl(safe_area.left).pr(safe_area.right).pb(bottom).child(navigation).child(content).into_any_element()
+            components::browser_body()
+                .when(self.split_close_enabled, |body| body.gap(gpui::px(components::SPACE_SM)))
+                .pt(safe_area.top)
+                .pl(safe_area.left)
+                .pr(safe_area.right)
+                .pb(safe_area.bottom)
+                .child(navigation)
+                .child(content.children(footer()))
+                .into_any_element()
         };
-
-        // On compact windows the bottom nav bar already reserves `safe_area.bottom`
-        // beneath itself, and the dock sits above that bar; on wide windows there
-        // is no such bar, so the dock clears the OS gesture/button bar itself.
-        let outer_footer = (!compact_navigation).then(footer).flatten().map(|footer| footer.pb(safe_area.bottom).pl(safe_area.left).pr(safe_area.right));
-        gpui::div().size_full().relative().flex().flex_col().child(page).children(outer_footer).children(sidebar.read(cx).library_switcher_overlay(sidebar.clone(), window, cx)).into_any_element()
+        gpui::div().size_full().relative().flex().flex_col().child(page).children(sidebar.read(cx).library_switcher_overlay(sidebar.clone(), window, cx)).into_any_element()
     }
 }
 

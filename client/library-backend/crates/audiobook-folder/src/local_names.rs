@@ -40,7 +40,7 @@ fn portable_path(name: &str) -> bool {
     valid_archive_name(name) && name.split('/').all(portable_component)
 }
 
-fn regular_mapped_track(folder: &Path, local: &str) -> io::Result<bool> {
+pub(crate) fn regular_mapped_track(folder: &Path, local: &str) -> io::Result<bool> {
     let mut path = folder.to_path_buf();
     let mut components = local.split('/').peekable();
     while let Some(component) = components.next() {
@@ -111,13 +111,13 @@ impl PathMapping {
         self.entries.iter().find(|entry| entry.local.to_lowercase() == local.to_lowercase()).map_or(local, |entry| &entry.original)
     }
 
-    pub(crate) fn apply_tracks(&self, folder: &Path, tracks: &mut Vec<Track>) -> io::Result<()> {
+    pub(crate) fn apply_tracks(&self, folder: &Path, tracks: &mut Vec<Track>, mut regular: impl FnMut(&str) -> io::Result<bool>) -> io::Result<()> {
         let mut ordered = Vec::new();
         let mut physical = HashSet::new();
         let mut logical = HashSet::new();
         for entry in self.entries.iter().filter(|entry| audio_file(Path::new(&entry.original))) {
             let path = folder.join(&entry.local);
-            if !regular_mapped_track(folder, &entry.local)? {
+            if !regular(&entry.local)? {
                 continue;
             }
             physical.insert(entry.local.to_lowercase());
@@ -187,8 +187,9 @@ fn extract_with_local_names<R: Read + Seek>(mut reader: R, destination: &Path, t
     })?;
     let mut needs_mapping = mapping.entries.iter().any(|entry| entry.original != entry.local) || mapping.formats.iter().any(|format| !format.is_native_default());
     if !needs_mapping {
-        let mut discovered = super::discover_physical(destination)?.into_iter().map(|track| track.name).collect::<Vec<_>>();
-        for sidecar in [crate::discover_nfo(destination)?, crate::discover_cue(destination)?, crate::discover_cover(destination)?].into_iter().flatten() {
+        let mut inventory = crate::FolderInventory::read(destination)?;
+        let mut discovered = super::discover_physical(&mut inventory)?.into_iter().map(|track| track.name).collect::<Vec<_>>();
+        for sidecar in [inventory.nfo()?, inventory.cue()?, inventory.cover()?].into_iter().flatten() {
             discovered.push(sidecar.name);
         }
         needs_mapping = discovered != names;

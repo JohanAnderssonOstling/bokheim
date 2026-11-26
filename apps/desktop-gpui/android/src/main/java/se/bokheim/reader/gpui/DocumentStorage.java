@@ -3,7 +3,6 @@ package se.bokheim.reader.gpui;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
-import android.content.UriPermission;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
@@ -20,6 +19,7 @@ final class DocumentStorage {
     private static final String PREFERENCES = "library_location";
     private static final String ROOT = "root";
     private static final String[] COLUMNS = {DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE, DocumentsContract.Document.COLUMN_SIZE, DocumentsContract.Document.COLUMN_LAST_MODIFIED, DocumentsContract.Document.COLUMN_FLAGS};
+    private static final java.util.Set<String> recoveredRoots = new java.util.HashSet<>();
     private DocumentStorage() {}
 
     static String defaultRoot(Context context) {
@@ -44,6 +44,7 @@ final class DocumentStorage {
         StringBuilder token = new StringBuilder();
         for (byte value : tree.toString().getBytes(StandardCharsets.UTF_8)) token.append(String.format(java.util.Locale.ROOT, "%02x", value & 255));
         String path = PREFIX + token;
+        synchronized (DocumentStorage.class) { recoveredRoots.remove(tree.toString()); }
         JSONObject root = stat(context.getContentResolver(), resolve(context, path));
         if (!root.getBoolean("directory") || (root.getLong("flags") & DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE) == 0)
             throw new IOException("Choose a writable library folder");
@@ -58,11 +59,9 @@ final class DocumentStorage {
         return Uri.parse(new String(bytes, StandardCharsets.UTF_8));
     }
     private static Uri tree(Context context, String path) throws Exception {
-        Uri tree = decodedTree(path);
-        for (UriPermission permission : context.getContentResolver().getPersistedUriPermissions()) {
-            if (permission.getUri().equals(tree) && permission.isReadPermission() && permission.isWritePermission()) return tree;
-        }
-        throw new SecurityException("Access to the library folder has expired. Select the folder again.");
+        // The provider enforces the persisted URI grant on each operation.
+        // Fetching the complete grant list here adds a system-server round trip.
+        return decodedTree(path);
     }
     private static String[] parts(String path) throws IOException {
         String[] split = path.substring(PREFIX.length()).split("/", -1);
@@ -83,6 +82,9 @@ final class DocumentStorage {
         }
     }
     private static Uri resolve(Context context, String path) throws Exception {
+        return resolve(context, path, null, true);
+    }
+    private static Uri resolve(Context context, String path, JSONObject[] observed, boolean validate) throws Exception {
         Uri tree = tree(context, path);
         String[] components = parts(path);
         Uri document = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree));
@@ -92,9 +94,17 @@ final class DocumentStorage {
         if ("com.android.externalstorage.documents".equals(tree.getAuthority())) {
             String id = DocumentsContract.getTreeDocumentId(tree);
             for (int i = 1; i < components.length; i++) id += (id.endsWith(":") ? "" : "/") + components[i];
-            document = DocumentsContract.buildDocumentUriUsingTree(tree, id);
-            stat(context.getContentResolver(), document);
-            return document;
+            Uri direct = DocumentsContract.buildDocumentUriUsingTree(tree, id);
+            if (!validate) return direct;
+            try {
+                JSONObject metadata = stat(context.getContentResolver(), direct);
+                if (observed != null) observed[0] = metadata;
+                return direct;
+            } catch (IllegalArgumentException invalid) {
+                // Some local providers reject a missing ID during their tree
+                // check. Listing its parents distinguishes absence from errors.
+                if (components.length == 1) throw invalid;
+            }
         }
         for (int i = 1; i < components.length; i++) document = child(context.getContentResolver(), tree, document, components[i]);
         return document;
@@ -110,6 +120,15 @@ final class DocumentStorage {
             if (cursor == null || !cursor.moveToFirst()) throw new FileNotFoundException("Library file is unavailable");
             return metadata(cursor);
         }
+    }
+    private static JSONArray list(ContentResolver resolver, Uri tree, Uri document) throws Exception {
+        JSONArray items = new JSONArray();
+        Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(document));
+        try (Cursor cursor = resolver.query(children, COLUMNS, null, null, null)) {
+            if (cursor == null) throw new IOException("Could not list library folder");
+            while (cursor.moveToNext()) items.put(metadata(cursor));
+        }
+        return items;
     }
     private static JSONObject metadata(Cursor cursor) throws Exception {
         return new JSONObject().put("id", cursor.getString(0)).put("name", cursor.getString(1))
@@ -133,7 +152,13 @@ final class DocumentStorage {
         JSONObject response = new JSONObject();
         try {
             JSONObject request = new JSONObject(encoded);
-            recoverReplacements(context);
+            String root = decodedTree(request.getString("path")).toString();
+            String op = request.getString("op");
+            // Reads attempt recovery once per root per process. Mutations also
+            // retry interrupted replacements before changing provider state.
+            boolean mutation = op.equals("recover") || op.equals("mkdir") || op.equals("remove") || op.equals("rename")
+                    || (op.equals("open") && request.optBoolean("write"));
+            if (recoveredRoots.add(root) || mutation) recoverReplacements(context, root);
             response.put("value", perform(context, request));
         } catch (Exception error) {
             try { response.put("error", error.getMessage() == null ? error.toString() : error.getMessage());
@@ -150,11 +175,12 @@ final class DocumentStorage {
     }
     /** A provider cannot atomically replace an existing name. Keep a private
      * write-ahead journal so interruption can restore the old complete file. */
-    private static void recoverReplacements(Context context) {
+    private static void recoverReplacements(Context context, String root) {
         for (java.util.Map.Entry<String, ?> item : replacements(context).getAll().entrySet()) {
             try {
                 JSONObject record = new JSONObject((String) item.getValue());
                 String target = record.getString("target");
+                if (!decodedTree(target).toString().equals(root)) continue;
                 String backupPath = parent(target) + "/" + record.getString("backup");
                 Uri backup;
                 try { backup = resolve(context, backupPath); }
@@ -179,6 +205,7 @@ final class DocumentStorage {
         ContentResolver resolver = context.getContentResolver();
         String path = request.getString("path");
         String op = request.getString("op");
+        if (op.equals("recover")) return true;
         if (op.equals("setDefault")) { saveDefault(context, path); return true; }
         if (op.equals("display")) {
             Uri tree = decodedTree(path);
@@ -192,33 +219,41 @@ final class DocumentStorage {
         if (op.equals("mkdir")) { create(context, path, DocumentsContract.Document.MIME_TYPE_DIR); return true; }
         if (op.equals("open")) {
             Uri document;
-            try { document = resolve(context, path); if (request.optBoolean("exclusive")) throw new ExistsException(); }
+            boolean validate = request.optBoolean("create") || request.optBoolean("exclusive");
+            try { document = resolve(context, path, null, validate); if (request.optBoolean("exclusive")) throw new ExistsException(); }
             catch (FileNotFoundException absent) {
                 if (!request.optBoolean("create") && !request.optBoolean("exclusive")) throw absent;
                 document = create(context, path, "application/octet-stream");
             }
             String mode = request.optBoolean("append") ? "wa" : request.optBoolean("write") ? (request.optBoolean("truncate") ? "rwt" : "rw") : "r";
-            ParcelFileDescriptor descriptor = resolver.openFileDescriptor(document, mode);
+            ParcelFileDescriptor descriptor;
+            try { descriptor = resolver.openFileDescriptor(document, mode); }
+            catch (IllegalArgumentException missingOrInvalid) {
+                // Resolve missing local IDs through their parents only on error.
+                document = resolve(context, path);
+                descriptor = resolver.openFileDescriptor(document, mode);
+            }
             if (descriptor == null) throw new IOException("Could not open library file");
             return descriptor.detachFd();
         }
-        Uri document = resolve(context, path);
+        JSONObject[] observed = op.equals("stat") ? new JSONObject[1] : null;
+        Uri document = resolve(context, path, observed, !op.equals("list"));
         if (op.equals("show")) {
             Intent show = new Intent(Intent.ACTION_VIEW).setDataAndType(document, DocumentsContract.Document.MIME_TYPE_DIR);
             show.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
             context.startActivity(show);
             return true;
         }
-        if (op.equals("stat")) return stat(resolver, document);
+        if (op.equals("stat")) return observed[0] != null ? observed[0] : stat(resolver, document);
         if (op.equals("list")) {
-            JSONArray items = new JSONArray();
             Uri tree = tree(context, path);
-            Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(document));
-            try (Cursor cursor = resolver.query(children, COLUMNS, null, null, null)) {
-                if (cursor == null) throw new IOException("Could not list library folder");
-                while (cursor.moveToNext()) items.put(metadata(cursor));
+            try {
+                return list(resolver, tree, document);
+            } catch (IllegalArgumentException invalid) {
+                // Preserve missing-ID handling for providers that reject the
+                // child query before reporting FileNotFoundException.
+                return list(resolver, tree, resolve(context, path));
             }
-            return items;
         }
         if (op.equals("remove")) {
             parent(path); // A retained tree root must never be removed by cleanup.

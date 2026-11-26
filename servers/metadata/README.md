@@ -1,14 +1,132 @@
 # Metadata answers
 
 `metadata-server` imports dumps, builds immutable SQLite answers, serves
-`POST /v3/books`, and crawls LC/LibraryThing evidence for the next build.
+`POST /v3/books`, and can fold archived provider evidence into builds.
 The server reads one answer file and writes a small demand database. Its only
 external provider is Audible; it neither reads LC/LT caches nor loads API keys.
 
+## Direct work lookup
+
+Work lookup searches title and author together, including works without
+classifications. Build its composite search index once from the immutable import
+file used for the answers, then configure that source:
+
+```sh
+metadata-server index-work-search /absolute/path/authorities.sqlite
+export BOKHEIM_METADATA_WORKS=/absolute/path/authorities.sqlite
+```
+
+The command creates `authorities.sqlite.work-search.sqlite3` beside the canonical
+source path. It normalizes author credits offline and indexes each title with
+compatible author search keys. Requests retrieve candidate work IDs directly by
+both fields before loading titles or author metadata. Common titles therefore do
+not load thousands of unrelated authors. Initials, reordered names, omitted given
+names, coauthors and reviewed aliases remain eligible; the existing full-name,
+qualifier and ambiguity checks still decide identity. Compact hashed keys only
+retrieve candidates: original title keys and complete author credits are checked
+before accepting a match. The 4,096 candidate ceiling applies after title/author
+filtering. Queries requiring more than 512 author search keys abstain as ambiguous
+with truncation.
+
+The search artifact is required when a work source is configured. Startup checks
+its version and the source file size and modification time; a missing or stale
+index is rejected. Rebuild the artifact for changed sources or search-key rules.
+Index construction is offline, leaves the source read-only and does not rebuild
+ISBN answers. Work lookup never searches edition records.
+
+Configure this environment variable for `serve` or `evaluate-subjects`; the import
+schema must be 9 or 10 and its dump date must match the answer snapshot. Keep the
+source file immutable while it is served. Source imports retain works referenced
+by retained editions; lookup covers those imported works, not the entire Open
+Library work catalogue. All source connections are read-only and use bounded
+SQLite caches.
+
+`POST /v3/works` accepts title-and-author queries and returns work IDs:
+
+```json
+{"queries":[{"query_id":"0","title":"Emma","authors":["Jane Austen"]}]}
+```
+
+Each result has `query_id`, `status`, `matched`, `candidates`, and
+`candidates_truncated`. Status is `matched`, `ambiguous`, `no_match`, or
+`insufficient_metadata`. Matches contain `open_library_work_id`, `title`, and
+`authors`. Missing authors do not establish a work identity. Duplicate work
+records and conflicting full author names remain ambiguous; lookup does not
+invent an ISBN. A title/author search exceeding 4,096 candidates abstains with truncation;
+at most 64 review candidates are returned. Requests contain 1–128 queries.
+Without a configured work source, this endpoint returns HTTP 503.
+
+The same lookup is available without running the HTTP server:
+
+```sh
+metadata-server lookup-works authorities.sqlite request.json
+```
+
+With the work source configured, enrichment carries the verified work IDs into
+every subsequent query. A publisher and year first get a separate edition lookup
+within those works; a unique compatible edition retains exact LCC priority.
+An unambiguous work can then supply its own declared LCC.
+
+Build the compact edition indexes once for the immutable imported source:
+
+```sh
+metadata-server index-work-editions authorities.sqlite
+```
+
+This creates `authorities.sqlite.work-editions-v2.sqlite3` beside the canonical
+source path. Work lookup opens it automatically, validates the source size and
+modification time, and reports `work_editions_indexed` in operations. A stale
+index is rejected. Build a new index for each changed source; no answer rebuild
+is needed. The source stays read-only. Index construction is offline and never
+runs inside a lookup. Classified editions are indexed directly by work, with
+their titles, subtitles, author credits, canonical ISBNs, years and LCC codes
+stored together. Consensus reads this covering evidence instead of joining the
+large import tables for each sampled edition. Full title/author checks still
+run on the stored evidence. Publishers are read separately only for exact
+publisher/year identification. Version 1 artifacts remain available to older
+binaries; build the version 2 artifact before upgrading to enable indexed access.
+Publication candidates are indexed by work and year before publishers are read.
+At most 128 year candidates are checked; a larger set abstains from selecting an
+exact edition. Without this artifact, requests inspect at most 512 edition
+references across all verified works. A truncated reference set cannot establish
+an exact publisher/year identity and may reduce subject recovery.
+
+When work codes are absent or several compatible work IDs remain, enrichment
+reads directly classified editions only from those work IDs. It uses at most
+32 distinct ISBN/edition observations and examines at most 128 classified
+candidate records to allow for duplicate ISBNs and incompatible titles, authors
+or volumes. These budgets apply across all matching works, not separately to each.
+Selection uses indexed work/edition order in pages of 16. It is a deterministic
+bounded evidence sample, not a random population estimate. Unclassified edition
+bodies are not loaded. Duplicate ISBNs vote once; missing ISBNs use edition IDs.
+More than 128 compatible work IDs causes abstention.
+
+The weighted voting rule runs over the selected observations. Partial inputs with
+fewer than eight eligible classified observations abstain. Sample metadata records
+the examined count, classification limit and truncation; subject labels say
+`weighted edition sample support` when evidence was truncated. Samples cannot
+select an ISBN or establish a unique edition. If work evidence abstains, the
+existing bounded LC/Wikidata authority lookup can still recover classifications.
+Neither outcome restarts the broad edition-title search.
+
+Unmatched work titles and unresolved author conflicts never trigger a broad
+edition-title search. Edition records without a verified work are excluded from
+title/author recovery; translated edition titles absent from the work index also
+abstain. Independent LC/Wikidata authority lookup remains available. Without a
+configured work source, enrichment uses ISBN answers and independent authorities
+only. ISBN lookups still retain exact edition classifications, including editions
+without a work link. Policy `books_v34` removes the unscoped edition fallback.
+Policy `books_v35` adds indexed edition access and bounded reference scans.
+Policy `books_v36` requires indexed title/author candidates for work lookup.
+Policy `books_v37` adds covering edition evidence and reuses author counts during
+voting. With a work source configured, the consensus taxonomy is prepared during
+startup before the service accepts requests, rather than on its first fallback.
+Alternative title readings run only after the primary lookup lacks supported
+subjects, one at a time, stopping at the first supported alternative.
+
 ```text
-OL / LC MARC / Wikidata + provider.sqlite + demand.sqlite
+OL / LC MARC / Wikidata + optional archived provider.sqlite + demand.sqlite
     -> build -> answers-DATE.sqlite -> serve -> /v3/books
-                     wanted -> crawl -> provider.sqlite -> next build
 ```
 
 ## Import and build
@@ -17,6 +135,8 @@ OL / LC MARC / Wikidata + provider.sqlite + demand.sqlite
 cargo build --release -p metadata-server
 metadata-server import EDITIONS.txt.gz WORKS.txt.gz AUTHORS.txt.gz current.sqlite
 metadata-server import descriptions WORKS.txt.gz descriptions.sqlite 2026-09-01
+# Existing immutable catalogs can gain edition descriptions without a reimport:
+metadata-server import-edition-descriptions EDITIONS.txt.gz current.sqlite
 # Optional: the existing Python extraction/import tools produce LC MARC and
 # Wikidata supplements. Fold Wikidata into a COPY of the imported snapshot:
 cp current.sqlite authorities.sqlite
@@ -24,13 +144,41 @@ metadata-server import authorities current.sqlite wikidata.sqlite authorities.sq
 
 BOKHEIM_METADATA_DESCRIPTION_DATABASE=descriptions.sqlite \
 BOKHEIM_METADATA_DEMAND=/var/lib/bokheim-metadata/demand.sqlite \
-metadata-server build authorities.sqlite /var/lib/bokheim-metadata-crawl/provider.sqlite answers-2026-09-30.sqlite
+metadata-server build authorities.sqlite - answers-2026-09-30.sqlite
 ```
 
-Optional environment variables may be omitted. Pass `-` for the provider input
-on the first build. The builder accepts Open Library import schemas 9 and 10 and
+Optional environment variables may be omitted. Pass `-` to omit archived provider
+input. The builder accepts Open Library import schemas 9, 10 and 11 and
 validates the sidecar dump date. Inputs must be complete, immutable dump files;
-provider results are read in one SQLite transaction while the crawler continues.
+archived provider results are read in one SQLite transaction.
+
+Schema 11 retains valid edition descriptions independently of ISBN/LCC admission.
+For existing catalogs,
+`import-edition-descriptions` reads the matching edition dump into
+`CANONICAL_SNAPSHOT_PATH.edition-descriptions.sqlite3`. This resumable import
+publishes the supplement atomically after an integrity check and pins it to the
+catalog's size and modification time. It stores only nonempty descriptions with
+ISBN and work indexes; editions with several distinct work links are eligible
+only for exact-ISBN lookup. Keep the supplement beside its catalog when deploying
+and restart the server after publication. A stale supplement is rejected at
+startup. The answer builder also reads this supplement and includes its identity
+when deciding whether previous answers can be reused.
+
+Policy `books_v38` adds verified title/author work descriptions. Policy `books_v39`
+adds edition descriptions when those works have no description: an exact ISBN is
+preferred, followed by editions linked to the verified work. Different nonempty
+descriptions abstain rather than selecting an arbitrary edition. An exact ISBN
+can supply a description without a work match. This fallback performs indexed
+local reads; it neither searches unrelated edition titles nor calls a provider.
+Existing file descriptions still take precedence when the client applies
+enrichment. Previously completed books need enrichment requested again to gain
+new descriptions.
+
+Policy `books_v40` honors the per-book `needs_description` request flag. Clients
+set it from whether the local book needs a description, without uploading its
+existing description. When false, the server skips shared ISBN-description reads
+and work/edition-description fallback and does not copy an Audible description.
+Other enrichment still runs. Omitted flags default to true for older clients.
 
 Every ISBN from the dumps, providers or demand is resolved without network I/O.
 ISBN lookup does not infer LCC by matching titles and authors across separate
@@ -64,8 +212,7 @@ cache, bounded to 32 MiB of estimated allocations, including negative results.
 Edition indexing enumerates exact/work evidence owners and editions whose
 lowest ISBN has a classified answer, then loads their bibliographic fields.
 If title-author authority evidence is present, it conservatively visits all
-ISBN editions. Empty authority tables are
-skipped. Crawler queue indexes are created after loading and ranking the rows.
+ISBN editions. Empty authority tables are skipped.
 OUT is published only after all tables, manifest and integrity checks succeed.
 An existing OUT is never overwritten.
 Import schema 10 retains editions with numeric LCC even when they have no valid
@@ -100,7 +247,7 @@ normal provider updates.
 
 The JSON report includes ISBN count, answer JSON bytes, SQLite bytes, elapsed
 time and throughput, plus separate timings for preparation, lookup, providers,
-writing, edition indexing, authority indexing and queue finalization. Progress
+writing, edition indexing and authority indexing. Progress
 logs include edition counts and lookup, provider and write times so production
 measurements can guide further encoding or query changes.
 
@@ -115,9 +262,9 @@ Use the same optional description and demand environment variables.
 Full builds retain compact classification summaries, exact provider evidence,
 demand counts and immutable input identities for this comparison. Provider
 additions, edits and deletions are detected even if their timestamps are unchanged.
-The updater refreshes affected ISBNs and edition candidates, restores or prunes
-their work queues, and updates priority without resolving metadata when only
-demand counts change. Authority data stays fixed with the imported input.
+The updater refreshes affected ISBNs and edition candidates and records demand
+count changes without resolving unchanged metadata. Authority data stays fixed
+with the imported input.
 
 To apply the work-classification rule directly to an existing full database:
 
@@ -126,12 +273,12 @@ metadata-server reclassify authorities.sqlite provider.sqlite answers-current.sq
 ```
 
 This uses SQL updates in one WAL transaction. It checks work-derived LCC,
-writes changed answers, updates affected edition search entries and crawler
-queues, and folds pending provider/demand evidence into the same transaction.
+writes changed answers, updates affected edition search entries, and folds
+pending provider/demand evidence into the same transaction.
 Descriptions, authors, non-LCC classifications and unchanged answer
-bytes are preserved. The whole transaction rolls back on failure. Server and
-crawler readers use ordinary SQLite `mode=ro`, so existing connections observe
-committed changes. Restart the crawler afterward to reload its in-memory queue.
+bytes are preserved. The whole transaction rolls back on failure. Server
+readers use ordinary SQLite `mode=ro`, so existing connections observe
+committed changes.
 Older servers using `immutable=1` must be replaced or stopped before maintenance.
 The deployed systemd services have `ProtectHome=read-only`. Run maintenance
 outside that sandbox. For the initial switch from DELETE journaling to WAL,
@@ -153,9 +300,7 @@ with an embedded manifest pointing to the original immutable base. Readers merge
 changed rows with the base through indexed views; deletion markers hide removed
 base rows. Subsequent updates copy only the previous update database. Integrity
 checks cover the update file, without copying or scanning the full base.
-The server and crawler read both full snapshots and update snapshots. After its
-initial queue load, the crawler applies only queue overrides when the base stays
-the same, including restoring discarded overrides when rolling back a release.
+The server reads both full snapshots and update snapshots.
 
 Keep the base at its recorded absolute path for as long as any update refers to
 it. Its size and modification time are checked when opening an update, and the
@@ -170,7 +315,7 @@ An older answer file without build state, changed imported/description
 files, an unsupported builder recipe change, or more than 100,000 changed/affected ISBNs
 falls back to a full build. Immutable file identity includes canonical path,
 size and modification time, plus change time on Unix. Bump `RECIPE_VERSION` in
-`src/build/incremental.rs` when resolution, candidate or queue rules change.
+`src/build/incremental.rs` when resolution or candidate rules change.
 The report's `mode`, `resolved_rows` and `reused_rows` distinguish these paths.
 
 ## Serve and activate
@@ -192,12 +337,20 @@ Keep the previous dated file for rollback.
 Code-only deployments reuse `answers-current.sqlite`; they do not run a build:
 
 ```sh
-servers/metadata/deploy/deploy-code.sh /path/to/metadata-server
+servers/metadata/deploy/deploy-code.sh /path/to/metadata-server /path/to/taxonomy.sqlite3
 ```
 
 Run this on the production host after uploading the compiled server. It shares
 the release lock and invokes the existing activation helper with its health,
 book endpoint and CORS checks.
+
+The service template enables work lookup through
+`/home/johan/data/openlibrary/works-current.sqlite`; point this symlink at the
+immutable import with the matching dump date and built work indexes. The
+activation helper installs the runtime taxonomy alongside the server and rolls
+both back together on failure. After updating these deployment scripts or the
+service template, run `provision-metadata-deploy.sh` as root once to refresh the
+installed helper and template before deploying.
 
 Subject enrichment policy `books_v26` prefers exact-edition LCC, then the
 matched work's explicitly declared LCC, then sibling-edition evidence. A
@@ -440,16 +593,58 @@ batches of eight through the same enrichment implementation. Answers open
 read-only; use a separate scratch demand database. Measure projected subject
 placement rather than `found`, which can also mean other metadata was found.
 
-The server records valid ISBNs without LCC in `demand.sqlite`. The next builder
-ranks demand ahead of other wanted ISBNs.
+The server records valid ISBNs without LCC in `demand.sqlite`. Builds include
+these ISBNs even when they are absent from the imported dumps.
 Descriptions, author identity, ambiguity, provenance and per-book merge behavior
-stay deterministic for the same file facts and answer file. Audible data remains
-live. For older clients and catalog tools, the server can resolve cover artwork:
+stay deterministic for the same file facts and answer file. Audible discovery
+uses live requests with a six-hour bounded memory response cache. Valid Audnexus
+book responses and verified accurate chapter timelines persist permanently in
+the `audnexus_response` table in `BOKHEIM_METADATA_DEMAND` (normally `demand.sqlite`).
+The full URL identifies a response, including its ASIN, region and endpoint.
+There is no expiry, row limit, byte budget or eviction for these disk records.
+Cache hits bypass network pacing and recheck the recording identity and chapter
+validation before use. Invalid book responses, inaccurate or incomplete chapter
+timelines, and failed requests are not saved.
+Only requested responses are loaded into memory; the cache survives service
+restarts and answer snapshot upgrades. Include this database in backups.
+SQLite operations run on blocking workers. Artwork lookup also reuses saved
+Audnexus book metadata. No new environment variable or external database is needed.
+
+Completed supported recording decisions also persist permanently in
+`recording_match` in the same database. The key includes the full recording
+request (title, credits, ASINs, duration and chapter evidence), provider origins
+and `RECORDING_MATCH_POLICY`. The full serialized input is checked alongside its
+hash. Bump that policy when recording selection, parsing or chapter-plan rules
+change. A changed recording never reuses a different input's decision. Only
+supported decisions are saved; unavailable, ambiguous and unmatched requests
+remain eligible for discovery. Cached decisions return the original response
+without provider discovery or an outbound lookup slot. Concurrent identical
+lookups coalesce and recheck the cache after waiting.
+
+Uncached audiobook requests wait for one of two shared discovery slots rather
+than immediately failing because a batch contains more than two audiobooks.
+Discovery has a 45-second deadline after acquiring a slot; queueing does not
+consume that provider budget. Network requests retain their eight-second
+timeout and are paced independently per provider origin. Each recording's chapter
+lookup is attempted once per discovery request across all fallback phases;
+failed chapter lookups remain retryable on later requests. The client still
+receives a single complete enrichment response.
+
+The client submits enrichment requests concurrently without a client-side
+concurrency cap. Ordinary books retain the eight-book API payload size;
+audiobooks are submitted individually so recording discovery cannot hold up
+other books in the same response. Completed requests are persisted immediately,
+and newly discovered files join the running queue while earlier requests are
+in flight. The metadata connection has an eight-second connect timeout; the
+server owns provider deadlines so time spent queueing does not cancel valid
+lookups. Missing-cover recovery also runs alongside metadata enrichment.
+
+For older clients and catalog tools, the server can resolve cover artwork:
 ISBN candidates are tried against
 Open Library with a shared one-request-per-second limit, and selected Audible
 artwork is fetched from Audible. Confirmed bytes persist in `demand.sqlite` and
 `/v3/books` returns one reference fetched from `/v3/covers/{id}`. The policy is
-`books_v29`. Successful client answers are immutable.
+`books_v37`. Successful client answers are immutable.
 Library clients send `needs_cover: false` for every book and look up/download
 missing artwork directly on the device: Open Library by ISBN or title/author,
 and Audible by ASIN when recording artwork is needed. Bibliographic and recording enrichment still use `/v3/books`. Existing embedded or downloaded
@@ -457,47 +652,38 @@ art is retained. Direct browser image downloads remain subject to the provider's
 CORS headers.
 Older clients and catalog tools can still request server-side covers. Omitted
 `needs_cover` flags default to true for compatibility.
-Cached ISBN artwork is checked before external-download pacing; concurrent
-misses are checked again under the download lock.
+Cached artwork presence is checked without loading image bytes. Confirmed cover
+misses persist for 24 hours; transient provider failures are not negative-cached.
+Concurrent requests for the same cover coalesce. Download starts retain the shared
+one-request-per-second pacing, while up to four bodies can download concurrently.
+The pacing lock is released before the HTTP request. A shared HTTP client reuses
+connections, limits individual requests to eight seconds, and each provider cover
+lookup has a 12-second budget including queue time and alternative ISBNs. Cover
+SQLite reads and writes run outside the asynchronous worker threads. Current
+library clients continue retrieving artwork separately from metadata.
 
 Routes: `/v3/books`, `/v3/covers/{id}`, `/health`,
 `/health/descriptions`, and `/internal/operations`. Operations reports the books
 endpoint counters and processing totals; it has no duplicate service counters.
 
-## Crawl
+## Retired metadata crawler
+
+The LC/LibraryThing crawler and its `crawl` command have been removed. New builds
+omit the `wanted` queue and its indexes. Existing full and overlay answer files
+remain readable; their legacy queue tables are ignored.
+
+To retire an existing installation and update its deployment helper:
 
 ```sh
-BOKHEIM_LIBRARYTHING_KEY_FILE=/path/to/key \
-metadata-server crawl answers-current.sqlite provider.sqlite
-# Process one bounded pass, useful for operational checks:
-metadata-server crawl answers-current.sqlite provider.sqlite --once
+sudo bash servers/metadata/deploy/remove-crawler.sh
 ```
 
-The crawler reads only the manifest and ranked `wanted` table. It loads that
-queue into a disk-backed temporary table when the snapshot changes, so a running
-crawler sees newly activated builds without restarting. It queries LC first,
-in batches of up to 50 ISBNs with persistent six-second request spacing. Only
-exact MARC 020$a ISBN matches are accepted; related/cancelled 020$z ISBNs require
-independent dump evidence and are not accepted by the crawler.
-
-LibraryThing requires a completed LC result, including a miss or ambiguity, and
-no LCC on that ISBN or another wanted ISBN of the same work. The same work gate
-also avoids further LC work after a crawler result resolves it. Completed
-positive, negative and ambiguous results persist. Failures remain retryable
-with an hour backoff. LT reserves requests before sending, including failed
-requests, with two-second spacing and a durable 1,000-request UTC daily quota.
-No API key means an LC-only crawl.
-
-The next build folds normalized results in; a running server never sees mutable
-provider data. Crawl freshness therefore includes the next build and the client
-refresh interval. Use an incremental build to fold new results into the next
-snapshot without resolving the whole catalog again.
-
-`deploy/bokheim-metadata.service` runs `serve` with no provider environment file.
-`deploy/bokheim-metadata-crawl.service` runs the independent crawler and reads
-`~/.config/bokheim/metadata-crawl.env`, containing only the LT key-file setting.
-Its `StateDirectory` owns provider.sqlite; the server's separate state directory
-owns demand.sqlite. Re-run the provisioner to install both release templates.
+The script disables and removes `bokheim-metadata-crawl.service` and its release
+template. It leaves the metadata API running and preserves
+`/var/lib/bokheim-metadata-crawl/provider.sqlite` and existing credentials.
+Archived results can still be passed as the optional provider input to `build`
+or `reclassify`. The provisioner also performs this cleanup, and deployments
+install and start only `bokheim-metadata.service`.
 
 ## Verification
 
@@ -508,10 +694,10 @@ python3 -m unittest discover -s servers/metadata -p 'test_*.py'
 ```
 
 Resolution fixtures build answer files, read them through the server, and compare
-with the original resolver as a test-only oracle. HTTP, Audible and LC pagination
-tests use local mock servers. Additional tests cover provider merges, description
-sharing, demand ranking, read-only serving after source removal,
-snapshot replacement, crawler ordering/backoff/work gates and durable quota.
+with the original resolver as a test-only oracle. HTTP and Audible tests use
+local mock servers. Additional tests cover archived provider merges, description
+sharing, demand updates, read-only serving after source removal and snapshot
+replacement.
 Before production activation, compare `/v3/books` over representative production
 file facts against the previous release and record full-build timing and size.
 Production data is not part of the repository.

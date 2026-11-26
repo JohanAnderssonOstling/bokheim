@@ -19,6 +19,7 @@ use sync_common::{BookId, DirId};
 /// after releasing the library gate so abandoned audiobook trees are removed
 /// on the blocking executor.
 pub struct PreparedDownload {
+    physical_size_bytes: u64,
     book_id: BookId,
     checksum: ContentHash,
     _source: Option<temporary::TempPath>,
@@ -54,7 +55,7 @@ impl StagedBook {
             match fs::symlink_metadata(&destination) {
                 Ok(metadata) => {
                     if !metadata.file_type().is_symlink() && (if audiobook { metadata.is_dir() } else { metadata.is_file() }) {
-                        if let Some(verified) = imp::VerifiedPath::matching(destination, &hash)? {
+                        if let Some(verified) = imp::VerifiedPath::matching(destination, &hash, &store.0.assets_root)? {
                             break Some(verified);
                         }
                     }
@@ -66,7 +67,9 @@ impl StagedBook {
             relative = relative.with_file_name(&chosen).map_err(AssetStoreError::operation)?;
         };
         drop(alternatives);
+        let mut physical_size_bytes = self.inner.size_bytes;
         let mut output = if let Some(existing) = existing {
+            physical_size_bytes = if existing.directory { crate::filesystem::directory_bytes(&existing.path)? } else { existing.length };
             DownloadOutput::Existing(existing)
         } else if audiobook {
             let destination = imp::placement_path(&store.0, &relative);
@@ -75,11 +78,12 @@ impl StagedBook {
             if BookId::from(audiobook_folder::folder_hash(folder.path())?) != hash {
                 return Err(AssetStoreError::operation("downloaded audiobook cannot be reconstructed with its original content identity"));
             }
-            let tracks = audiobook_folder::discover(folder.path())?;
-            let fingerprint = crate::filesystem::audiobook_fingerprint(folder.path(), &tracks)?;
+            let fingerprint = crate::filesystem::audiobook_fingerprint(folder.path())?;
+            physical_size_bytes = 0;
             for entry in walk::WalkDir::new(folder.path()).contents_first(true) {
                 let entry = entry.map_err(AssetStoreError::operation)?;
                 if entry.file_type().is_file() {
+                    physical_size_bytes = physical_size_bytes.checked_add(entry.metadata().map_err(AssetStoreError::operation)?.len()).ok_or_else(|| AssetStoreError::operation("audiobook size overflow"))?;
                     fs::OpenOptions::new().read(true).write(true).open(entry.path())?.sync_all()?;
                 } else if entry.file_type().is_dir() {
                     sync_directory(entry.path())?;
@@ -91,12 +95,12 @@ impl StagedBook {
         };
         let imp::StagedBook { temporary_path, book_id, byte_checksum, .. } = self.inner;
         let source = if let DownloadOutput::File(file) = &mut output {
-            *file = Some(imp::PreparedFile::prepare(temporary_path, imp::placement_path(&store.0, &relative), &hash)?);
+            *file = Some(imp::PreparedFile::prepare(temporary_path, imp::placement_path(&store.0, &relative), &hash, &store.0.assets_root)?);
             None
         } else {
             Some(temporary_path)
         };
-        Ok(PreparedDownload { book_id, checksum: byte_checksum, _source: source, requested_name, relative, output })
+        Ok(PreparedDownload { physical_size_bytes, book_id, checksum: byte_checksum, _source: source, requested_name, relative, output })
     }
 }
 
@@ -131,7 +135,7 @@ impl PreparedDownload {
             }
         };
         imp::sync_import_file(&store.0, &destination)?;
-        Ok(PublishedStagedBook { name, relative_path: self.relative.to_string(), published, fingerprint })
+        Ok(PublishedStagedBook { physical_size_bytes: Some(self.physical_size_bytes), name, relative_path: self.relative.to_string(), published, fingerprint })
     }
 }
 
@@ -142,6 +146,23 @@ fn folder_unavailable() -> AssetStoreError {
 pub struct PreparedPlacement(imp::PreparedPlacement);
 
 impl PreparedPlacement {
+    /// Account while preparing file work, outside the library gate.
+    pub fn physical_size_bytes(&self) -> Result<Option<u64>, AssetStoreError> {
+        let bytes = match &self.0 {
+            imp::PreparedPlacement::Absent | imp::PreparedPlacement::Removed(_) => return Ok(None),
+            imp::PreparedPlacement::Existing(file) | imp::PreparedPlacement::Renamed { source: file, .. } => {
+                if file.directory {
+                    crate::filesystem::directory_bytes(&file.path)?
+                } else {
+                    file.length
+                }
+            }
+            imp::PreparedPlacement::Copied(file) => file.physical_size_bytes()?,
+            imp::PreparedPlacement::CopiedFolder { output, .. } => crate::filesystem::directory_bytes(output.path())?,
+        };
+        Ok(Some(bytes))
+    }
+
     pub fn renames_source(&self) -> bool {
         matches!(self.0, imp::PreparedPlacement::Renamed { .. })
     }
@@ -191,7 +212,7 @@ impl AssetStore {
             Err(error) => return Err(error.into()),
             Ok(_) => {}
         }
-        let source_file = imp::VerifiedPath::new(path, hash)?;
+        let source_file = imp::VerifiedPath::new(path, hash, &self.0.assets_root)?;
         let staged = source.with_file_name(&format!(".bokheim-move-{}", uuid::Uuid::new_v4())).map_err(AssetStoreError::operation)?;
         let destination = imp::placement_path(&self.0, &staged);
         Ok(Some((PreparedPlacement(imp::PreparedPlacement::Renamed { source: source_file, destination }), staged)))
@@ -284,7 +305,7 @@ impl AssetStore {
             let path = imp::placement_path(&self.0, relative);
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if !metadata.file_type().is_symlink() && (metadata.is_file() || metadata.is_dir()) => {
-                    if let Some(verified) = imp::VerifiedPath::matching(path, hash)? {
+                    if let Some(verified) = imp::VerifiedPath::matching(path, hash, &self.0.assets_root)? {
                         return Ok(Some(PreparedPlacement(imp::PreparedPlacement::Existing(verified))));
                     }
                 }
@@ -310,14 +331,14 @@ impl AssetStore {
         let handle = &self.0;
         use std::io::Write as _;
         if fs::exists(&destination) {
-            return Ok(Some(PreparedPlacement(imp::PreparedPlacement::Existing(VerifiedPath::new(destination, hash)?))));
+            return Ok(Some(PreparedPlacement(imp::PreparedPlacement::Existing(VerifiedPath::new(destination, hash, &self.0.assets_root)?))));
         }
         let mut found = None;
         for relative in source_paths {
             let path = placement_path(handle, relative);
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if !metadata.file_type().is_symlink() && (metadata.is_file() || metadata.is_dir()) => {
-                    if content_matches(&path, hash)? {
+                    if content_matches(&path, hash, &self.0.assets_root)? {
                         found = Some((relative, path));
                         break;
                     }
@@ -333,7 +354,7 @@ impl AssetStore {
                 if !parent_directory(&destination)?.is_dir() {
                     return Err(folder_unavailable());
                 }
-                return Ok(Some(PreparedPlacement(imp::PreparedPlacement::Renamed { source: VerifiedPath::new(source.clone(), hash)?, destination })));
+                return Ok(Some(PreparedPlacement(imp::PreparedPlacement::Renamed { source: VerifiedPath::new(source.clone(), hash, &self.0.assets_root)?, destination })));
             }
         }
         let Some((_, source)) = found else { return Ok(None) };
@@ -349,14 +370,15 @@ impl AssetStore {
                 fs::copy(path, target)?;
                 Ok(())
             };
-            for track in audiobook_folder::discover(&source)? {
+            let mut inventory = audiobook_folder::FolderInventory::read(&source)?;
+            for track in inventory.tracks()? {
                 copy_member(&track.path)?;
             }
-            for sidecar in [audiobook_folder::discover_nfo(&source)?, audiobook_folder::discover_cue(&source)?, audiobook_folder::discover_cover(&source)?].into_iter().flatten() {
+            for sidecar in [inventory.nfo()?, inventory.cue()?, inventory.cover()?].into_iter().flatten() {
                 copy_member(&sidecar.path)?;
             }
             audiobook_folder::copy_path_mapping(&source, output.path())?;
-            if !content_matches(output.path(), hash)? {
+            if !content_matches(output.path(), hash, &self.0.assets_root)? {
                 return Err(AssetStoreError::operation("audiobook changed during copy"));
             }
             return Ok(Some(PreparedPlacement(imp::PreparedPlacement::CopiedFolder { output, destination })));
@@ -368,10 +390,10 @@ impl AssetStore {
         output.as_file().sync_all()?;
         // Verify the staged bytes too: an external editor can change the source
         // between source discovery and copying it.
-        if !content_matches(output.path(), hash)? {
+        if !content_matches(output.path(), hash, &self.0.assets_root)? {
             return Err(AssetStoreError::operation("book changed during copy"));
         }
-        let file = imp::PreparedFile::prepare(output.into_temp_path(), destination, hash)?;
+        let file = imp::PreparedFile::prepare(output.into_temp_path(), destination, hash, &self.0.assets_root)?;
         Ok(Some(PreparedPlacement(imp::PreparedPlacement::Copied(file))))
     }
 
@@ -379,7 +401,7 @@ impl AssetStore {
     /// needs only one rename, regardless of the number or size of its books.
     pub fn prepare_directory_copy<'a>(
         &self, root: &str, directories: impl DoubleEndedIterator<Item = (DirId, &'a str)> + Clone, books: impl IntoIterator<Item = (BookId, &'a RelativeBookPath, &'a [RelativeBookPath])>,
-    ) -> Result<(PreparedPlacement, Vec<String>), AssetStoreError> {
+    ) -> Result<(PreparedPlacement, Vec<(String, Option<u64>)>), AssetStoreError> {
         use std::io::Write as _;
         let destination = imp::library_path(&self.0, root);
         let output = temporary::Builder::new().prefix(".bokheim-copy-").tempdir_in(parent_directory(&destination)?)?;
@@ -395,8 +417,9 @@ impl AssetStore {
         for (hash, relative, sources) in books {
             let suffix = Path::new(relative.as_str().trim_start_matches('/')).strip_prefix(root.trim_start_matches('/')).map_err(AssetStoreError::operation)?;
             if let Some(prepared) = self.prepare_placement_at(&hash, output.path().join(suffix), sources, &[])? {
+                let size = prepared.physical_size_bytes()?;
                 prepared.publish_short()?;
-                materialized.push(relative.to_string());
+                materialized.push((relative.to_string(), size));
             }
         }
         for (_, relative) in directories.rev() {

@@ -196,7 +196,7 @@ impl SettingsPage {
             let theme = components::browser_theme(cx);
             let page = page.clone();
             let cancel = components::dialog_cancel_button("cancel-uninstall-bokheim", text!(common::cancel)).on_click(|_, window, cx| window.close_dialog(cx));
-            let uninstall = components::base_button("confirm-uninstall-bokheim").label(text!(settings::uninstall)).danger().on_click(move |_, window, cx| {
+            let uninstall = components::action_button("confirm-uninstall-bokheim", text!(settings::uninstall)).danger().on_click(move |_, window, cx| {
                 window.close_dialog(cx);
                 let _ = page.update(cx, |page, cx| {
                     let result = (|| {
@@ -257,6 +257,7 @@ impl SettingsPage {
             BrowsingPreferencePatch::UiFontFamily(_) | BrowsingPreferencePatch::CustomUiFontFamily(_) => (text!(settings::ui_typeface), showing.ui_font_name().to_owned()),
             BrowsingPreferencePatch::CoverText(_) => (text!(settings::cover_text), showing.cover_text().label().to_owned()),
             BrowsingPreferencePatch::BookListView(_) => (text!(browse::view), showing.book_list_view().label().to_owned()),
+            BrowsingPreferencePatch::GraphView(_) => (text!(browse::view), if showing.graph_view() { text!(browse::show_as_graph) } else { showing.book_list_view().label() }.to_owned()),
             BrowsingPreferencePatch::GeneratedCoversOnly(_) => (text!(settings::covers), if showing.generated_covers_only() { text!(settings::generated) } else { text!(settings::book_art) }.to_owned()),
             BrowsingPreferencePatch::CatalogGrouping(_) => (text!(settings::catalog_grouping), showing.catalog_grouping().label().to_owned()),
             BrowsingPreferencePatch::CatalogLanguages(_) => {
@@ -512,7 +513,7 @@ impl Render for SettingsPage {
                     cx.notify();
                 })));
             }
-            let uninstall = components::base_button("uninstall-bokheim").label(text!(settings::uninstall_bokheim)).danger().on_click(cx.listener(|page, _, window, cx| page.confirm_uninstall(window, cx)));
+            let uninstall = components::action_button("uninstall-bokheim", text!(settings::uninstall_bokheim)).danger().on_click(cx.listener(|page, _, window, cx| page.confirm_uninstall(window, cx)));
             // Three equal columns need the widest preset, including Never.
             let labels: Vec<_> = kobo_device::settings::AUTO_SLEEP_MINUTES
                 .iter()

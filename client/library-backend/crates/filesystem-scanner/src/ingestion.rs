@@ -82,27 +82,24 @@ async fn ingest_file_inner(
     cached: impl AsyncFnOnce(BookId) -> io::Result<Option<InspectedBook>>,
 ) -> io::Result<IngestedFile> {
     let format = BookFormat::from_file_name(&name).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unsupported book format"))?;
-    let waiting = ProfileSpan::new("inspection_permit_wait", &name);
-    let permit = executor::inspection_permit().await;
-    drop(waiting);
     let queued = ProfileSpan::new("file_worker_queue", &name);
     let profile_name = name.clone();
     let (book_id, size_bytes, fingerprint, reader) = executor::run_blocking({
         let path = path.clone();
         move || -> io::Result<_> {
             drop(queued);
-            let _permit = permit;
-            let fingerprint = {
-                let _profile = ProfileSpan::new("file_fingerprint", &profile_name);
-                fingerprint(&path)?
-            };
             let mut reader = {
                 let _profile = ProfileSpan::new("file_open", &profile_name);
                 library_files::filesystem::open(&path)?
             };
+            let audio_fingerprint = library_files::filesystem::open_file_fingerprint(&reader)?;
+            let fingerprint = {
+                let _profile = ProfileSpan::new("file_fingerprint", &profile_name);
+                fingerprint_with_audio(&path, audio_fingerprint)?
+            };
             let (checksum, size_bytes) = match copied {
                 Some((checksum, size, revision)) => {
-                    if revision != fingerprint {
+                    if revision != audio_fingerprint {
                         return Err(io::Error::new(io::ErrorKind::Interrupted, "copied book changed before inspection"));
                     }
                     (checksum, size)
@@ -117,7 +114,9 @@ async fn ingest_file_inner(
             }
             {
                 let _profile = ProfileSpan::new("file_revision_validation", &profile_name);
-                require_unchanged(&path, fingerprint)?;
+                if fingerprint_with_audio(&path, library_files::filesystem::open_file_fingerprint(&reader)?)? != fingerprint {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "book changed during ingestion"));
+                }
             }
             let book_id = BookId::from(checksum);
             reader.rewind()?;
@@ -172,33 +171,31 @@ async fn ingest_file_inner(
     // A file edited during inspection must be retried rather than committed
     // with a content_hash and metadata from different revisions.
     let _profile = ProfileSpan::new("file_revision_validation", &validation_name);
-    require_unchanged(&path, fingerprint)?;
+    executor::run_blocking(move || require_unchanged(&path, fingerprint)).await.map_err(|error| io::Error::other(error.to_string()))??;
     Ok(IngestedFile { source_identity, audiobook_content_hash, byte_checksum: book_id.content_hash(), book_id, size_bytes, fingerprint, format, inspection })
 }
 
 /// Hash original members once, then inspect MP3s directly. ZIP CRCs and byte
 /// checksums are deferred until a transfer actually needs an archive.
 pub async fn ingest_audiobook_folder(path: PathBuf, name: String) -> io::Result<IngestedFile> {
-    let waiting = ProfileSpan::new("inspection_permit_wait", &name);
-    let permit = executor::inspection_permit().await;
-    drop(waiting);
     let queued = ProfileSpan::new("file_worker_queue", &name);
     let profile_name = name.clone();
     let (book_id, size_bytes, fingerprint, inspection) = executor::run_blocking({
         let path = path.clone();
         move || -> io::Result<_> {
             drop(queued);
-            let _permit = permit;
-            let tracks = {
+            let (mut inventory, tracks) = {
                 let _profile = ProfileSpan::new("audio_track_discovery", &profile_name);
-                audiobook_folder::discover(&path)?
+                let mut inventory = audiobook_folder::FolderInventory::read(&path)?;
+                let tracks = inventory.tracks()?;
+                (inventory, tracks)
             };
             if tracks.is_empty() {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "audiobook folder has no MP3 tracks"));
             }
             let fingerprint = {
                 let _profile = ProfileSpan::new("audio_fingerprint", &profile_name);
-                library_files::filesystem::audiobook_fingerprint(&path, &tracks)?
+                library_files::filesystem::audiobook_inventory_fingerprint(&mut inventory, &tracks)?
             };
             {
                 let _profile = ProfileSpan::new("audio_revision_validation", &profile_name);
@@ -207,7 +204,7 @@ pub async fn ingest_audiobook_folder(path: PathBuf, name: String) -> io::Result<
             let content = {
                 let profile = ProfileSpan::new("audio_content_hash", &profile_name);
                 let timings = profile.io();
-                audiobook_folder::folder_content_with_reader(&path, &tracks, |path| Ok(ProfileIo::new(library_files::filesystem::open(path)?, timings.clone())))?
+                inventory.content_with_reader(&tracks, |path| Ok(ProfileIo::new(library_files::filesystem::open(path)?, timings.clone())))?
             };
             {
                 let _profile = ProfileSpan::new("audio_revision_validation", &profile_name);
@@ -229,13 +226,12 @@ pub async fn ingest_audiobook_folder(path: PathBuf, name: String) -> io::Result<
     .map_err(|error| io::Error::other(error.to_string()))??;
     let format = BookFormat::Mp3Folder;
     let _profile = ProfileSpan::new("audio_revision_validation", &name);
-    require_folder_unchanged(&path, fingerprint)?;
+    executor::run_blocking(move || require_folder_unchanged(&path, fingerprint)).await.map_err(|error| io::Error::other(error.to_string()))??;
     Ok(IngestedFile { source_identity: None, audiobook_content_hash: book_id.content_hash(), byte_checksum: None, book_id, size_bytes, fingerprint, format, inspection })
 }
 
 fn require_folder_unchanged(path: &Path, fingerprint: u64) -> io::Result<()> {
-    let tracks = audiobook_folder::discover(path)?;
-    if library_files::filesystem::audiobook_fingerprint(path, &tracks)? != fingerprint {
+    if library_files::filesystem::audiobook_fingerprint(path)? != fingerprint {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "audiobook folder changed during inspection"));
     }
     Ok(())
@@ -248,8 +244,12 @@ fn require_unchanged(path: &Path, fingerprint: u64) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn fingerprint(path: &Path) -> std::io::Result<u64> {
-    let audio = library_files::filesystem::fingerprint(path)?;
+/// Revision used by ingestion and scanning, including M4B sibling artwork.
+pub fn fingerprint(path: &Path) -> std::io::Result<u64> {
+    fingerprint_with_audio(path, library_files::filesystem::fingerprint(path)?)
+}
+
+fn fingerprint_with_audio(path: &Path, audio: u64) -> io::Result<u64> {
     if !path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("m4b")) {
         return Ok(audio);
     }

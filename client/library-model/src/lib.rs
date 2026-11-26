@@ -19,6 +19,8 @@ pub use transfer::{BlobKey, BlobKind, TransferJobKind, TransferOrigin};
 mod download;
 mod playback;
 mod view;
+mod hierarchy;
+pub use hierarchy::{BrowseHierarchy, BrowseHierarchyNode};
 
 pub use download::{BookDownloadStatus, BrowserDownloadPhase, BrowserDownloadUpdate, CatalogImportProgress, DownloadProgress, DownloadProgressError, DownloadState};
 pub use playback::PlaybackMetadata;

@@ -326,6 +326,8 @@ impl LibraryService {
                 id: library_id,
                 root: library_path.to_owned(),
                 database_locator: self.config.registry.library_database_locator(&library_id, library_path),
+                #[cfg(not(target_arch = "wasm32"))]
+                assets_locator: self.config.registry.library_assets_locator(&library_id),
                 default_sync_server_url: self.current_account_on_storage()?.map(|session| session.server_url().clone()).unwrap_or_else(|| self.config.sync_server.clone()),
                 metadata_server_url: self.config.metadata_server.clone(),
                 storage,

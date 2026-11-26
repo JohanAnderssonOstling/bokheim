@@ -6,23 +6,7 @@ use client_platform_runtime::filesystem::File;
 #[cfg(not(target_arch = "wasm32"))]
 use client_platform_runtime::filesystem::temporary;
 use std::io::{Error, ErrorKind};
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-static LEASE_ROOT: OnceLock<PathBuf> = OnceLock::new();
-
-pub fn configure_lease_root(app_data: &Path) -> std::io::Result<()> {
-    let root = app_data.join("book-leases");
-    fs::create_dir_all(&root)?;
-    let root = fs::canonicalize(&root)?;
-    if LEASE_ROOT.get_or_init(|| root.clone()) != &root {
-        return Err(Error::other("Android book lock directory is already configured"));
-    }
-    Ok(())
-}
-
-pub fn lease_root() -> std::io::Result<&'static Path> {
-    LEASE_ROOT.get().map(PathBuf::as_path).ok_or_else(|| Error::other("Android book lock directory is not configured"))
-}
+use std::path::Path;
 
 pub fn persist_book_noclobber(temporary: temporary::TempPath, destination: &Path) -> Result<(), temporary::PathPersistError> {
     match temporary.persist_noclobber(destination) {
@@ -97,19 +81,6 @@ mod android_book_tests {
         let mut source = tempfile::NamedTempFile::new_in(directory).unwrap();
         source.write_all(b"verified book").unwrap();
         tempfile::PathPersistError { error: Error::from_raw_os_error(13), path: source.into_temp_path() }
-    }
-
-    #[test]
-    fn lease_directory_is_private_and_cannot_be_reconfigured() {
-        assert!(lease_root().is_err());
-        let profile = tempfile::tempdir().unwrap();
-        configure_lease_root(profile.path()).unwrap();
-        let expected = profile.path().join("book-leases").canonicalize().unwrap();
-        assert_eq!(lease_root().unwrap(), expected);
-        configure_lease_root(&profile.path().join(".")).unwrap();
-        let other = tempfile::tempdir().unwrap();
-        assert!(configure_lease_root(other.path()).is_err());
-        assert_eq!(lease_root().unwrap(), expected);
     }
 
     #[test]

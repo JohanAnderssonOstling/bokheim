@@ -9,7 +9,7 @@ async fn import_workflow_preserves_foreign_files_for_staged_and_direct_writes() 
         let root = tempfile::tempdir().unwrap();
         let db = DatabaseClient::open(root.path().join("library.db"), &BackendExecutor::new().unwrap()).await.unwrap();
         db.initialize_library().await.unwrap();
-        let store = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+        let store = AssetStore::open(root.path().to_str().unwrap(), &root.path().join(".bokheim/private-assets")).unwrap();
         let dir = db.create_directory(&sync_common::ROOT_DIR_ID, &"Shelf".into()).await.unwrap().id;
         asset_workflow::prepare_directory(&store, &db, dir).await.unwrap();
         std::fs::write(root.path().join("Shelf/book.epub"), b"foreign book").unwrap();

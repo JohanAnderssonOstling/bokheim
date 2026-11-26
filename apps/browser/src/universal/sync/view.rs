@@ -20,6 +20,8 @@ use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::DropdownMenu as _;
 use gpui_component::popover::Popover;
 use gpui_component::scroll::{Scrollbar, ScrollbarShow};
+#[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
+use std::path::PathBuf;
 use sync_common::{MutationIssue, MutationRejectionReason};
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 use ui_components::Button;
@@ -274,7 +276,7 @@ impl SyncPage {
             .iter()
             .map(|library| {
                 let status = state.sync_statuses.iter().find(|status| status.library_id == *library.library_id()).cloned().unwrap_or_else(|| LibrarySyncStatus::placeholder(*library.library_id(), unknown_state));
-                let local_bytes = state.local_storage_usage.iter().find(|usage| usage.library_id == *library.library_id()).map(|usage| usage.used_bytes);
+                let local_bytes = state.local_storage_usage.iter().find(|usage| usage.library_id == *library.library_id()).and_then(|usage| usage.used_bytes);
                 // A supported server that lists no share for a library is
                 // reporting zero; an unsupported server reports nothing at all.
                 let server_bytes = state.server_storage_usage.as_ref().map(|usage| usage.iter().find(|entry| entry.library_id == *library.library_id()).map(|entry| entry.used_bytes).unwrap_or_default());
@@ -297,7 +299,7 @@ impl SyncPage {
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     fn access_action(&self, entity: &Entity<Self>, id: &'static str, label: &'static str, icon: IconName, action: fn(&mut Self, &mut Context<Self>)) -> Button {
         let page = entity.clone();
-        components::primary_action_button(id, label, icon, self.is_busy()).on_click(move |_, _, cx| page.update(cx, action))
+        components::action_button(id, label).primary().icon(icon).disabled(self.is_busy()).on_click(move |_, _, cx| page.update(cx, action))
     }
 
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -325,13 +327,13 @@ impl SyncPage {
             AccountFlow::SignIn => {
                 let register = entity.clone();
                 let mut actions = components::action_row().child(self.access_action(entity, "account-sign-in", text!(common::sign_in), IconName::Globe, Self::start_login));
-                actions = actions.child(components::secondary_action_button("account-register", text!(account::create_account), IconName::User, self.is_busy()).on_click(move |_, _, cx| {
+                actions = actions.child(components::action_button("account-register", text!(account::create_account)).icon(IconName::User).disabled(self.is_busy()).on_click(move |_, _, cx| {
                     register.update(cx, |page, cx| page.set_flow(AccountFlow::Register, cx));
                 }));
                 #[cfg(not(feature = "kobo"))]
                 {
                     let reset = entity.clone();
-                    actions = actions.w_full().child(components::secondary_action_button("account-request-reset", text!(account::password_reset), IconName::Redo2, self.is_busy()).on_click(move |_, _, cx| {
+                    actions = actions.w_full().child(components::action_button("account-request-reset", text!(account::password_reset)).icon(IconName::Redo2).disabled(self.is_busy()).on_click(move |_, _, cx| {
                         reset.update(cx, |page, cx| page.set_flow(AccountFlow::RequestPasswordReset, cx));
                     }));
                 }
@@ -355,7 +357,7 @@ impl SyncPage {
                 let mut actions = components::action_row().child(self.access_action(entity, "account-verify", text!(account::verify_email), IconName::ArrowRight, Self::start_verify_email));
                 let seconds = self.authentication.resend_seconds_remaining;
                 let resend_label = if seconds > 0 { format!(text!(account::resend_pin_s), seconds = seconds) } else { text!(account::resend_pin).to_owned() };
-                actions = actions.child(components::secondary_action_button("account-resend", resend_label, IconName::Redo2, self.is_busy() || seconds > 0).on_click(move |_, _, cx| {
+                actions = actions.child(components::action_button("account-resend", resend_label).icon(IconName::Redo2).disabled(self.is_busy() || seconds > 0).on_click(move |_, _, cx| {
                     resend.update(cx, |page, cx| page.start_resend_verification(cx));
                 }));
                 // The existing signup inputs supply the email and password.
@@ -391,7 +393,7 @@ impl SyncPage {
     fn account_access_form(&self, entity: &Entity<Self>, feedback: Option<gpui::AnyElement>, theme: components::BrowserTheme) -> Div {
         let page = entity.clone();
         components::access_form().child(components::section_header(text!(account::bokheim_account), text!(account::sign_in_to_sync_your_library_across_devices), theme)).children(feedback).child(components::action_row().child(
-            components::primary_action_button("account-sign-in", text!(account::sign_in_or_create_account), IconName::Globe, self.is_busy()).on_click(move |_, _, cx| {
+            components::action_button("account-sign-in", text!(account::sign_in_or_create_account)).primary().icon(IconName::Globe).disabled(self.is_busy()).on_click(move |_, _, cx| {
                 #[cfg(target_arch = "wasm32")]
                 page.update(cx, |page, cx| page.open_web_authentication(cx));
                 #[cfg(target_os = "android")]
@@ -454,7 +456,7 @@ impl SyncPage {
         let account = if signed_in {
             components::browser_settings_group().child(self.identity.clone()).child(components::browser_settings_block().child(self.storage_body(theme, window, cx)))
         } else {
-            components::browser_settings_fieldset_with_actions(text!(account::account), self.account_access_actions(&entity, theme), theme)
+            components::browser_settings_fieldset_with_actions(text!(account::account), self.account_access_actions(&entity), theme)
         };
 
         // Kobo opens an overlay; signed-in desktop accounts can open password
@@ -466,11 +468,7 @@ impl SyncPage {
             // group is about.
             let close = entity.clone();
             let form = self.account_access_form(&entity, feedback, theme).map(|form| {
-                let button = if cfg!(feature = "kobo") {
-                    components::link_button("account-close", text!(common::close), self.is_busy())
-                } else {
-                    components::base_button("account-close").label(text!(common::close)).h(rems(components::topbar_action_height_rem())).px(px(components::SPACE_MD)).disabled(self.is_busy())
-                };
+                let button = if cfg!(feature = "kobo") { components::link_button("account-close", text!(common::close), self.is_busy()) } else { components::action_button("account-close", text!(common::close)).disabled(self.is_busy()) };
                 let button = button.on_click(move |_, _, cx| close.update(cx, |page, cx| page.close_account_access(cx)));
                 form.child(components::action_row().w_full().when(!cfg!(feature = "kobo"), |row| row.justify_end()).child(button))
             });
@@ -542,7 +540,7 @@ impl SyncPage {
     /// Signing in leads with `Log in` rather than with `Create account`: a
     /// person who opens Settings and finds themselves signed out is far more
     /// often someone whose session lapsed than someone who has never had one.
-    fn account_access_actions(&self, entity: &Entity<Self>, theme: components::BrowserTheme) -> Div {
+    fn account_access_actions(&self, entity: &Entity<Self>) -> Div {
         let register = entity.clone();
         let login = entity.clone();
         div()
@@ -550,10 +548,10 @@ impl SyncPage {
             .flex_row()
             .items_center()
             .gap(px(components::SPACE_SM))
-            .child(components::browser_settings_header_button("account-open-register", text!(account::create_account), false, theme).on_click(move |_, _, cx| {
+            .child(components::action_button("account-open-register", text!(account::create_account)).on_click(move |_, _, cx| {
                 register.update(cx, |page, cx| page.open_account_access(true, cx));
             }))
-            .child(components::browser_settings_header_button("account-open-sign-in", text!(account::log_in), true, theme).on_click(move |_, _, cx| {
+            .child(components::action_button("account-open-sign-in", text!(account::log_in)).primary().on_click(move |_, _, cx| {
                 login.update(cx, |page, cx| page.open_account_access(false, cx));
             }))
     }
@@ -640,7 +638,7 @@ impl SyncPage {
         };
         table = table.child(header.py(px(components::SPACE_XS)).child(library_table_menu_cell()).when(!has_location, |row| row.border_t_0()));
         for row in rows {
-            let local_bytes = row.local_bytes.map(format_storage_bytes).unwrap_or_else(|| if row.status.state == LibrarySyncState::Unavailable { text!(common::unavailable).to_owned() } else { text!(account::calculating).to_owned() });
+            let local_bytes = row.local_bytes.map(format_storage_bytes).unwrap_or_else(|| if row.status.state == LibrarySyncState::Unavailable { text!(common::unavailable).to_owned() } else { "—".to_owned() });
             let (status, status_color) = if row.status.issues.rejected != 0 {
                 (text!(account::some_changes_were_rejected), theme.warning)
             } else if row.status.issues.untransmittable != 0 {
@@ -778,7 +776,8 @@ impl SyncPage {
     /// Chooses the folder new libraries are created in.
     #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
     fn choose_library_location(&mut self, cx: &mut Context<Self>) {
-        let selection = cx.prompt_for_directories(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(text!(account::choose_default_library_location).into()) });
+        let directory = self.default_library_location.as_ref().map(PathBuf::from);
+        let selection = cx.prompt_for_directories(gpui::PathPromptOptions { directory: directory.clone(), files: false, directories: true, multiple: false, prompt: Some(text!(account::choose_default_library_location).into()) });
         let preferences = self.services.preferences.clone();
         cx.spawn(async move |page, cx| {
             let paths = match selection.await {
@@ -793,6 +792,9 @@ impl SyncPage {
                 }
             };
             let Some(path) = paths.first().and_then(|directory| directory.local_path.as_ref()) else { return };
+            if directory.as_ref() == Some(path) {
+                return;
+            }
             let result = preferences.set_default_library_save_location(path.to_string_lossy().into_owned()).await.map_err(app::BackendError::operation);
             let _ = page.update(cx, |page, cx| {
                 match result {

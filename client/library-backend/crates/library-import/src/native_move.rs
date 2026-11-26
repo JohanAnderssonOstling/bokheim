@@ -1,19 +1,21 @@
 //! Shared native file moves for ordinary imports and metadata adapters.
 
-use std::fs::File;
+use client_platform_runtime::filesystem as fs;
 use std::path::{Path, PathBuf};
 
+use book_model::BookFormat;
 use client_platform_runtime::executor::run_blocking;
 use client_protocol::BackendError;
 use content_address::hash_file;
+use filesystem_scanner::ingestion::fingerprint as ingestion_fingerprint;
 use library_files::filesystem::fingerprint;
 use library_files::import_move::ImportMove;
-use library_model::PublishedStagedBook;
+use library_model::{ImportProgress, LibraryUpdate, PublishedStagedBook};
 use sync_common::{BookId, DirId};
 
-use crate::LibraryImport;
 use crate::import::ValidatedImport;
-use crate::reader_transfer::{ImportMetadata, ReaderPreparation, ingest_import_file, reader_inspection_version};
+use crate::reader_transfer::{ingest_import_file, reader_inspection_version, ImportMetadata, ReaderPreparation};
+use crate::LibraryImport;
 
 #[derive(Debug)]
 pub struct NativeMoveResult {
@@ -45,13 +47,19 @@ impl LibraryImport<'_> {
         let claimed = run_blocking({
             let destination = destination.clone();
             let root = PathBuf::from(&self.root);
-            move || ImportMove::claim_in_library(&source, &destination, &root)
+            let updates = self.events.updates.clone();
+            let name = name.clone();
+            move || {
+                ImportMove::claim_in_library_with_progress(&source, &destination, &root, &mut |copied_bytes, total_bytes| {
+                    updates.publish(LibraryUpdate::ImportProgress(ImportProgress::Copying { name: name.clone(), copied_bytes, total_bytes }));
+                })
+            }
         })
         .await
-        .map_err(BackendError::operation)?
-        .map_err(|error| if error.kind() == std::io::ErrorKind::CrossesDevices { BackendError::operation(error).context("source and destination are on different volumes; use copy mode") } else { BackendError::operation(error) })?;
+        .map_err(BackendError::operation)??;
 
         let mut claimed = Some(claimed);
+        self.report_importing(&name);
         let operation = async {
             // Admit the inode we actually claimed, never bytes read from a
             // pathname that can be replaced before the move.
@@ -87,11 +95,11 @@ impl LibraryImport<'_> {
                 Some(name) => {
                     let path = destination.join(name);
                     run_blocking(move || -> Result<Option<(PathBuf, u64)>, BackendError> {
-                        if !path.is_file() {
+                        if !fs::is_file(&path) {
                             return Ok(None);
                         }
                         let revision = fingerprint(&path)?;
-                        if hash_file(&mut File::open(&path)?)? == checksum && fingerprint(&path)? == revision {
+                        if hash_file(&mut fs::open(&path)?)? == checksum && fingerprint(&path)? == revision {
                             Ok(Some((path, revision)))
                         } else {
                             Ok(None)
@@ -106,9 +114,11 @@ impl LibraryImport<'_> {
             let occupied = self.storage.database().shared_occupied_file_names(&parent).await?;
             let mut claim = claimed.take().unwrap();
             let publish_destination = destination.clone();
+            let directory_entry = import.format == BookFormat::Mp3Folder;
+            let file_size = ingested.size_bytes;
             let (claim, publication) = run_blocking(move || {
-                let publication = (|| -> Result<(PathBuf, u64), BackendError> {
-                    if fingerprint(claim.path())? != ingested_fingerprint {
+                let publication = (|| -> Result<(PathBuf, u64, u64), BackendError> {
+                    if ingestion_fingerprint(claim.path())? != ingested_fingerprint {
                         return Err(BackendError::message("source changed after import inspection; retry the import"));
                     }
                     let path = match reuse {
@@ -121,14 +131,15 @@ impl LibraryImport<'_> {
                         None => claim.publish(&publish_destination, &occupied)?,
                     };
                     let revision = fingerprint(&path)?;
-                    Ok((path, revision))
+                    let size = if directory_entry { library_files::filesystem::directory_bytes(&path)? } else { file_size };
+                    Ok((path, revision, size))
                 })();
                 (claim, publication)
             })
             .await
             .map_err(BackendError::operation)?;
             claimed = Some(claim);
-            let (path, revision) = publication?;
+            let (path, revision, size) = publication?;
             if fingerprint(&path)? != revision {
                 return Err(BackendError::message("published book changed during move"));
             }
@@ -139,7 +150,8 @@ impl LibraryImport<'_> {
             }
             let name = path.file_name().and_then(|name| name.to_str()).ok_or("invalid published filename")?.to_owned();
             let relative = self.storage.database().native_book_path(parent, &name).await?.ok_or("destination folder is missing")?;
-            let published = PublishedStagedBook { name: name.clone(), relative_path: relative.to_string(), published: true, fingerprint: Some(fingerprint(&path)?) };
+            let physical_size_bytes = Some(size);
+            let published = PublishedStagedBook { physical_size_bytes, name: name.clone(), relative_path: relative.to_string(), published: true, fingerprint: Some(fingerprint(&path)?) };
             let created = existing.is_none();
             let import = ValidatedImport { file_name: name, ..import };
             if let Some(state) = state {

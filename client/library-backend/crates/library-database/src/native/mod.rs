@@ -120,6 +120,7 @@ impl Database {
             observations::Revision::Remote { size: i64::try_from(completion.size_bytes).map_err(DatabaseError::operation)? },
         )?;
 
+        observations::record_physical_size(connection, &completion.snapshot.book_id, &directory.to_string(), completion.publication.physical_size_bytes)?;
         connection.native_record_remote_book(&completion.snapshot.book_id)?;
 
         connection.shared_transfer_complete_download(&completion.snapshot.book_id)?;
@@ -164,6 +165,7 @@ pub struct NativeFileWorkSnapshot {
 
 #[derive(Clone, Debug)]
 pub struct NativeFileWorkCompletion {
+    pub physical_size_bytes: Option<u64>,
     pub snapshot: NativeFileWorkSnapshot,
     pub final_path: String,
     pub renamed: Option<(String, String)>,
@@ -307,6 +309,7 @@ impl Database {
                         transaction.native_rename_book(dir_id, hash, name)?;
                     }
                     observations::record_file(transaction, dir_id, &work.book_id, &completion.final_path, None, observations::Revision::Retained)?;
+                    observations::record_physical_size(transaction, &work.book_id, dir_id, completion.physical_size_bytes)?;
                     transaction.shared_transfer_complete_download(hash)?;
                     if !completion.thumbnail_set_exists {
                         transaction.native_request_thumbnail(hash)?;

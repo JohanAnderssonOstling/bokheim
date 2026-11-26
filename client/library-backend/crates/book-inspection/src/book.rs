@@ -37,7 +37,6 @@ pub fn inspect_book_reader_with_cached_pdf(source_name: &Path, format: BookForma
 pub fn inspect_book_reader_with_pdf_metadata(
     source_name: &Path, format: BookFormat, reader: impl Read + Seek + Send + Sync + 'static, book_id: Option<BookId>, cached_pdf: Option<CachedPdfReader>, declared_pdf: Option<BookRecord>,
 ) -> MetadataResult<InspectedBook> {
-    let mut pdf = None;
     let mut reader = reader;
     let (mut metadata, audiobook, toc) = match format {
         BookFormat::Epub => {
@@ -66,8 +65,7 @@ pub fn inspect_book_reader_with_pdf_metadata(
             (metadata, None, toc)
         }
         BookFormat::Pdf => {
-            let (inspected, extracted, outline) = crate::pdf::inspect_pdf_with_reader_facts(source_name, reader, book_id, cached_pdf, declared_pdf)?;
-            pdf = extracted.valid_for(&extracted.book_id).then_some(extracted);
+            let (inspected, outline) = crate::pdf::inspect_pdf_with_navigation(source_name, reader, book_id, cached_pdf, declared_pdf)?;
             (inspected.metadata, None, outline)
         }
         BookFormat::M4b => {
@@ -152,7 +150,8 @@ pub fn inspect_book_reader_with_pdf_metadata(
         }
     };
     crate::normalize_with_filename(&mut metadata, &source_name.to_string_lossy())?;
-    Ok(InspectedBook { metadata, audiobook, toc, pdf })
+    // Page dimensions belong to the open reader session, not library admission.
+    Ok(InspectedBook { metadata, audiobook, toc, pdf: None })
 }
 
 fn decode_sidecar(bytes: &[u8]) -> String {

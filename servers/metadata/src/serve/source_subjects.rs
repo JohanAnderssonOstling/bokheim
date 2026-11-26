@@ -1,7 +1,7 @@
 //! Exact source headings can supply classification even without an indexed ISBN.
 use book_model::{BookRecord, BookSubject};
 use metadata_contract::matching::bibliographic_match_key;
-use subject_projection::{BISAC_SYSTEM_ID, has_unified_subjects, has_usable_lcc_classification, is_broad_literature_classification, project_subject_codes, reviewed_source_heading_subject};
+use subject_projection::{has_unified_subjects, has_usable_lcc_classification, is_broad_literature_classification, project_subject_codes, reviewed_source_heading_subject, BISAC_SYSTEM_ID};
 
 const HEADINGS: &[(&str, &str)] = &[
     ("science fiction", "FIC028000"),
@@ -185,11 +185,8 @@ mod tests {
         assert_eq!(book.description, original.description);
         assert_eq!(book.book.subjects[0], original.book.subjects[0]);
         let expected = unified_subject_paths(BISAC_SYSTEM_ID, "FIC028000").iter().filter_map(|path| unified_concept_id(path)).collect::<BTreeSet<_>>();
-        let recovered = book.book.subjects[1..]
-            .iter()
-            .flat_map(|subject| unified_subject_paths(subject.authority().unwrap_or_default(), subject.code().unwrap_or_default()))
-            .filter_map(|path| unified_concept_id(&path))
-            .collect::<BTreeSet<_>>();
+        let recovered =
+            book.book.subjects[1..].iter().flat_map(|subject| unified_subject_paths(subject.authority().unwrap_or_default(), subject.code().unwrap_or_default())).filter_map(|path| unified_concept_id(&path)).collect::<BTreeSet<_>>();
         assert!(!expected.is_empty());
         assert_eq!(recovered, expected);
         assert!(!recover(&mut book));
@@ -203,10 +200,7 @@ mod tests {
         let mut criticism = record("Science fiction -- History and criticism");
         assert!(recover(&mut criticism));
         let scope_paths = unified_subject_paths(BISAC_SYSTEM_ID, "LIT000000");
-        let recovered = criticism.book.subjects[1..]
-            .iter()
-            .flat_map(|subject| unified_subject_paths(subject.authority().unwrap_or_default(), subject.code().unwrap_or_default()))
-            .collect::<Vec<_>>();
+        let recovered = criticism.book.subjects[1..].iter().flat_map(|subject| unified_subject_paths(subject.authority().unwrap_or_default(), subject.code().unwrap_or_default())).collect::<Vec<_>>();
         assert!(!scope_paths.is_empty());
         assert!(!recovered.is_empty());
         assert!(recovered.iter().all(|path| scope_paths.iter().any(|scope| path == scope || path.starts_with(&format!("{scope} / ")))), "{recovered:?}");
@@ -219,10 +213,7 @@ mod tests {
             assert!(recover(&mut book));
             let scope_paths = unified_subject_paths(BISAC_SYSTEM_ID, scope);
             assert!(!scope_paths.is_empty(), "{scope}");
-            let recovered = book.book.subjects[1..]
-                .iter()
-                .flat_map(|subject| unified_subject_paths(subject.authority().unwrap_or_default(), subject.code().unwrap_or_default()))
-                .collect::<Vec<_>>();
+            let recovered = book.book.subjects[1..].iter().flat_map(|subject| unified_subject_paths(subject.authority().unwrap_or_default(), subject.code().unwrap_or_default())).collect::<Vec<_>>();
             assert!(!recovered.is_empty(), "{name}");
             assert!(recovered.iter().all(|path| scope_paths.iter().any(|scope| path == scope || path.starts_with(&format!("{scope} / ")))), "{name}: {recovered:?}");
         }

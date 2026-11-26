@@ -72,15 +72,10 @@ impl BrowseKind {
         }
     }
 
-    /// The graph a kind can be shown as, and the layout it opens in: only the
-    /// trees have one. Books, Home's shelves and the author index are flat.
+    /// Only hierarchical collections can be shown as a graph.
     #[cfg(all(feature = "graph", not(feature = "kobo")))]
-    pub(super) fn graph_layout(self) -> Option<components::GraphLayoutKind> {
-        match self {
-            Self::Folder => Some(components::GraphLayoutKind::Columns),
-            Self::Subject | Self::Catalog => Some(components::GraphLayoutKind::AdaptiveRadial),
-            Self::Home | Self::Author | Self::Books => None,
-        }
+    pub(super) fn supports_graph(self) -> bool {
+        matches!(self, Self::Folder | Self::Subject | Self::Catalog)
     }
 
     pub(super) fn child_icon(self) -> components::NavigationIcon {
@@ -165,7 +160,7 @@ impl BrowseDestination {
 /// streams books it does not hold instead of downloading them, and catalog
 /// books are added to the library, not downloaded.
 pub(super) fn can_download(child: &BrowseRow) -> bool {
-    cfg!(not(target_arch = "wasm32")) && !matches!(child.id, BrowseLocation::Catalog(_) | BrowseLocation::CatalogAuthor(_)) && child.downloaded_book_count < child.book_count
+    cfg!(not(target_arch = "wasm32")) && !matches!(child.id, BrowseLocation::Catalog(_) | BrowseLocation::CatalogAuthor(_)) && child.downloaded_book_count + child.requested_book_count.unwrap_or(0) < child.book_count
 }
 
 /// Whether a chip carries the download mark: only when it is partly on this
@@ -251,8 +246,8 @@ impl BrowseListing {
         // Home keeps activity order by default; sorting changes presentation,
         // while its shelves still select books by their original activity rules.
         if kind == BrowseKind::Home {
-            controls.collection_sorts = vec![BrowseChipSort::DefaultOrder, BrowseChipSort::Alphabetical, BrowseChipSort::TitleDescending, BrowseChipSort::BookCount];
-            controls.book_sorts.insert(0, BrowseBookSort::DefaultOrder);
+            controls.collection_sorts = vec![BrowseChipSort::DefaultOrder, BrowseChipSort::Alphabetical, BrowseChipSort::BookCount];
+            controls.book_sorts = vec![BrowseBookSort::DefaultOrder, BrowseBookSort::Alphabetical];
         }
         controls
     }

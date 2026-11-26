@@ -1,7 +1,7 @@
 //! Recursive library-folder merges with verified, resumable cleanup.
 //! Originals remain until the registry commits the prepared destination.
 
-use audiobook_folder::{PATH_MAPPING_FILE, discover, discover_cover, discover_cue, discover_nfo, folder_hash};
+use audiobook_folder::{FolderInventory, PATH_MAPPING_FILE, folder_hash};
 use client_platform_native::filesystem::sync_directory;
 #[cfg(not(target_arch = "wasm32"))]
 use client_platform_runtime::filesystem::temporary;
@@ -210,11 +210,12 @@ fn members(path: &Path, folder: bool) -> io::Result<Vec<Member>> {
     if !folder {
         return Ok(Vec::new());
     }
-    let mut paths = discover(path)?.into_iter().map(|track| track.path).collect::<Vec<_>>();
-    paths.extend(discover_cover(path)?.map(|member| member.path));
-    paths.extend(discover_cue(path)?.map(|member| member.path));
-    paths.extend(discover_nfo(path)?.map(|member| member.path));
-    if fs::try_exists(&path.join(PATH_MAPPING_FILE))? {
+    let mut inventory = FolderInventory::read(path)?;
+    let mut paths = inventory.tracks()?.into_iter().map(|track| track.path).collect::<Vec<_>>();
+    paths.extend(inventory.cover()?.map(|member| member.path));
+    paths.extend(inventory.cue()?.map(|member| member.path));
+    paths.extend(inventory.nfo()?.map(|member| member.path));
+    if inventory.has_mapping() {
         paths.push(path.join(PATH_MAPPING_FILE));
     }
     paths.into_iter().map(|file| Ok(Member { path: file.strip_prefix(path).map_err(|_| failure("audiobook member is outside its folder"))?.to_owned(), checksum: hash_file(&mut fs::open(file)?)? })).collect()
@@ -487,9 +488,10 @@ fn validate_remaining_members(source: &Path, expected: &[Member]) -> io::Result<
     Ok(())
 }
 
-/// Store identities, manifests and live OS locks are managed by the root commit.
+/// Root identities are managed by the commit. Legacy app assets stay behind;
+/// opening the library already migrated the durable assets to private storage.
 fn managed_identity(relative: &Path) -> bool {
-    matches!(relative.to_str(), Some(".bokheim/storage-identity" | ".bokheim/library.json" | ".bokheim-library.json")) || relative.starts_with(".bokheim/assets/leases")
+    matches!(relative.to_str(), Some(".bokheim/storage-identity" | ".bokheim/library.json" | ".bokheim-library.json")) || relative.starts_with(".bokheim/assets")
 }
 
 fn validate_snapshot(path: &Path, file: &FileMove) -> io::Result<()> {

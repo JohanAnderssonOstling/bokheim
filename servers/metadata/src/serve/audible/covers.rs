@@ -21,8 +21,8 @@ impl AudibleClient {
         }
         let (_, api, _) = self.origins.iter().find(|(r, _, _)| r == region).ok_or("Invalid region")?;
         let _permit = self.lookups.try_acquire().map_err(|_| "Artwork capacity busy")?;
-        let book = self.json(&self.audnexus_origin, &format!("/books/{asin}"), &[("region", region)]).await;
-        if let Ok(book) = &book {
+        let book = self.audnexus_book(region, asin, DiscoverySource::EmbeddedAsin).await;
+        if let Ok((_, book)) = &book {
             if book.get("asin").and_then(Value::as_str) == Some(asin) && book.get("region").and_then(Value::as_str) == Some(region) {
                 if let Some(image) = book.get("image").and_then(Value::as_str) {
                     if let Ok(url) = artwork_url(image) {

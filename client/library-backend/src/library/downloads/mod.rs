@@ -116,18 +116,10 @@ impl LibraryHandle {
     }
 
     pub async fn local_storage_usage(&self) -> Result<Option<u64>, BackendError> {
-        self.run_io(async {
-            let storage = self.storage().await?;
-            #[cfg(not(target_arch = "wasm32"))]
-            let paths = storage.database().local_book_paths().await?;
-            let assets = storage.assets().clone();
-            #[cfg(not(target_arch = "wasm32"))]
-            let bytes = assets.book_bytes_at_paths(paths).await;
-            #[cfg(target_arch = "wasm32")]
-            let bytes = assets.local_book_bytes().await;
-            bytes.map(Some).map_err(BackendError::operation)
-        })
-        .await
+        #[cfg(not(target_arch = "wasm32"))]
+        return Ok(self.database().local_book_storage_bytes().await?);
+        #[cfg(target_arch = "wasm32")]
+        self.run_io(async { self.storage().await?.assets().local_book_bytes().await.map(Some).map_err(BackendError::operation) }).await
     }
 }
 

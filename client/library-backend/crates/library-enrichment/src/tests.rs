@@ -196,7 +196,7 @@ async fn metadata_miss_still_downloads_direct_artwork_and_preserves_newer_local_
         size_bytes: 10,
         inspection_version: 1,
         inspection: Some(book_inspection::InspectedBook { metadata: record(), pdf: None, audiobook: None, toc: Vec::new() }),
-        published: PublishedStagedBook { name: "book.epub".into(), relative_path: "/book.epub".into(), published: false, fingerprint: None },
+        published: PublishedStagedBook { physical_size_bytes: None, name: "book.epub".into(), relative_path: "/book.epub".into(), published: false, fingerprint: None },
         request_thumbnail: false,
         restore_paths: Vec::new(),
     })
@@ -205,7 +205,7 @@ async fn metadata_miss_still_downloads_direct_artwork_and_preserves_newer_local_
     db.complete_thumbnail_work(&hash, false).await.unwrap();
 
     let (events, _) = LibraryEventRouter::new();
-    let assets = AssetStore::open(temporary.path().to_str().unwrap()).unwrap();
+    let assets = AssetStore::open(temporary.path().to_str().unwrap(), &temporary.path().join(".bokheim/private-assets")).unwrap();
     let lane = LibraryEnrichment {
         state: Arc::new(tokio::sync::RwLock::new(library_placement::LibraryState::new(db.clone(), assets.clone(), events.clone()))),
         database: db.clone(),
@@ -311,7 +311,7 @@ async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_fail
                     size_bytes: 10,
                     inspection_version: 1,
                     inspection: Some(InspectedBook { metadata, pdf: None, audiobook, toc: vec![] }),
-                    published: PublishedStagedBook { name: name.clone(), relative_path: format!("/{name}"), published: false, fingerprint: None },
+                    published: PublishedStagedBook { physical_size_bytes: None, name: name.clone(), relative_path: format!("/{name}"), published: false, fingerprint: None },
                     request_thumbnail: true,
                     restore_paths: vec![],
                 })
@@ -321,7 +321,7 @@ async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_fail
         }
         let original = database.enrichment_candidates(0, None).await.unwrap().0;
         let (events, _) = LibraryEventRouter::new();
-        let assets = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+        let assets = AssetStore::open(root.path().to_str().unwrap(), &root.path().join(".bokheim/private-assets")).unwrap();
         let lane = LibraryEnrichment {
             state: Arc::new(tokio::sync::RwLock::new(library_placement::LibraryState::new(database.clone(), assets.clone(), events.clone()))),
             database: database.clone(),

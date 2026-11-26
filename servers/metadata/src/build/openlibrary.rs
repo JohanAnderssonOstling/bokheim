@@ -122,8 +122,19 @@ pub(crate) fn authority_edition_key(id: i64) -> String {
 /// Optional dump supplements are represented by empty temporary tables once
 /// per builder connection. Resolution always sees the current input schema.
 pub(crate) fn open_builder_pool(path: &Path) -> Result<Pool<SqliteConnectionManager>, MetadataError> {
-    let manager = SqliteConnectionManager::file(path.canonicalize().map_err(error)?).with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).with_init(|c| {
+    let path = path.canonicalize().map_err(error)?;
+    let edition_descriptions = super::edition_descriptions::validated_index_path(&path)?.as_deref().map(crate::snapshot::immutable_uri).transpose()?;
+    let manager = SqliteConnectionManager::file(path).with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI).with_init(move |c| {
         c.set_prepared_statement_cache_capacity(64);
+        if let Some(path) = &edition_descriptions {
+            let native: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='edition_description')", [], |r| r.get(0))?;
+            c.execute("ATTACH DATABASE ?1 AS edition_descriptions", [path])?;
+            c.execute_batch(if native {
+                "CREATE TEMP VIEW edition_description AS SELECT edition_id,description FROM main.edition_description UNION ALL SELECT edition_id,description FROM edition_descriptions.edition_description s WHERE NOT EXISTS(SELECT 1 FROM main.edition_description n WHERE n.edition_id=s.edition_id);"
+            } else {
+                "CREATE TEMP VIEW edition_description AS SELECT edition_id,description FROM edition_descriptions.edition_description;"
+            })?;
+        }
         for (name, definition) in [
             ("edition_description", "edition_id INTEGER PRIMARY KEY,description TEXT NOT NULL"),
             ("isbn_lcc", "isbn13 INTEGER,notation TEXT,lc_record_id TEXT"),
@@ -132,7 +143,7 @@ pub(crate) fn open_builder_pool(path: &Path) -> Result<Pool<SqliteConnectionMana
             ("lc_record_lcc", "lc_record_id TEXT,notation TEXT"),
             ("lc_title", "title_key TEXT,lc_record_id TEXT"),
         ] {
-            let present: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [name], |r| r.get(0))?;
+            let present: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 UNION ALL SELECT 1 FROM sqlite_temp_master WHERE name=?1)", [name], |r| r.get(0))?;
             if !present {
                 c.execute_batch(&format!("CREATE TEMP TABLE {name}({definition});"))?;
             }

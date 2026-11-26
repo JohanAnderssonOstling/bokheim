@@ -9,6 +9,7 @@ use std::fmt;
 pub enum BrowserDownloadPhase {
     Preparing,
     Downloading,
+    Transferring,
     Importing,
     Completed,
     /// Why it failed, when that is known; the UI words it.

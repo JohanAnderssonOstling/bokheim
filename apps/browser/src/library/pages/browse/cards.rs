@@ -27,6 +27,8 @@ pub(super) enum CardEvent {
     ItemsMenu(Vec<BrowseItem>, Point<Pixels>),
     /// A menu over open space, at a window position.
     SpaceMenu(Point<Pixels>),
+    /// Add content directly to a folder container.
+    FolderContentsMenu(DirId, Point<Pixels>),
     Download(BrowseLocation),
     /// Files to import or library items to place into this folder.
     DropOnto(DirId, FolderDrop),

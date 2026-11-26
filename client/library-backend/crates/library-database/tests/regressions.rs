@@ -30,7 +30,7 @@ fn import() -> ImportCommit {
             },
             toc: vec![book_model::BookTocEntry { title: "Chapter".into(), target: "ch1".into(), children: vec![] }],
         }),
-        published: PublishedStagedBook { name: "book.epub".into(), relative_path: "/book.epub".into(), published: false, fingerprint: None },
+        published: PublishedStagedBook { physical_size_bytes: None, name: "book.epub".into(), relative_path: "/book.epub".into(), published: false, fingerprint: None },
         request_thumbnail: false,
         restore_paths: vec![],
     }
@@ -296,7 +296,7 @@ fn restore_snapshot(db: &Database) -> library_database::NativeFileWorkSnapshot {
 }
 
 fn restore_completion(snapshot: library_database::NativeFileWorkSnapshot) -> library_database::NativeFileWorkCompletion {
-    library_database::NativeFileWorkCompletion { final_path: snapshot.resolved_path.to_string(), snapshot, renamed: None, published: true, thumbnail_set_exists: true }
+    library_database::NativeFileWorkCompletion { physical_size_bytes: None, final_path: snapshot.resolved_path.to_string(), snapshot, renamed: None, published: true, thumbnail_set_exists: true }
 }
 
 #[test]
@@ -444,12 +444,13 @@ mod scanner {
     }
 
     fn observation(directory: DirId, name: &str, fingerprint: u64) -> ScanFileObservation {
-        ScanFileObservation { directory, name: name.into(), path: name.into(), fingerprint }
+        ScanFileObservation { directory_entry: false, physical_size_bytes: None, directory, name: name.into(), path: name.into(), fingerprint }
     }
 
     fn replacement() -> ScannedBook {
         let hash = BookId::new(&"b".repeat(64));
         ScannedBook {
+            physical_size_bytes: None,
             source_identity: None,
             audiobook_content_hash: None,
             byte_checksum: None,

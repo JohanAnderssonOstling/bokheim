@@ -23,7 +23,10 @@ impl MetadataClientError {
 impl MetadataClient {
     pub fn new(base_url: &str) -> Result<Self, MetadataClientError> {
         let base_url = Self::parse_origin(base_url)?;
-        let http = http_response::client();
+        let http = http_response::client_builder();
+        #[cfg(not(target_arch = "wasm32"))]
+        let http = http.connect_timeout(Duration::from_secs(8));
+        let http = http.build().map_err(MetadataClientError::new)?;
         Ok(Self { http, base_url })
     }
 
@@ -41,15 +44,11 @@ impl MetadataClient {
         if body.len() > metadata_contract::books::MAX_BOOKS_REQUEST_BYTES {
             return Err(MetadataClientError::new("book request exceeds size limit"));
         }
-        // The server resolves books concurrently, but one may wait on Audible
-        // and the Library of Congress fallback.
-        Self::with_deadline(120_000, async {
-            let response =
-                self.http.post(self.endpoint("v3/books")?).header(reqwest::header::CONTENT_TYPE, "application/json").body(body).send().await.map_err(MetadataClientError::new)?.error_for_status().map_err(MetadataClientError::new)?;
-            let bytes = Self::response_bytes(response, metadata_contract::MAX_RESPONSE_BYTES).await?;
-            serde_json::from_slice(&bytes).map_err(MetadataClientError::new)
-        })
-        .await
+        // The server bounds provider work and owns its queue. A client-wide
+        // elapsed deadline would cancel valid requests before their turn.
+        let response = self.http.post(self.endpoint("v3/books")?).header(reqwest::header::CONTENT_TYPE, "application/json").body(body).send().await.map_err(MetadataClientError::new)?.error_for_status().map_err(MetadataClientError::new)?;
+        let bytes = Self::response_bytes(response, metadata_contract::MAX_RESPONSE_BYTES).await?;
+        serde_json::from_slice(&bytes).map_err(MetadataClientError::new)
     }
 
     pub(crate) async fn with_deadline<T>(milliseconds: u32, operation: impl std::future::Future<Output = Result<T, MetadataClientError>>) -> Result<T, MetadataClientError> {

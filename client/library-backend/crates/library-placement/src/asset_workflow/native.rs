@@ -21,6 +21,7 @@ struct FileWorkPlan {
 }
 
 struct PreparedFileWork {
+    physical_size_bytes: Option<u64>,
     plan: FileWorkPlan,
     output: Option<PreparedPlacement>,
     retained: Option<PreparedPlacement>,
@@ -152,7 +153,7 @@ fn prepare_file_work_blocking(assets: &AssetStore, plan: FileWorkPlan, copy_move
         false
     };
     let cleanup_obsolete = !cleanup_absent && !cleanup_owner_valid(&snapshot.work)?;
-    let cleanup_assets = historical_root.filter(|_| !cleanup_absent && !cleanup_obsolete).map(AssetStore::open).transpose()?;
+    let cleanup_assets = historical_root.filter(|_| !cleanup_absent && !cleanup_obsolete).map(|root| AssetStore::open(root, assets.native_assets_root())).transpose()?;
     let cleanup_store = cleanup_assets.as_ref().unwrap_or(assets);
     let _cleanup_lease = if cleanup_assets.is_some() {
         let Some(lease) = cleanup_store.try_exclusive_lease(&hash)? else { return Ok(None) };
@@ -191,7 +192,8 @@ fn prepare_file_work_blocking(assets: &AssetStore, plan: FileWorkPlan, copy_move
         }
         operation => return Err(BackendError::message(format!("unknown file operation: {operation}"))),
     };
-    Ok(Some(PreparedFileWork { plan, output, retained, path, renamed, cleanup_assets, root_access }))
+    let physical_size_bytes = output.as_ref().map(PreparedPlacement::physical_size_bytes).transpose()?.flatten();
+    Ok(Some(PreparedFileWork { physical_size_bytes, plan, output, retained, path, renamed, cleanup_assets, root_access }))
 }
 
 /// Called under the gate. A superseded job keeps its durable work for a fresh
@@ -268,7 +270,14 @@ async fn publish_file_work(assets: &AssetStore, database: &DatabaseClient, prepa
         .map_err(BackendError::operation)??
     };
     database
-        .acknowledge_native_file_work(NativeFileWorkCompletion { snapshot: current, final_path: prepared.path.to_string(), renamed: prepared.renamed.take(), published, thumbnail_set_exists: assets.thumbnail_set_exists(&hash).await? })
+        .acknowledge_native_file_work(NativeFileWorkCompletion {
+            physical_size_bytes: prepared.physical_size_bytes,
+            snapshot: current,
+            final_path: prepared.path.to_string(),
+            renamed: prepared.renamed.take(),
+            published,
+            thumbnail_set_exists: assets.thumbnail_set_exists(&hash).await?,
+        })
         .await?;
     Ok(())
 }

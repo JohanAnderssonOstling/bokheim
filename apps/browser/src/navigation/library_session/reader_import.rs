@@ -1,67 +1,48 @@
-//! A reader import dialog owned by, and rendered inside, its destination library.
+//! Source-library review and imports retained by the newly created library session.
 
 use library_management::management::ManagementClient;
 use ui_text::text;
 
-use super::{LibraryOperationDialog, LibrarySession};
+use super::LibrarySession;
 use crate::services::{import_failure_message, notify_error, notify_info, notify_warning};
 use gpui::prelude::*;
 use gpui::{App, Context, DismissEvent, FocusHandle, Focusable, KeyDownEvent, Role, SharedString, Task, Toggled, Window, div, px};
 use gpui_component::menu::DropdownMenu as _;
 use gpui_component::{Disableable, IconName};
-use library_backend::{BackendError, DirId, LibraryClient, ReaderBookCounts, ReaderImportMode, ReaderImportOptions, ReaderImportSource, ReaderLibrarySummary};
+use library_backend::{BackendError, ROOT_DIR_ID, ReaderBookCounts, ReaderImportMode, ReaderImportOptions, ReaderImportSource, ReaderLibrarySummary};
 use ui_components::{self as components, ScrollableElement, user_facing_error};
 
 impl LibrarySession {
-    pub(crate) fn open_reader_import(&mut self, source: ReaderImportSource, parent: DirId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(dialog) = &self.operation_dialog {
-            dialog.focus.focus(window, cx);
-            return;
-        }
-        if self.library.files_busy(cx) || self.library.importing(cx) {
-            return;
-        }
-        let management = self.library.management().clone();
+    pub(in crate::navigation) fn start_reader_import(&mut self, source: ReaderImportSource, options: ReaderImportOptions, cx: &mut Context<Self>) {
         let library = self.library.backend().clone();
-        let dialog = cx.new(|cx| ReaderImportDialog::new(management, library, source, parent, cx));
-        cx.subscribe_in(&dialog, window, |session, dialog, _: &DismissEvent, _, cx| {
-            let request = dialog.update(cx, |dialog, _| dialog.pending_import.take().map(|options| (dialog.library.clone(), dialog.source, options)));
-            if let Some((library, source, options)) = request {
-                let updates = session.library.updates();
-                let completion = updates.downgrade();
-                let task = cx.spawn(async move |_, cx| {
-                    let result = library.import_reader(source, options).await;
-                    let _ = completion.update(cx, |updates, cx| {
-                        updates.set_import_task(None, cx);
-                        let owner = cx.entity_id();
-                        cx.with_window(owner, |window, cx| match result {
-                            Ok(report) => {
-                                let summary = format!(text!(browse::imported_already_present_failed), report.imported, report.already_present, report.failures.len());
-                                let message =
-                                    std::iter::once(format!("{}: {summary}", source.name())).chain(report.failures.iter().take(3).map(import_failure_message)).chain(report.warnings.iter().take(3).cloned()).collect::<Vec<_>>().join("\n");
-                                if report.failures.is_empty() && report.warnings.is_empty() {
-                                    notify_info("reader-import-complete", message, window, cx);
-                                } else {
-                                    notify_warning("reader-import-warning", message, window, cx);
-                                }
-                            }
-                            Err(error) => notify_error("reader-import-error", format!("{}: {}", source.name(), user_facing_error(&error, text!(browse::could_not_import_the_selected_books_please_try_again))), window, cx),
-                        });
-                    });
+        let updates = self.library.updates();
+        let completion = updates.downgrade();
+        let task = cx.spawn(async move |_, cx| {
+            let result = library.import_reader(source, options).await;
+            let _ = completion.update(cx, |updates, cx| {
+                updates.set_import_task(None, cx);
+                let owner = cx.entity_id();
+                cx.with_window(owner, |window, cx| match result {
+                    Ok(report) => {
+                        let summary = format!(text!(browse::imported_already_present_failed), report.imported, report.already_present, report.failures.len());
+                        let message = std::iter::once(format!("{}: {summary}", source.name())).chain(report.failures.iter().take(3).map(import_failure_message)).chain(report.warnings.iter().take(3).cloned()).collect::<Vec<_>>().join("\n");
+                        if report.failures.is_empty() && report.warnings.is_empty() {
+                            notify_info("reader-import-complete", message, window, cx);
+                        } else {
+                            notify_warning("reader-import-warning", message, window, cx);
+                        }
+                    }
+                    Err(error) => notify_error("reader-import-error", format!("{}: {}", source.name(), user_facing_error(&error, text!(browse::could_not_import_the_selected_books_please_try_again))), window, cx),
                 });
-                updates.update(cx, |updates, cx| updates.set_import_task(Some(task), cx));
-            }
-        })
-        .detach();
-        self.show_operation_dialog(dialog, 26.25, true, window, cx);
+            });
+        });
+        updates.update(cx, |updates, cx| updates.set_import_task(Some(task), cx));
     }
 }
 
-struct ReaderImportDialog {
+pub(in crate::navigation) struct ReaderImportDialog {
     focus: FocusHandle,
     source: ReaderImportSource,
-    library: LibraryClient,
-    parent: DirId,
     summary: Option<ReaderLibrarySummary>,
     loading: bool,
     group: Option<String>,
@@ -75,12 +56,6 @@ struct ReaderImportDialog {
 
 impl gpui::EventEmitter<DismissEvent> for ReaderImportDialog {}
 
-impl LibraryOperationDialog for ReaderImportDialog {
-    fn dismiss(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.dismiss(cx);
-    }
-}
-
 impl Focusable for ReaderImportDialog {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -88,11 +63,11 @@ impl Focusable for ReaderImportDialog {
 }
 
 impl ReaderImportDialog {
-    fn new(management: ManagementClient, library: LibraryClient, source: ReaderImportSource, parent: DirId, cx: &mut Context<Self>) -> Self {
-        Self::with_source(library, source, parent, async move { management.reader_import_summary(source).await }, cx)
+    pub(in crate::navigation) fn new(management: ManagementClient, source: ReaderImportSource, cx: &mut Context<Self>) -> Self {
+        Self::with_source(source, async move { management.reader_import_summary(source).await }, cx)
     }
 
-    fn with_source(library: LibraryClient, source: ReaderImportSource, parent: DirId, summary: impl std::future::Future<Output = Result<ReaderLibrarySummary, BackendError>> + 'static, cx: &mut Context<Self>) -> Self {
+    fn with_source(source: ReaderImportSource, summary: impl std::future::Future<Output = Result<ReaderLibrarySummary, BackendError>> + 'static, cx: &mut Context<Self>) -> Self {
         let load = cx.spawn(async move |view, cx| {
             let result = summary.await;
             let _ = view.update(cx, |view, cx| {
@@ -104,21 +79,11 @@ impl ReaderImportDialog {
                 cx.notify();
             });
         });
-        Self {
-            focus: cx.focus_handle(),
-            source,
-            library,
-            parent,
-            summary: None,
-            loading: true,
-            group: None,
-            mode: ReaderImportMode::Copy,
-            mode_focus: [cx.focus_handle(), cx.focus_handle()],
-            importing: false,
-            pending_import: None,
-            error: None,
-            _load: load,
-        }
+        Self { focus: cx.focus_handle(), source, summary: None, loading: true, group: None, mode: ReaderImportMode::Copy, mode_focus: [cx.focus_handle(), cx.focus_handle()], importing: false, pending_import: None, error: None, _load: load }
+    }
+
+    pub(in crate::navigation) fn take_import(&mut self) -> Option<(ReaderImportSource, ReaderImportOptions, u64)> {
+        self.pending_import.take().map(|options| (self.source, options, self.counts().total() as u64))
     }
 
     fn mode_choice(&self, mode: ReaderImportMode, label: &'static str, disabled: bool, window: &Window, cx: &Context<Self>) -> impl IntoElement {
@@ -193,7 +158,7 @@ impl ReaderImportDialog {
         if self.loading || self.importing || self.pending_import.is_some() || self.counts().total() == 0 {
             return None;
         }
-        Some(ReaderImportOptions { parent_id: self.parent, group: self.group.clone(), mode: self.mode })
+        Some(ReaderImportOptions { parent_id: ROOT_DIR_ID, group: self.group.clone(), mode: self.mode })
     }
 
     fn dismiss(&mut self, cx: &mut Context<Self>) {
@@ -206,7 +171,7 @@ impl ReaderImportDialog {
         let Some(options) = self.options() else { return };
         self.pending_import = Some(options);
         self.importing = true;
-        // The session retains the task after closing this configuration dialog.
+        // Library creation starts only after the source review is confirmed.
         cx.emit(DismissEvent);
     }
 }
@@ -334,38 +299,34 @@ mod tests {
     use sync_common::ROOT_DIR_ID;
 
     #[gpui::test]
-    async fn group_selection_keeps_the_implicit_destination_and_copy_default(cx: &mut TestAppContext) {
+    async fn group_selection_keeps_the_new_library_root_and_copy_default(cx: &mut TestAppContext) {
         let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (_directory, _session, context, _app_client) = crate::navigation::LibrarySession::test_context(cx).await;
-        let library = context.backend().clone();
-        library.create_directory(ROOT_DIR_ID, "Destination".into()).await.unwrap();
-        let parent = library.folder_destinations().await.unwrap().into_iter().find(|folder| folder.label == "Destination").unwrap().id;
+        let (_directory, _session, _context, _app_client) = crate::navigation::LibrarySession::test_context(cx).await;
         let summary = ReaderLibrarySummary { counts: ReaderBookCounts { epub: 3, pdf: 2 }, groups: vec![ReaderGroup { name: "Dator/Programmering".into(), counts: ReaderBookCounts { epub: 2, pdf: 0 } }], can_move: true };
         let window = cx.add_window(|window, cx| {
-            let view = cx.new(|cx| ReaderImportDialog::with_source(library, ReaderImportSource::Readest, parent, std::future::ready(Ok(summary)), cx));
+            let view = cx.new(|cx| ReaderImportDialog::with_source(ReaderImportSource::Readest, std::future::ready(Ok(summary)), cx));
             gpui_component::Root::new(view, window, cx)
         });
         let view = window.read_with(cx, |root, _| root.view().clone().downcast::<ReaderImportDialog>().ok().unwrap()).unwrap();
         cx.condition(&view, |view, _| !view.loading).await;
         view.update(cx, |view, _| {
             assert_eq!(view.counts().total(), 5);
-            assert_eq!(view.options().unwrap().parent_id, parent);
+            assert_eq!(view.options().unwrap().parent_id, ROOT_DIR_ID);
             assert_eq!(view.options().unwrap().mode, ReaderImportMode::Copy);
             assert_eq!(view.options().unwrap().group, None);
             view.group = Some("Dator/Programmering".into());
             assert_eq!(view.counts().total(), 2);
-            assert_eq!(view.options().unwrap().parent_id, parent);
+            assert_eq!(view.options().unwrap().parent_id, ROOT_DIR_ID);
             assert_eq!(view.options().unwrap().group.as_deref(), Some("Dator/Programmering"));
         });
     }
     #[gpui::test]
     async fn foliate_uses_the_same_destination_and_copy_default_without_groups(cx: &mut TestAppContext) {
         let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (_directory, _session, context, _app_client) = crate::navigation::LibrarySession::test_context(cx).await;
-        let library = context.backend().clone();
+        let (_directory, _session, _context, _app_client) = crate::navigation::LibrarySession::test_context(cx).await;
         let summary = ReaderLibrarySummary { counts: ReaderBookCounts { epub: 4, pdf: 1 }, groups: Vec::new(), can_move: true };
         let window = cx.add_window(|window, cx| {
-            let view = cx.new(|cx| ReaderImportDialog::with_source(library, ReaderImportSource::Foliate, ROOT_DIR_ID, std::future::ready(Ok(summary)), cx));
+            let view = cx.new(|cx| ReaderImportDialog::with_source(ReaderImportSource::Foliate, std::future::ready(Ok(summary)), cx));
             gpui_component::Root::new(view, window, cx)
         });
         let view = window.read_with(cx, |root, _| root.view().clone().downcast::<ReaderImportDialog>().ok().unwrap()).unwrap();

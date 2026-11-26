@@ -106,7 +106,7 @@ pub(crate) fn card<C: AnnotationSidebarTarget>(target: &Entity<C>, index: usize,
     });
     let delete_target = target.clone();
     let deleted_id = bookmark.id.clone();
-    let delete = components::delete_icon_button(("reader-bookmark-delete", index), text!(reader::delete_bookmark), theme).on_click(move |_, _, cx| {
+    let delete = components::delete_icon_button(("reader-bookmark-delete", index), text!(reader::delete_bookmark)).on_click(move |_, _, cx| {
         cx.stop_propagation();
         delete_target.update(cx, |this, cx| this.delete_sidebar_annotation(deleted_id.clone(), cx));
     });

@@ -151,6 +151,14 @@ impl LibraryHandle {
         &self.owner.resources.id
     }
 
+    /// Queue a filesystem scan without delaying navigation or duplicating an active scan.
+    #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
+    pub fn request_filesystem_scan(&self) {
+        if !self.is_closed() && !self.owner.resources.scanning.load(std::sync::atomic::Ordering::Acquire) {
+            self.owner.resources.events.scan.wake();
+        }
+    }
+
     pub fn shutdown(&self) {
         self.owner.close();
     }

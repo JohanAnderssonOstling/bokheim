@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS local_purge_work(id INTEGER PRIMARY KEY AUTOINCREMENT
 
 CREATE TABLE IF NOT EXISTS local_file_projection(
         content_hash BLOB NOT NULL, dir_id TEXT NOT NULL, relative_path TEXT NOT NULL,
+        physical_size_bytes INTEGER CHECK(physical_size_bytes IS NULL OR physical_size_bytes>=0),
         PRIMARY KEY(content_hash,dir_id)
     );
 

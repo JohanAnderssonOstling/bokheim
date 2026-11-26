@@ -28,11 +28,11 @@ tokio = { version = "1", features = ["sync"] }
 url = "2"
 thiserror = "2"
 image = { workspace = true, features = ["jpeg", "png", "webp"] }
+futures-util = "0.3"
 
 [dev-dependencies]
 book-inspection = { path = "../book-inspection" }
 cpu-host = { path = "../cpu-host" }
-futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt", "net", "test-util"] }
 axum = "0.7"
 tempfile = "3"

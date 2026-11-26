@@ -1,18 +1,18 @@
-use axum::Router;
 use axum::extract::{DefaultBodyLimit, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use axum::Router;
 use flate2::read::MultiGzDecoder;
 use metadata_contract::{
     AuthorIdentifier, AuthorMetadata, AuthorSource, Classification, ClassificationScheme, ClassificationSource, EditionIdentityMatch, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, EditionTitleMatch,
-    IsbnClassificationResult, LookupStatus, MAX_EDITION_QUERIES_PER_REQUEST, MAX_ISBNS_PER_REQUEST, MAX_REQUEST_BYTES, RichIsbnMetadataResult, RichWorkMetadataMatch, SnapshotDescription, SubjectHeading, WorkClassificationMatch,
+    IsbnClassificationResult, LookupStatus, RichIsbnMetadataResult, RichWorkMetadataMatch, SnapshotDescription, SubjectHeading, WorkClassificationMatch, MAX_EDITION_QUERIES_PER_REQUEST, MAX_ISBNS_PER_REQUEST, MAX_REQUEST_BYTES,
 };
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 use rayon::prelude::*;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -21,20 +21,14 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SCHEMA_VERSION: i64 = 1;
-const BUILDER_SCHEMA_VERSION: i64 = 10;
+const BUILDER_SCHEMA_VERSION: i64 = 11;
 const DESCRIPTION_SCHEMA_VERSION: i64 = 1;
 const DESCRIPTION_BUILDER_VERSION: i64 = 3;
-const MAX_REVERSE_TITLE_CANDIDATES: usize = 4_096;
-
-// One row beyond the public candidate ceiling is enough to prove that the
-// result is truncated without allowing a broad title to build an unbounded
-// intermediate result.
-const MAX_EDITION_IDENTITY_REVIEW_CANDIDATES: usize = 256;
 const MAX_TITLE_SUBSTRINGS_PER_QUERY: usize = 64;
 // Scheme 1 is reserved for legacy Dewey rows; readers ignore it.
 const LCC_SCHEME: i64 = 2;
@@ -98,6 +92,8 @@ impl std::error::Error for MetadataError {}
 #[derive(Default, Deserialize)]
 struct EditionRecord {
     key: String,
+    #[serde(default, deserialize_with = "deserialize_optional_description")]
+    description: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_string")]
     title: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_string")]
@@ -158,7 +154,7 @@ struct KeyReference {
 mod query;
 
 pub(crate) use build::enrichment::{attach_authors, attach_rich_fields, classification_similarity_keys, load_embedded_work_descriptions, load_work_bisac_classifications, load_work_descriptions_from_table, lookup_one, sql_placeholders};
-pub use build::import::{import_description_snapshot, import_snapshot, import_subject_editions};
+pub use build::import::{import_description_snapshot, import_edition_descriptions, import_snapshot, import_subject_editions};
 pub(crate) use build::openlibrary::{
     building_path, deserialize_key_references, deserialize_optional_description, deserialize_optional_string, deserialize_string_array, deserialize_work_author_references, dump_date, error, open_description_pool, open_library_id,
     valid_dump_date, valid_open_library_description,
@@ -174,8 +170,6 @@ pub(crate) use build::authority_ingestion::ingest_wikidata_authorities;
 mod build;
 mod schema;
 mod snapshot;
-pub use build::{BuildReport, EditionIndexReport, build_answers, build_answers_incremental, extend_edition_index, import_authorities, index_work_classifications, reclassify_answers};
+pub use build::{build_answers, build_answers_incremental, extend_edition_index, import_authorities, index_work_classifications, index_work_editions, index_work_search, reclassify_answers, BuildReport, EditionIndexReport};
 mod serve;
-pub use serve::MetadataService;
-mod crawl;
-pub use crawl::crawl;
+pub use serve::{MetadataService, WorkLookup};

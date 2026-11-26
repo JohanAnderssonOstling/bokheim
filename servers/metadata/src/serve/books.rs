@@ -9,14 +9,16 @@ use crate::serve::resolution::{authoritative_author_resolutions, match_author_re
 use crate::serve::{alternatives, related_isbn};
 use crate::{MetadataError, MetadataService};
 use book_model::{AgentId, BookMetadata, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE};
-use metadata_contract::audible::{LookupRequest, LookupResponse, LookupStatus as AudibleStatus};
+use metadata_contract::audible::{LookupResponse, LookupStatus as AudibleStatus};
 use metadata_contract::books::{BookEnrichment, BookEnrichmentFailure, BookEnrichmentRequest, BookEnrichmentResponse, BookEnrichmentStatus, BookFacts, TitleReading, MAX_BOOKS_PER_REQUEST};
-use metadata_contract::{ClassificationMethod, ClassificationScheme, EditionClassificationConsensus, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, LookupStatus, RichIsbnMetadataResult, RichWorkMetadataMatch, MAX_ISBNS_PER_REQUEST};
+use metadata_contract::{
+    ClassificationMethod, ClassificationScheme, EditionClassificationConsensus, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, LookupStatus, RichIsbnMetadataResult, RichWorkMetadataMatch, MAX_ISBNS_PER_REQUEST,
+};
 use std::collections::{BTreeSet, HashMap};
-use subject_projection::{BISAC_SYSTEM_ID, LCC_SYSTEM_ID, has_unified_subjects};
+use subject_projection::{has_unified_subjects, BISAC_SYSTEM_ID, LCC_SYSTEM_ID};
 
 /// Bump whenever a lookup or merge rule below changes; clients ask again.
-pub const POLICY: &str = "books_v31";
+pub const POLICY: &str = "books_v40";
 
 // A work union larger than this is replaced by edition consensus when the
 // consensus is smaller.
@@ -89,10 +91,10 @@ impl MetadataService {
                     && !(subject.authority().is_some_and(|authority| matches!(authority.to_ascii_lowercase().as_str(), "lcc" | "bisac" | "ddc" | "unified")) && BORROWED_CLASSIFICATION_SOURCES.contains(&subject.source()))
             });
             found |= record.book.subjects.len() != previous_count;
-            found |= failures.keep(Lookup, self.classify_new_isbns(&mut record, &mut checked, &mut lookups).await).unwrap_or(false);
+            found |= failures.keep(Lookup, self.classify_new_isbns(&mut record, &mut checked, &mut lookups, facts.needs_description).await).unwrap_or(false);
             if !has_specific_lcc(&record.book) && !record.title.trim().is_empty() {
                 found |= failures.keep(Lookup, self.apply_edition_identity(&mut record, &facts.readings).await).unwrap_or(false);
-                found |= failures.keep(Lookup, self.classify_new_isbns(&mut record, &mut checked, &mut lookups).await).unwrap_or(false);
+                found |= failures.keep(Lookup, self.classify_new_isbns(&mut record, &mut checked, &mut lookups, facts.needs_description).await).unwrap_or(false);
             }
             // Raw headings are a fallback only without usable LCC, including
             // supported sibling subtrees stored as unified assignments.
@@ -101,9 +103,18 @@ impl MetadataService {
 
         let isbns = canonical_isbns(&record);
         if !isbns.is_empty() {
-            failures.keep(Lookup, self.lookup_isbns(&isbns, &mut lookups).await);
+            failures.keep(Lookup, self.lookup_isbns(&isbns, &mut lookups, facts.needs_description).await);
             found |= failures.keep(Lookup, apply_authors(&mut record, &isbns, &lookups)).unwrap_or(false);
-            if let Some(description) = unique_description(&isbns, &lookups) {
+            if facts.needs_description {
+                if let Some(description) = unique_description(&isbns, &lookups) {
+                    record.description = description;
+                    found = true;
+                }
+            }
+        }
+
+        if facts.needs_description && record.description.is_empty() {
+            if let Some(description) = failures.keep(Lookup, self.work_description(&record, &facts.readings).await).flatten() {
                 record.description = description;
                 found = true;
             }
@@ -112,10 +123,10 @@ impl MetadataService {
         let mut toc = None;
         let mut cover = None;
         if let Some(request) = facts.recording.filter(|_| facts.audiobook) {
-            let response = audible_lookup(request).await;
+            let response = self.state.audible.lookup(request).await;
             match response.status {
                 AudibleStatus::Supported => {
-                    if let Some(enrichment) = failures.keep(Lookup, apply_audible(&mut record, &response)) {
+                    if let Some(enrichment) = failures.keep(Lookup, apply_audible(&mut record, &response, facts.needs_description)) {
                         toc = enrichment.toc;
                         found = true;
                         if facts.needs_cover {
@@ -151,11 +162,11 @@ impl MetadataService {
 
     /// Looks up every ISBN not already in `lookups`. Retains completed batches
     /// even when a later batch fails; other enrichment stages can use them.
-    async fn lookup_isbns(&self, isbns: &[String], lookups: &mut Lookups) -> Result<(), MetadataError> {
+    async fn lookup_isbns(&self, isbns: &[String], lookups: &mut Lookups, needs_description: bool) -> Result<(), MetadataError> {
         let missing = isbns.iter().filter(|isbn| !lookups.contains_key(*isbn)).cloned().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
         for chunk in missing.chunks(MAX_ISBNS_PER_REQUEST) {
             let request = chunk.to_vec();
-            let response = run_database(self.clone(), move |service| service.enrich_rich(request)).await.map_err(|error| MetadataError(format!("lookup worker failed: {error}")))??;
+            let response = run_database(self.clone(), move |service| service.enrich_rich(request, needs_description)).await.map_err(|error| MetadataError(format!("lookup worker failed: {error}")))??;
             for result in response {
                 let requested = book_model::canonical_isbn(&result.requested_isbn).unwrap_or_else(|| result.requested_isbn.clone());
                 if let Some(isbn13) = result.canonical_isbn13.as_ref().filter(|isbn13| isbn13.as_str() != requested.as_str()) {
@@ -172,7 +183,7 @@ impl MetadataService {
 
     /// Classifies the book by its ISBNs not yet in `checked`: printed reference
     /// ISBNs first, then its own. Stops only after a specific LCC resolves.
-    async fn classify_new_isbns(&self, record: &mut BookRecord, checked: &mut BTreeSet<String>, lookups: &mut Lookups) -> Result<bool, MetadataError> {
+    async fn classify_new_isbns(&self, record: &mut BookRecord, checked: &mut BTreeSet<String>, lookups: &mut Lookups, needs_description: bool) -> Result<bool, MetadataError> {
         if has_specific_lcc(&record.book) {
             return Ok(false);
         }
@@ -182,14 +193,14 @@ impl MetadataService {
         if isbns.is_empty() {
             return Ok(false);
         }
-        self.apply_isbn_classifications(record, &isbns, lookups).await
+        self.apply_isbn_classifications(record, &isbns, lookups, needs_description).await
     }
 
     /// Classifications from the book's ISBNs. Printed reference ISBNs
     /// contribute only their classifications; other alternatives count only
     /// where two editions agree.
-    async fn apply_isbn_classifications(&self, record: &mut BookRecord, isbns: &[String], lookups: &mut Lookups) -> Result<bool, MetadataError> {
-        self.lookup_isbns(isbns, lookups).await?;
+    async fn apply_isbn_classifications(&self, record: &mut BookRecord, isbns: &[String], lookups: &mut Lookups, needs_description: bool) -> Result<bool, MetadataError> {
+        self.lookup_isbns(isbns, lookups, needs_description).await?;
         let exact_isbns = record.book.identifiers.iter().filter(|id| id.scheme() == &Scheme::Isbn).filter_map(|id| book_model::from_metadata_value(id.value())).collect::<BTreeSet<_>>();
         let reference_isbns = related_isbn::lookup_candidates(&record.book.identifiers).into_iter().collect::<BTreeSet<_>>();
         let mut consensus = EditionClassificationConsensus::default();
@@ -243,17 +254,29 @@ impl MetadataService {
         Ok(true)
     }
 
-    /// Title/author edition matching after the book's ISBNs found no subject.
+    /// Work descriptions do not require a classification, edition or ISBN.
+    async fn work_description(&self, record: &BookRecord, readings: &[TitleReading]) -> Result<Option<String>, MetadataError> {
+        let isbns = canonical_isbns(record);
+        let query = identity_query(record);
+        let mut queries = vec![query.clone()];
+        queries.extend(alternatives::queries(&query, readings));
+        run_database(self.clone(), move |service| service.state.works.as_ref().map(|works| works.description(&queries, &isbns)).transpose().map(Option::flatten))
+            .await
+            .map_err(|error| MetadataError(format!("description worker failed: {error}")))?
+    }
+
+    async fn resolve_identity_query(&self, query: &EditionIdentityQuery) -> Result<EditionIdentityResult, MetadataError> {
+        let request = vec![query.clone()];
+        let mut response = run_database(self.clone(), move |service| service.resolve_editions(request)).await.map_err(|error| MetadataError(format!("lookup worker failed: {error}")))??;
+        response.pop().filter(|result| result.query_id == query.query_id).ok_or_else(|| MetadataError("metadata response omitted the edition query".into()))
+    }
+
+    /// Work-scoped title/author recovery after the book's ISBNs found no subject.
     /// Adds an ISBN only when the evidence names one exact edition and the
     /// book has none.
     async fn apply_edition_identity(&self, record: &mut BookRecord, readings: &[TitleReading]) -> Result<bool, MetadataError> {
         let resource_isbns = canonical_isbns(record);
         let base = identity_query(record);
-        let alternative_queries = alternatives::queries(&base, readings);
-        let request = std::iter::once(base.clone()).chain(alternative_queries.iter().cloned()).collect();
-        let response = run_database(self.clone(), move |service| service.resolve_editions(request)).await.map_err(|error| MetadataError(format!("lookup worker failed: {error}")))??;
-        let results = response.into_iter().map(|result| (result.query_id.clone(), result)).collect::<HashMap<_, _>>();
-
         let supported = |query: &EditionIdentityQuery, result: &EditionIdentityResult| {
             result.sibling_subjects.as_ref().is_some_and(|consensus| !consensus.subjects.is_empty())
                 || alternatives::classifications(query, &resource_isbns, result).iter().any(|classification| match classification.scheme {
@@ -262,26 +285,22 @@ impl MetadataService {
                     _ => false,
                 })
         };
-        let mut result = results.get(&base.query_id);
-        let mut query = base.clone();
+        let mut query = base;
+        let mut result = self.resolve_identity_query(&query).await?;
         let mut used_alternative = false;
-        if !result.is_some_and(|result| supported(&query, result)) {
-            let missing_alternative = alternative_queries.iter().any(|alternative| !results.contains_key(&alternative.query_id));
-            for alternative in &alternative_queries {
-                if let Some(found) = results.get(&alternative.query_id).filter(|found| supported(alternative, found)) {
-                    query = alternative.clone();
-                    result = Some(found);
+        if !supported(&query, &result) {
+            for alternative in alternatives::queries(&query, readings) {
+                let found = self.resolve_identity_query(&alternative).await?;
+                if supported(&alternative, &found) {
+                    query = alternative;
+                    result = found;
                     used_alternative = true;
                     break;
                 }
             }
-            if !used_alternative && missing_alternative {
-                result = None;
-            }
         }
-        let Some(result) = result else { return Err(MetadataError("metadata response omitted the edition query".to_owned())) };
 
-        let codes = alternatives::classifications(&query, &resource_isbns, result);
+        let codes = alternatives::classifications(&query, &resource_isbns, &result);
         if !codes.is_empty() {
             add_classification_subjects(record, &related_isbn::classification_record(codes))?;
             return Ok(true);
@@ -326,13 +345,9 @@ fn identity_query(record: &BookRecord) -> EditionIdentityQuery {
     }
 }
 
-async fn audible_lookup(request: LookupRequest) -> LookupResponse {
-    crate::serve::audible::client().lookup(request).await
-}
-
 /// Identifiers, publisher and chapters from the selected recording. The
 /// file's own identifiers of a scheme and its publishers always win.
-fn apply_audible(record: &mut BookRecord, response: &LookupResponse) -> Result<AudibleEnrichment, MetadataError> {
+fn apply_audible(record: &mut BookRecord, response: &LookupResponse, needs_description: bool) -> Result<AudibleEnrichment, MetadataError> {
     let candidate = response
         .candidates
         .iter()
@@ -351,7 +366,7 @@ fn apply_audible(record: &mut BookRecord, response: &LookupResponse) -> Result<A
             record.book.publishers.push(name.trim().to_owned());
         }
     }
-    if record.description.is_empty() {
+    if needs_description && record.description.is_empty() {
         if let Some(description) = candidate.description.as_deref().filter(|text| !text.trim().is_empty()) {
             record.description = description.to_owned();
         }
@@ -544,7 +559,7 @@ mod tests {
             book.identifiers.push(Identifier::new(isbn, Scheme::Isbn, Scope::Book).unwrap());
         }
         let record = BookRecord { metadata: book_model::BookDetails { title: title.to_owned(), subtitle: None, contributors: vec![author], book: book }, description: "File description.".to_owned() };
-        BookFacts { key: "0".to_owned(), record, audiobook: false, needs_cover: true, readings: Vec::new(), recording: None }
+        BookFacts { key: "0".to_owned(), record, needs_description: true, audiobook: false, needs_cover: true, readings: Vec::new(), recording: None }
     }
 
     fn service(directory: &std::path::Path) -> MetadataService {

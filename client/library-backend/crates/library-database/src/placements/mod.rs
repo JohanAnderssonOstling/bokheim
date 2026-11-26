@@ -2,7 +2,7 @@
 
 use crate::SqlParam;
 #[cfg(feature = "scanner")]
-use crate::import::ImportObservation;
+use crate::import::{ImportCommit, ImportContext, ImportObservation, PreparedInspection, admit_scanned_import};
 use crate::native::observations::forget_file;
 use crate::projection::{place_book, project_dirty};
 #[cfg(feature = "scanner")]
@@ -1468,6 +1468,8 @@ pub struct ScanDirectoryObservation {
 
 #[derive(Clone, Debug)]
 pub struct ScanFileObservation {
+    pub directory_entry: bool,
+    pub physical_size_bytes: Option<u64>,
     pub directory: DirId,
     pub name: String,
     pub path: String,
@@ -1480,8 +1482,24 @@ pub struct InspectedFilesystemScan {
     pub readable: bool,
 }
 
+/// Database-prepared identities and metadata. The scanner persists proofs
+/// for these exact identities before returning the batch for admission.
+#[cfg(feature = "scanner")]
+pub struct PreparedFilesystemScan {
+    readable: bool,
+    books: Vec<(ImportCommit, PreparedInspection, ContentHash)>,
+}
+
+#[cfg(feature = "scanner")]
+impl PreparedFilesystemScan {
+    pub fn local_contents(&self) -> Vec<(BookId, ContentHash)> {
+        self.books.iter().map(|(import, _, proof)| (import.book_id, *proof)).collect()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ScannedBook {
+    pub physical_size_bytes: Option<u64>,
     pub source_identity: Option<PdfSourceIdentity>,
     pub audiobook_content_hash: Option<ContentHash>,
     pub byte_checksum: Option<ContentHash>,
@@ -1563,19 +1581,10 @@ impl Database {
         })
     }
 
-    /// Publish inspected books incrementally. Only the final, readable batch
-    /// may reconcile missing files. Concurrent edits exclude affected paths and
-    /// request one follow-up scan; unrelated observations still commit.
+    /// Resolve a complete inspection batch in one database request. Preparing
+    /// once keeps durable checksum proofs and admitted book identities aligned.
     #[cfg(feature = "scanner")]
-    pub fn apply_filesystem_scan_batch(
-        &self, snapshot: &mut ScanSnapshot, discovery: &FilesystemScan, inspected: InspectedFilesystemScan, complete: bool, matcher: Option<crate::ContributorNameMatcher>,
-    ) -> Result<ScanApplyResult, DatabaseError> {
-        let _call = ProfileSpan::new("scan_database_apply", "batch");
-        // Normalize metadata and serialize inspection data before acquiring
-        // the writer. Check concurrent edits under the writer so affected
-        // paths can wait for a follow-up without interrupting this pass.
-        let readable = discovery.readable && inspected.readable;
-        let reconcile_missing = complete && readable;
+    pub fn prepare_filesystem_scan_batch(&self, known: &[ScanKnownBook], inspected: InspectedFilesystemScan) -> Result<PreparedFilesystemScan, DatabaseError> {
         let preparation = ProfileSpan::new("database_batch_preparation", "batch");
         let prepared_books = inspected
             .books
@@ -1587,22 +1596,20 @@ impl Database {
                 drop(metadata);
                 let checksum = book.byte_checksum.or_else(|| if book.audiobook_content_hash.is_none() { book.book_id.content_hash() } else { None });
                 let identity_profile = ProfileSpan::new("database_identity_lookup", &book.name);
-                let identity = if let Some(content_hash) = book.audiobook_content_hash {
-                    let unchanged = snapshot.books.iter().find(|known| known.directory == book.directory && known.name == book.name && known.fingerprint == book.fingerprint).map(|known| known.book_id);
+                let (identity, proof) = if let Some(content_hash) = book.audiobook_content_hash {
+                    let unchanged = known.iter().find(|known| known.directory == book.directory && known.name == book.name && known.fingerprint == book.fingerprint).map(|known| known.book_id);
                     let known = match checksum {
                         Some(checksum) => self.book_for_local_content(checksum)?.or(unchanged),
                         None => unchanged,
                     };
-                    self.resolve_audiobook_content(content_hash, known)?
+                    (self.resolve_audiobook_content(content_hash, known)?, checksum.unwrap_or(content_hash))
                 } else {
-                    self.resolve_scanned_content(checksum.ok_or_else(|| DatabaseError::message("scanned bytes require a content checksum"))?, book.source_identity)?
+                    let checksum = checksum.ok_or_else(|| DatabaseError::message("scanned bytes require a content checksum"))?;
+                    (self.resolve_scanned_content(checksum, book.source_identity)?, checksum)
                 };
                 drop(identity_profile);
                 let prepared = prepared.with_identity(identity);
-                let catalog = ProfileSpan::new("catalog_lookup", &book.name);
-                let catalog_record = crate::catalog::import_record(book.book_id, format)?;
-                drop(catalog);
-                let import = crate::import::ImportCommit {
+                let import = ImportCommit {
                     source_identity: book.source_identity,
                     byte_checksum: checksum,
                     audiobook_content_hash: book.audiobook_content_hash,
@@ -1613,14 +1620,38 @@ impl Database {
                     size_bytes: book.size_bytes,
                     inspection_version: book.inspection_version,
                     inspection: None,
-                    published: library_model::PublishedStagedBook { name: book.name, relative_path: book.path, published: true, fingerprint: Some(book.fingerprint) },
+                    published: library_model::PublishedStagedBook { physical_size_bytes: book.physical_size_bytes, name: book.name, relative_path: book.path, published: true, fingerprint: Some(book.fingerprint) },
                     request_thumbnail: true,
                     restore_paths: Vec::new(),
                 };
-                Ok((import, prepared, catalog_record, checksum))
+                Ok((import, prepared, proof))
             })
             .collect::<Result<Vec<_>, DatabaseError>>()?;
         drop(preparation);
+        Ok(PreparedFilesystemScan { readable: inspected.readable, books: prepared_books })
+    }
+
+    /// Prepare and publish inspected observations through the same admission
+    /// boundary used when checksum proofs were prepared separately.
+    #[cfg(feature = "scanner")]
+    pub fn apply_filesystem_scan_batch(
+        &self, snapshot: &mut ScanSnapshot, discovery: &FilesystemScan, inspected: InspectedFilesystemScan, complete: bool, matcher: Option<crate::ContributorNameMatcher>,
+    ) -> Result<ScanApplyResult, DatabaseError> {
+        let prepared = self.prepare_filesystem_scan_batch(&snapshot.books, inspected)?;
+        self.apply_prepared_filesystem_scan_batch(snapshot, discovery, prepared, complete, matcher)
+    }
+
+    /// Publish prepared books incrementally. Only the final, readable batch
+    /// may reconcile missing files. Concurrent edits exclude affected paths and
+    /// request one follow-up scan; unrelated observations still commit.
+    #[cfg(feature = "scanner")]
+    pub fn apply_prepared_filesystem_scan_batch(
+        &self, snapshot: &mut ScanSnapshot, discovery: &FilesystemScan, prepared: PreparedFilesystemScan, complete: bool, matcher: Option<crate::ContributorNameMatcher>,
+    ) -> Result<ScanApplyResult, DatabaseError> {
+        let _call = ProfileSpan::new("scan_database_apply", "batch");
+        let readable = discovery.readable && prepared.readable;
+        let reconcile_missing = complete && readable;
+        let prepared_books = prepared.books;
         let mut next_guard = None;
         let waiting = ProfileSpan::new("database_writer_wait", "batch");
         let result = self.with_write_transaction(|transaction| {
@@ -1674,39 +1705,36 @@ impl Database {
             }
             project_dirty(transaction)?;
             drop(directories);
+            let mut context = ImportContext::default();
             let mut refreshed = HashSet::new();
             let mut pending = Vec::with_capacity(prepared_books.len());
             let mut pending_books = HashSet::new();
             let mut pending_names = HashSet::new();
-            let flush = |pending: &mut Vec<(ImportObservation, BookId, DirId, Option<ContentHash>)>| -> Result<(), DatabaseError> {
+            let flush = |pending: &mut Vec<(ImportObservation, BookId, Option<ContentHash>)>, context: &mut ImportContext| -> Result<(), DatabaseError> {
                 if pending.is_empty() {
                     return Ok(());
                 }
                 // File observations require live placement rows. Project the
                 // admitted metadata together before recording those observations.
-                project_dirty(transaction)?;
-                for (observation, book_id, directory, checksum) in pending.drain(..) {
+                crate::projection::project_dirty_with_contributors(transaction, &mut context.contributors)?;
+                for (observation, book_id, checksum) in pending.drain(..) {
                     observation.record(transaction)?;
                     if !pending_book_work.contains(&book_id) {
                         transaction.scanner_acknowledge_observed_book(&book_id)?;
                     }
-                    let observation = ProfileSpan::new("checksum_observation", "book");
-                    if let Some(checksum) = checksum {
-                        crate::content_identity::observe_content(transaction, book_id, directory, checksum)?;
-                    }
-                    drop(observation);
                     if checksum.is_some() && crate::content_identity::expected_hash(transaction, book_id)?.is_none() {
                         transaction.execute("UPDATE book_transfer SET upload_checksum=?2 WHERE content_hash=?1 AND upload_id IS NOT NULL", rusqlite::params![book_id, checksum])?;
                     }
                 }
                 Ok(())
             };
-            'books: for (import, prepared, catalog_record, checksum) in prepared_books {
+            'books: for (import, prepared, _) in prepared_books {
+                let checksum = import.byte_checksum;
                 let _book = ProfileSpan::new("book_import", &import.file_name);
                 if scan_path_in(&excluded_paths, &import.published.relative_path) {
                     continue;
                 }
-                if directory_relative_path(transaction, &import.parent_id)?.is_none() {
+                if !context.directory_is_live(transaction, &import.parent_id)? {
                     needs_rescan = true;
                     continue;
                 }
@@ -1728,7 +1756,7 @@ impl Database {
                 // Repeated identities need their original projected facts;
                 // repeated destination names need live collision checks.
                 if pending_books.contains(&book_id) || pending_names.contains(&name) {
-                    flush(&mut pending)?;
+                    flush(&mut pending, &mut context)?;
                     pending_books.clear();
                     pending_names.clear();
                 }
@@ -1740,7 +1768,7 @@ impl Database {
                     }
                     // Finish observations before removing a placement that an
                     // earlier book in this batch may still refer to.
-                    flush(&mut pending)?;
+                    flush(&mut pending, &mut context)?;
                     pending_books.clear();
                     pending_names.clear();
                     remove_placement(transaction, &old.directory, &old.book_id, None)?;
@@ -1748,18 +1776,14 @@ impl Database {
                     project_dirty(transaction)?;
                     forget_file(transaction, &old.directory.to_string(), &old.book_id)?;
                 }
-                let directory = import.parent_id;
                 let admission = ProfileSpan::new("book_admission", "book");
-                let (_, observation) = crate::import::admit_import(transaction, import, Some(prepared), matcher, None)?;
+                let observation = admit_scanned_import(transaction, import, prepared, matcher, &mut context)?;
                 drop(admission);
-                pending.push((observation, book_id, directory, checksum));
+                pending.push((observation, book_id, checksum));
                 pending_books.insert(book_id);
                 pending_names.insert(name);
-                if let Some(record) = catalog_record {
-                    crate::enrichment::facts::record_catalog_answer(transaction, &book_id, record)?;
-                }
             }
-            flush(&mut pending)?;
+            flush(&mut pending, &mut context)?;
             let finalization = ProfileSpan::new("scan_reconciliation", "batch");
             if complete {
                 let known: HashMap<_, _> = snapshot.placements.iter().map(|old| ((old.directory, old.name.as_str()), old)).collect();
@@ -1771,6 +1795,21 @@ impl Database {
                         && (!old.downloaded || old.projected_path.as_deref().map(|path| path.trim_matches('/')) != Some(file.path.trim_matches('/')))
                     {
                         crate::native::observations::record_file(transaction, &file.directory.to_string(), &old.book_id, &file.path, old.fingerprint, crate::native::observations::Revision::Retained)?;
+                    }
+                }
+                {
+                    let mut sizes = transaction.prepare_cached(
+                        "UPDATE local_file_projection SET physical_size_bytes=?3
+                         WHERE content_hash=?1 AND dir_id=?2 AND relative_path='/'||ltrim(?4,'/') AND physical_size_bytes IS NOT ?3
+                         AND EXISTS(SELECT 1 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE b.content_hash=?1 AND bd.dir_id=?2 AND bd.local_hash=?5)",
+                    )?;
+                    for file in &discovery.files {
+                        if scan_path_in(&excluded_paths, &file.path) { continue; }
+                        if let Some(size) = file.physical_size_bytes {
+                            if let Some(old) = known.get(&(file.directory, file.name.as_str())).filter(|old| old.fingerprint == Some(file.fingerprint)) {
+                                sizes.execute(rusqlite::params![old.book_id, file.directory.to_string(), i64::try_from(size).map_err(DatabaseError::operation)?, file.path, file.fingerprint.to_le_bytes()])?;
+                            }
+                        }
                     }
                 }
                 if reconcile_missing && !needs_rescan {
@@ -1932,6 +1971,21 @@ impl Database {
         let mut seen = HashSet::new();
         paths.retain(|path| seen.insert(path.clone()));
         Ok(paths)
+    }
+
+    /// Sum observed physical files, counting a physical path once. Unknown
+    /// sizes are filled by the next normal scan rather than a settings walk.
+    pub fn local_book_storage_bytes(&self) -> Result<Option<u64>, DatabaseError> {
+        let (missing, total): (i64, i64) = self.connection.query_row(
+            "SELECT COALESCE(SUM(bytes IS NULL),0),COALESCE(SUM(bytes),0) FROM (
+                SELECT p.relative_path,MAX(p.physical_size_bytes) AS bytes
+                FROM local_file_projection p JOIN book b ON b.content_hash=p.content_hash
+                WHERE b.deleted_at IS NULL GROUP BY p.relative_path
+            )",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((missing == 0).then_some(total as u64))
     }
 
     /// Load cached PDF metadata for the selected placement without checking the file.
@@ -2131,6 +2185,11 @@ database_methods! {
     arguments () = ();
     execute database, arguments => database.scan_content_revision();
 
+    #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
+    fn prepare_filesystem_scan_batch(known: &[ScanKnownBook], inspected: InspectedFilesystemScan) -> PreparedFilesystemScan;
+    arguments (Vec<ScanKnownBook>, InspectedFilesystemScan) = (known.to_vec(), inspected);
+    execute database, arguments => database.prepare_filesystem_scan_batch(&arguments.0, arguments.1);
+
     #[cfg(feature = "scanner")]
     fn scan_snapshot(pdf_inspection_version: i64) -> ScanSnapshot;
     arguments (i64,) = (pdf_inspection_version,);
@@ -2160,6 +2219,10 @@ database_methods! {
     arguments () = ();
     execute database, arguments => database.local_book_paths();
 
+    fn local_book_storage_bytes() -> Option<u64>;
+    arguments () = ();
+    execute database, arguments => database.local_book_storage_bytes();
+
     fn local_pdf_metadata(hash: &BookId, relative_path: &str) -> Option<pdf_view_common::PdfReaderMetadata>;
     arguments (BookId, String,) = (hash.clone(), relative_path.to_owned(),);
     execute database, arguments => database.local_pdf_metadata(&arguments.0, &arguments.1);
@@ -2179,6 +2242,21 @@ impl crate::DatabaseClient {
         let (next, result) = self
             .run(move |database| {
                 let result = database.apply_filesystem_scan_batch(&mut next, &discovery, inspected, complete, matcher)?;
+                Ok((next, result))
+            })
+            .await?;
+        *snapshot = next;
+        Ok(result)
+    }
+
+    pub async fn apply_prepared_filesystem_scan_batch(
+        &self, snapshot: &mut ScanSnapshot, discovery: &FilesystemScan, prepared: PreparedFilesystemScan, complete: bool, matcher: Option<crate::ContributorNameMatcher>,
+    ) -> Result<ScanApplyResult, DatabaseError> {
+        let mut next = snapshot.clone();
+        let discovery = discovery.clone();
+        let (next, result) = self
+            .run(move |database| {
+                let result = database.apply_prepared_filesystem_scan_batch(&mut next, &discovery, prepared, complete, matcher)?;
                 Ok((next, result))
             })
             .await?;

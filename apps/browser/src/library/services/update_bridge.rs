@@ -1,15 +1,18 @@
 //! Translates backend library updates into GPUI events.
 
-use library_backend::{BookDownloadStatus, DownloadState};
-use std::collections::{HashMap, HashSet};
+use library_backend::{BackendError, BookDownloadStatus, DownloadState, ImportFailure};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
-use gpui::{AppContext, Context, Entity, EventEmitter, Subscription, Task, WeakEntity};
+use futures_util::future::LocalBoxFuture;
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Subscription, Task, WeakEntity, Window};
 use library_backend::LibraryClient;
-use library_model::{BookFileActivity, LibraryBusyReason, LibraryUpdate};
+use library_model::{BookFileActivity, ImportProgress, LibraryBusyReason, LibraryUpdate};
 use sync_common::BookId;
-use ui_components::Failure;
+use ui_components::{BrowserDownloadPhase, BrowserDownloadUpdate, BrowserDownloads, Failure};
 use ui_text::text;
+
+type ImportOperation = LocalBoxFuture<'static, Result<Vec<ImportFailure>, BackendError>>;
 
 /// Rows seed availability until the download stream publishes a newer state.
 pub(crate) fn initial_download_state(downloaded: bool, requested: bool) -> DownloadState {
@@ -57,6 +60,8 @@ pub(crate) struct LibraryUpdateBridge {
     _updates: Task<()>,
     _book_count_request: Option<Task<()>>,
     import_task: Option<Task<()>>,
+    pending_imports: VecDeque<ImportOperation>,
+    import_feedback: BrowserDownloads,
 }
 
 impl EventEmitter<LibraryContentsChanged> for LibraryUpdateBridge {}
@@ -129,6 +134,8 @@ impl LibraryUpdateBridge {
             _updates: task,
             _book_count_request: None,
             import_task: None,
+            pending_imports: VecDeque::new(),
+            import_feedback: BrowserDownloads::default(),
         };
         bridge.refresh_book_count(cx);
         bridge
@@ -138,7 +145,37 @@ impl LibraryUpdateBridge {
     /// the library UI while the picker or background import is running.
     pub(crate) fn set_import_task(&mut self, task: Option<Task<()>>, cx: &mut Context<Self>) {
         self.import_task = task;
+        self.start_imports(cx);
         cx.emit(LibraryFileActionsChanged);
+    }
+
+    pub(crate) fn enqueue_import(&mut self, operation: ImportOperation, cx: &mut Context<Self>) {
+        let waiting = self.importing();
+        self.pending_imports.push_back(operation);
+        if waiting {
+            let owner = cx.entity_id();
+            let message = format!(text!(browse::queued_imports), count = self.pending_imports.len());
+            cx.with_window(owner, |window, cx| crate::services::notify_info("library-import-queued", message, window, cx));
+        }
+        self.start_imports(cx);
+        cx.emit(LibraryFileActionsChanged);
+    }
+
+    fn start_imports(&mut self, cx: &mut Context<Self>) {
+        if self.import_task.is_some() || self.book_file_activity.importing() || self.files_busy() || self.pending_imports.is_empty() {
+            return;
+        }
+        self.import_task = Some(cx.spawn(async move |bridge, cx| {
+            while let Some(operation) = bridge.update(cx, |bridge, _| bridge.pending_imports.pop_front()).ok().flatten() {
+                let result = operation.await;
+                let _ = bridge.update_in(cx, |_, window, cx| match result {
+                    Ok(failures) if !failures.is_empty() => crate::services::notify_warning("library-import", failures.iter().map(crate::services::import_failure_message).collect::<Vec<_>>().join("\n"), window, cx),
+                    Ok(_) => {}
+                    Err(error) => crate::services::notify_error("library-import", ui_components::user_facing_error(&error, text!(browse::could_not_import_items)), window, cx),
+                });
+            }
+            let _ = bridge.update(cx, |bridge, cx| bridge.set_import_task(None, cx));
+        }));
     }
 
     pub(crate) fn busy_reason(&self) -> Option<LibraryBusyReason> {
@@ -208,7 +245,7 @@ impl LibraryUpdateBridge {
     }
 
     pub(crate) fn importing(&self) -> bool {
-        self.import_task.is_some() || self.book_file_activity.importing()
+        self.import_task.is_some() || !self.pending_imports.is_empty() || self.book_file_activity.importing()
     }
 
     pub(crate) fn downloads_blocked(&self) -> bool {
@@ -229,9 +266,9 @@ impl LibraryUpdateBridge {
         } else {
             self.download_events.remove(&book_id);
         }
-        // Cards update immediately; listings batch availability changes so bulk
-        // downloads do not rebuild the grid once per completed file.
-        if matches!(state, DownloadState::Downloaded | DownloadState::NotDownloaded) && self.download_invalidation.is_none() {
+        // Cards update immediately; listings batch queued and completed changes
+        // so folder controls show durable requests without rebuilding per file.
+        if !matches!(state, DownloadState::Downloading(_)) && self.download_invalidation.is_none() {
             let timer = cx.background_executor().timer(Duration::from_millis(200));
             self.download_invalidation = Some(cx.spawn(async move |bridge, cx| {
                 timer.await;
@@ -264,13 +301,33 @@ impl LibraryUpdateBridge {
         }));
     }
 
+    fn show_import_progress(&mut self, progress: Option<ImportProgress>, window: &mut Window, cx: &mut App) {
+        let (name, phase, detail) = match progress {
+            Some(ImportProgress::Copying { name, copied_bytes, total_bytes }) => (name, BrowserDownloadPhase::Transferring, Some(crate::services::download_byte_progress(copied_bytes, Some(total_bytes)))),
+            Some(ImportProgress::Importing { name }) => (name, BrowserDownloadPhase::Importing, None),
+            None => (String::new(), BrowserDownloadPhase::Dismissed, None),
+        };
+        let download = format!("library-import-{}", self.library.id());
+        let percent = detail.as_ref().and_then(|(percent, _)| *percent);
+        self.import_feedback.apply(BrowserDownloadUpdate { download: download.clone(), name, phase, percent, message: None }, window, cx);
+        if let Some((percent, detail)) = detail {
+            self.import_feedback.progress_detail(&download, percent, detail.into(), window, cx);
+        }
+    }
+
     fn apply(&mut self, batch: UpdateBatch, cx: &mut Context<Self>) {
         let UpdateBatch { contents, covers, downloads, scanning, .. } = batch;
+        if batch.import_progress.is_some() || batch.book_file_activity.is_some_and(|activity| !activity.importing()) {
+            let progress = if batch.book_file_activity.unwrap_or(self.book_file_activity).importing() { batch.import_progress } else { None };
+            let owner = cx.entity_id();
+            cx.with_window(owner, |window, cx| self.show_import_progress(progress, window, cx));
+        }
         if let Some(activity) = batch.book_file_activity {
             if self.book_file_activity != activity {
                 self.book_file_activity = activity;
                 cx.emit(LibraryFileActionsChanged);
             }
+            self.start_imports(cx);
         }
         if let Some(scanning) = scanning {
             self.scanning = Some(scanning);
@@ -317,6 +374,7 @@ struct UpdateBatch {
     download_failures: Vec<(BookId, Option<ui_components::Failure>)>,
     thumbnail_failure: Option<Option<Failure>>,
     scanning: Option<bool>,
+    import_progress: Option<ImportProgress>,
 }
 
 impl UpdateBatch {
@@ -337,6 +395,7 @@ impl UpdateBatch {
             }
             LibraryUpdate::Scanning(scanning) => self.scanning = Some(scanning),
             LibraryUpdate::BookFileActivity(activity) => self.book_file_activity = Some(activity),
+            LibraryUpdate::ImportProgress(progress) => self.import_progress = Some(progress),
             // These have their own subscribers and do not change book views.
             LibraryUpdate::CatalogImport { .. } | LibraryUpdate::SyncStatusChanged => {}
         }

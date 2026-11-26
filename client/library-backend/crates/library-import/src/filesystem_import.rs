@@ -1,16 +1,16 @@
 //! Native file and folder imports from filesystem paths or picker entries.
 //! Place external files on disk, then import them in place.
 
-use std::collections::HashMap;
-use std::fs;
+use std::collections::{BTreeMap, HashMap};
+use client_platform_runtime::filesystem as fs;
 use std::io::{self, Error};
 use std::path::{Path, PathBuf};
 
 use book_model::BookFormat;
-use filesystem_scanner::discovery::{audiobook_member, is_audiobook_folder, next_book_entry, supported};
+use filesystem_scanner::discovery::{audiobook_member, is_audiobook_folder_in_walk, next_book_entry, supported};
 use filesystem_scanner::ingestion::{ingest_audiobook_folder, ingest_file};
-use library_files::filesystem::{place_into_directory, walk};
-use library_model::PublishedStagedBook;
+use library_files::filesystem::{fingerprint, place_into_directory_with_progress, walk};
+use library_model::{ImportProgress, LibraryUpdate, PublishedStagedBook};
 use sync_common::DirId;
 
 use client_platform_runtime::executor::run_blocking;
@@ -37,7 +37,7 @@ impl LibraryImport<'_> {
         if !self.storage.assets().root_available() {
             return Err(BackendError::message("library storage is unavailable"));
         }
-        let root = PathBuf::from(&self.root).canonicalize()?;
+        let root = fs::canonicalize(Path::new(&self.root))?;
         Ok(self.storage.database().dir_path_components(&parent).await?.into_iter().fold(root, |path, component| path.join(component.name.as_str())))
     }
 
@@ -108,7 +108,7 @@ impl LibraryImport<'_> {
         } else {
             // Loose tracks and sidecars belong to their enclosing folder;
             // they are not standalone books when importing only its contents.
-            fs::read_dir(&payload)?.map(|entry| entry.map(|entry| entry.path())).collect::<io::Result<Vec<_>>>()?.into_iter().filter(|path| path.is_dir() || supported(path)).collect()
+            fs::read_dir(&payload)?.map(|entry| entry.map(|entry| entry.path())).collect::<io::Result<Vec<_>>>()?.into_iter().filter(|path| fs::is_dir(&path) || supported(path)).collect()
         };
         // Staging is on the destination filesystem: this publishes by rename,
         // without copying again, before book inspection starts.
@@ -123,10 +123,15 @@ impl LibraryImport<'_> {
         let mut remaining = Vec::new();
         let mut move_failures = Vec::new();
         for path in paths {
-            let already_here = path.canonicalize().ok().and_then(|path| path.parent().map(Path::to_owned)).as_deref() == Some(destination.as_path());
-            if moving && path.is_file() && supported(&path) && !already_here {
+            let already_here = fs::canonicalize(&path).ok().and_then(|path| path.parent().map(Path::to_owned)).as_deref() == Some(destination.as_path());
+            if moving && fs::is_file(&path) && supported(&path) && !already_here {
                 if let Err(error) = self.move_book_from_path(parent, &path).await {
                     move_failures.push(failure(&path, &error));
+                }
+            } else if moving && fs::is_dir(&path) && !already_here {
+                match self.move_folder_from_path(parent, &path).await {
+                    Ok(failures) => move_failures.extend(failures),
+                    Err(error) => move_failures.push(failure(&path, &error)),
                 }
             } else {
                 remaining.push(path);
@@ -139,19 +144,56 @@ impl LibraryImport<'_> {
         self.place_and_import_paths(parent, paths, moving, move_failures).await
     }
 
+    /// Keep the external folder until every book has been registered. A failed
+    /// import or a changed source leaves the original available for retry.
+    async fn move_folder_from_path(&self, parent: DirId, source: &Path) -> Result<Vec<ImportFailure>, BackendError> {
+        let source = source.to_owned();
+        let revision = run_blocking({
+            let source = source.clone();
+            move || folder_revision(&source)
+        })
+        .await
+        .map_err(BackendError::operation)??;
+        let mut failures = self.place_and_import_paths(parent, vec![source.clone()], false, Vec::new()).await?;
+        if failures.is_empty() {
+            let cleanup = run_blocking({
+                let source = source.clone();
+                move || {
+                    if folder_revision(&source)? != revision {
+                        return Err(Error::other("source folder changed during import; original folder retained"));
+                    }
+                    fs::remove_dir_all(source)
+                }
+            })
+            .await
+            .map_err(BackendError::operation)?;
+            if let Err(error) = cleanup {
+                failures.push(failure(&source, &BackendError::from(error)));
+            }
+        }
+        Ok(failures)
+    }
+
     /// Publish completed picker copies before inspection so failed books remain
     /// available for retry, while external file moves keep their rollback path.
     async fn place_and_import_paths(&self, parent: DirId, paths: Vec<PathBuf>, moving: bool, prior_failures: Vec<ImportFailure>) -> Result<Vec<ImportFailure>, BackendError> {
         let destination = self.import_destination(parent).await?;
-        let root = PathBuf::from(&self.root).canonicalize()?;
+        let root = fs::canonicalize(Path::new(&self.root))?;
         let destination_relative = destination.strip_prefix(&root).map_err(BackendError::operation)?.to_owned();
         let occupied = self.storage.database().shared_occupied_file_names(&parent).await?;
         // Place the complete selection on disk before inspecting any books.
+        let updates = self.events.updates.clone();
         let (placed, mut failures) = run_blocking(move || {
             let mut placed = Vec::new();
             let mut failures = Vec::new();
             for path in paths {
-                let result = if path.is_dir() || supported(&path) { place_into_directory(&path, &destination, &occupied, moving) } else { Err(io::Error::other("not a supported book or folder")) };
+                let result = if fs::is_dir(&path) || supported(&path) {
+                    place_into_directory_with_progress(&path, &destination, &occupied, moving, &mut |path, copied_bytes, total_bytes| {
+                        updates.publish(LibraryUpdate::ImportProgress(ImportProgress::Copying { name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), copied_bytes, total_bytes }));
+                    })
+                } else {
+                    Err(io::Error::other("not a supported book or folder"))
+                };
                 match result {
                     Ok(path) => placed.push(path),
                     Err(error) => failures.push(failure(&path, &BackendError::from(error))),
@@ -218,14 +260,15 @@ impl LibraryImport<'_> {
 
     async fn import_file_in_place(&self, parent: DirId, root: &Path, relative: &Path) -> Result<(), BackendError> {
         let name = file_name(relative)?;
+        self.report_importing(name);
         let path = root.join(relative);
-        let (import, ingested) = if path.is_dir() {
+        let (import, ingested) = if fs::is_dir(&path) {
             validate_import_destination(self.storage.database(), &parent).await?;
             let import = ValidatedImport { parent_id: parent, file_name: filenames::validate_component(name)?, format: BookFormat::Mp3Folder };
-            (import, ingest_audiobook_folder(path, name.to_owned()).await?)
+            (import, ingest_audiobook_folder(path.clone(), name.to_owned()).await?)
         } else {
             let import = self.validate_import(&parent, name).await?;
-            (import, ingest_file(path, name.to_owned(), &*self.cpu).await?)
+            (import, ingest_file(path.clone(), name.to_owned(), &*self.cpu).await?)
         };
 
         let byte_checksum = ingested.book_id.content_hash().ok_or_else(|| BackendError::message("imported bytes have no checksum"))?;
@@ -238,13 +281,18 @@ impl LibraryImport<'_> {
         let identity = content.book_id;
         self.storage.assets().remember_local_content(identity, ingested.byte_checksum.unwrap_or(byte_checksum))?;
         let _lease = self.lease_import_content(&content).await?;
+        let physical_size_bytes = if import.format == BookFormat::Mp3Folder {
+            Some(client_platform_runtime::executor::run_blocking(move || library_files::filesystem::directory_bytes(&path)).await.map_err(BackendError::operation)??)
+        } else {
+            Some(ingested.size_bytes)
+        };
         // A concurrent folder move must not register these bytes at another path.
         validate_import_destination(self.storage.database(), &parent).await?;
         let placement = self.storage.database().native_book_path(parent, name).await?.ok_or_else(|| BackendError::message("destination folder no longer exists"))?;
         if Path::new(placement.as_str().trim_start_matches('/')) != relative {
             return Err(BackendError::message("destination folder changed during import"));
         }
-        let published = PublishedStagedBook { name: name.to_owned(), relative_path: placement.to_string(), published: true, fingerprint: Some(ingested.fingerprint) };
+        let published = PublishedStagedBook { physical_size_bytes, name: name.to_owned(), relative_path: placement.to_string(), published: true, fingerprint: Some(ingested.fingerprint) };
         self.commit_import(import, content, Some(ingested.inspection), published).await
     }
 }
@@ -255,17 +303,34 @@ struct Inventory {
     failures: Vec<(PathBuf, String)>,
 }
 
+fn folder_revision(root: &Path) -> io::Result<BTreeMap<PathBuf, Option<u64>>> {
+    if !fs::symlink_metadata(root)?.is_dir() {
+        return Err(Error::other("source is not a regular folder"));
+    }
+    let mut revision = BTreeMap::new();
+    let mut entries = walk(root);
+    while let Some(entry) = entries.next() {
+        let entry = entry?;
+        if entry.is_symlink() || !(entry.is_dir() || entry.is_file()) {
+            return Err(Error::other("cannot move symbolic links or special files"));
+        }
+        revision.insert(entry.path().to_owned(), if entry.is_file() { Some(fingerprint(entry.path())?) } else { None });
+    }
+    Ok(revision)
+}
+
 fn inventory(root: &Path, placed: &[PathBuf]) -> Result<Inventory, BackendError> {
     let mut directories = Vec::new();
     let mut files = Vec::new();
     let mut failures = Vec::new();
     for path in placed {
         let relative = path.strip_prefix(root).map_err(BackendError::operation)?.to_owned();
-        if path.is_file() {
+        if fs::is_file(&path) {
             files.push(relative);
             continue;
         }
-        match is_audiobook_folder(path) {
+        let mut walk = walk(path);
+        match is_audiobook_folder_in_walk(&mut walk, path) {
             Ok(true) => {
                 files.push(relative);
                 continue;
@@ -276,12 +341,11 @@ fn inventory(root: &Path, placed: &[PathBuf]) -> Result<Inventory, BackendError>
                 continue;
             }
         }
-        let mut walk = walk(path);
         while let Some(entry) = next_book_entry(&mut walk) {
             let entry = entry?;
             let relative = entry.path().strip_prefix(root).map_err(BackendError::operation)?.to_owned();
             if entry.is_dir() {
-                match is_audiobook_folder(entry.path()) {
+                match is_audiobook_folder_in_walk(&mut walk, entry.path()) {
                     Ok(true) => {
                         files.push(relative);
                         walk.skip_current_dir();
@@ -314,7 +378,7 @@ fn discard_incomplete_audiobooks(payload: &Path, failed_members: &[PathBuf]) -> 
         let mut discarded = false;
         for relative in candidates {
             let path = payload.join(relative);
-            if !path.is_dir() || !failed_members.iter().any(|member| member.starts_with(&path)) {
+            if !fs::is_dir(&path) || !failed_members.iter().any(|member| member.starts_with(&path)) {
                 continue;
             }
             if path == payload {
@@ -372,7 +436,7 @@ mod tests {
     async fn importer(root: &Path) -> std::sync::Arc<tokio::sync::RwLock<LibraryState>> {
         let database = DatabaseClient::open(":memory:", &BackendExecutor::new().unwrap()).await.unwrap();
         database.initialize_library().await.unwrap();
-        let assets = AssetStore::open(root.to_str().unwrap()).unwrap();
+        let assets = AssetStore::open(root.to_str().unwrap(), &root.join(".bokheim/private-assets")).unwrap();
 
         let (events, _) = LibraryEventRouter::new();
         std::sync::Arc::new(tokio::sync::RwLock::new(LibraryState::new(database, assets, events)))

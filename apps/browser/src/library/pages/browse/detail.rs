@@ -19,10 +19,10 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, AppContext, AvailableSpace, Context, Entity, FocusHandle, Focusable, IntoElement, ListSizingBehavior, MouseButton, Render, SharedString, Task, Window, canvas, div, list, px, rems};
+use gpui::{AnyElement, App, AppContext, AvailableSpace, Context, Entity, FocusHandle, Focusable, IntoElement, ListSizingBehavior, MouseButton, Render, SharedString, Task, Window, canvas, div, list, px};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::scroll::{Scrollbar, ScrollbarAxis};
-use gpui_component::{IconName, Placement, WindowExt as _};
+use gpui_component::{Disableable, IconName, Placement, WindowExt as _};
 use gpui_image_eviction::track_image;
 use library_model::{BookCardRow, BookDetail, BookLocator, BookSource, CardKey, LibraryFileTypeFilter};
 use sync_common::{BookId, ROOT_DIR_ID};
@@ -436,7 +436,7 @@ impl BookDetailPage {
                     page.detail.as_ref().filter(|detail| !detail.toc.is_empty()).map(|detail| {
                         let locator = page.locator();
                         let position = page.ui.now_playing().read(cx).book.as_ref().filter(|playing| Some(&playing.locator) == locator.as_ref()).and_then(|playing| (playing.position)(cx)).map(|(position, _)| position);
-                        page.render_contents(detail, audiobook, position, None, theme, cx)
+                        page.render_contents(detail, audiobook, position, None, true, theme, cx)
                     })
                 } else {
                     page.description.as_ref().map(|description| description.render(theme, cx).into_any_element())
@@ -450,7 +450,8 @@ impl BookDetailPage {
             sheet.title(title).size(max_height).max_h(max_height).resizable(false).bg(theme.page_bg).p_0().child(
                 div()
                     .debug_selector(move || if contents { "book-contents-sheet".into() } else { "book-description-sheet".into() })
-                    .flex_none()
+                    .when(contents, |body| body.flex_1().min_h_0().flex().flex_col())
+                    .when(!contents, |body| body.flex_none())
                     .w_full()
                     // The contents filter already supplies its own top spacing.
                     .when(!contents, |body| body.pt(px(components::SPACE_MD)))
@@ -475,7 +476,7 @@ impl BookDetailPage {
                 .when_some(back, |body, back| body.child(components::book_detail_measure().child(back)))
                 .child(div().flex_1().w_full().flex().items_center().justify_center().child(components::browser_loading_message(label, theme)))
                 .into_any_element();
-            return with_retry_banner(body, self.error.clone(), "retry-book-detail", theme, move |_, _, cx| page.update(cx, |page, cx| page.load(cx)));
+            return with_retry_banner(body, self.error.clone(), "retry-book-detail", move |_, _, cx| page.update(cx, |page, cx| page.load(cx)));
         }
 
         // The initial requests are complete before the book is displayed.
@@ -597,9 +598,8 @@ impl BookDetailPage {
         let downloaded = matches!(download_state, DownloadState::Downloaded);
         let downloading = matches!(download_state, DownloadState::Queued | DownloadState::Downloading(_));
         let open_icon: gpui_component::Icon = if audiobook { components::Headphones.into() } else { IconName::BookOpen.into() };
-        let action_padding = if width >= BOOK_DETAIL_LARGE_TITLE_WIDTH { components::SPACE_SM } else { components::SPACE_MD };
         let mut actions = components::book_detail_actions().child(
-            components::primary_action_button("book-detail-open", if audiobook { text!(browse::listen) } else { text!(browse::read) }, open_icon, false).debug_selector(|| "book-detail-open".into()).px(gpui::px(action_padding)).on_click({
+            components::action_button("book-detail-open", if audiobook { text!(browse::listen) } else { text!(browse::read) }).primary().icon(open_icon).debug_selector(|| "book-detail-open".into()).on_click({
                 let page = page.clone();
                 move |_, window, cx| page.update(cx, |page, cx| page.open(None, window, cx))
             }),
@@ -607,7 +607,7 @@ impl BookDetailPage {
         let offline_download = cfg!(not(target_arch = "wasm32"));
         if !downloaded && offline_download {
             let label = download_action_label(&download_state);
-            actions = actions.child(components::secondary_action_button("book-detail-download", label, IconName::ArrowDown, downloading).px(gpui::px(action_padding)).on_click({
+            actions = actions.child(components::action_button("book-detail-download", label).icon(IconName::ArrowDown).disabled(downloading).on_click({
                 let page = page.clone();
                 move |_, _, cx| page.update(cx, |page, cx| page.download(cx))
             }));
@@ -618,7 +618,7 @@ impl BookDetailPage {
             BookSource::ExternalCatalog { downloadable: false, .. } => {
                 let url = detail.and_then(|detail| detail.external_url.clone());
                 let label = if url.as_deref().is_some_and(|url| url.starts_with("https://litteraturbanken.se/")) { text!(browse::open_on_litteraturbanken) } else { text!(browse::open_at_source) };
-                actions = components::book_detail_actions().child(components::primary_action_button("book-detail-external", label, IconName::ExternalLink, url.is_none()).px(gpui::px(action_padding)).on_click(move |_, _, cx| {
+                actions = components::book_detail_actions().child(components::action_button("book-detail-external", label).primary().icon(IconName::ExternalLink).disabled(url.is_none()).on_click(move |_, _, cx| {
                     if let Some(url) = &url {
                         cx.open_url(url);
                     }
@@ -627,7 +627,7 @@ impl BookDetailPage {
             BookSource::Library { .. } => {}
             BookSource::Catalog { .. } | BookSource::ExternalCatalog { downloadable: true, .. } => {
                 actions = components::book_detail_actions().child(
-                    components::primary_action_button("book-detail-add", if self.adding { text!(browse::adding) } else { text!(browse::add_to_library) }, components::download_glyph(), self.adding).px(gpui::px(action_padding)).on_click({
+                    components::action_button("book-detail-add", if self.adding { text!(browse::adding) } else { text!(browse::add_to_library) }).primary().icon(components::download_glyph()).disabled(self.adding).on_click({
                         let page = page.clone();
                         move |_, window, cx| page.update(cx, |page, cx| page.add(window, cx))
                     }),
@@ -659,8 +659,9 @@ impl BookDetailPage {
         // stacked, in two columns or fewer, either can be folded away.
         let three_columns = layout == DetailLayout::Columns && width >= BOOK_DETAIL_THREE_COLUMN_BREAKPOINT && detail.is_some_and(|detail| !detail.toc.is_empty()) && self.description.is_some();
         let collapsible = !three_columns;
+        let fill_contents = layout == DetailLayout::Columns && (three_columns || self.description.is_none());
         // Empty contents and descriptions do not occupy a section.
-        let contents = detail.filter(|detail| !mobile && !detail.toc.is_empty()).map(|detail| self.render_contents(detail, audiobook, listening.map(|(position, _)| position), Some(collapsible), theme, cx));
+        let contents = detail.filter(|detail| !mobile && !detail.toc.is_empty()).map(|detail| self.render_contents(detail, audiobook, listening.map(|(position, _)| position), Some(collapsible), fill_contents, theme, cx));
         // Markup-only descriptions were excluded when details loaded.
         let description = self.description.as_ref().filter(|_| !mobile).map(|description| {
             let open = !collapsible || self.description_open;
@@ -737,7 +738,7 @@ impl BookDetailPage {
                 .child(leading_margin)
                 .child(sidebar);
             if three_columns {
-                let contents = components::book_detail_column_body().children(contents).overflow_y_scrollbar();
+                let contents = components::book_detail_column_body().flex_1().min_h_0().children(contents);
                 let description = components::book_detail_column_body().children(description).overflow_y_scrollbar();
                 columns = columns
                     .child(components::book_detail_column_gap(theme))
@@ -745,7 +746,8 @@ impl BookDetailPage {
                     .child(components::book_detail_column_gap(theme))
                     .child(components::book_detail_column().child(description));
             } else {
-                let reading = components::book_detail_column_body().children(contents).children(description).overflow_y_scrollbar();
+                let reading = components::book_detail_column_body().children(contents).children(description);
+                let reading = if fill_contents { reading.flex_1().min_h_0().into_any_element() } else { reading.overflow_y_scrollbar().into_any_element() };
                 columns = columns.child(components::book_detail_column_gap(theme)).child(components::book_detail_column().child(reading));
             }
             columns.child(components::book_detail_page_margin()).into_any_element()
@@ -761,7 +763,7 @@ impl BookDetailPage {
         // A failed request loses the credits and the contents —
         // not the book. Everything the card already knew is on screen and stays
         // there, with the banner over it saying what is missing.
-        with_retry_banner(body, self.error.clone(), "retry-book-detail", theme, move |_, _, cx| page.update(cx, |page, cx| page.load(cx)))
+        with_retry_banner(body, self.error.clone(), "retry-book-detail", move |_, _, cx| page.update(cx, |page, cx| page.load(cx)))
     }
 }
 
@@ -772,7 +774,7 @@ impl BookDetailPage {
     /// `listening` is where the player is, when this is the book playing.
     /// `collapsible` includes a section heading and says whether it folds the
     /// list away. Sheets supply their own header and pass `None`.
-    fn render_contents(&self, detail: &BookDetail, audiobook: bool, listening: Option<Duration>, collapsible: Option<bool>, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_contents(&self, detail: &BookDetail, audiobook: bool, listening: Option<Duration>, collapsible: Option<bool>, fill_height: bool, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
         let heading = collapsible.map(|collapsible| {
             let open = !collapsible || self.contents_open;
             components::book_detail_section_heading(if audiobook { text!(browse::chapters) } else { text!(common::contents) }, None::<SharedString>, collapsible.then_some(open), theme).id("book-detail-contents-heading").when(
@@ -846,9 +848,9 @@ impl BookDetailPage {
                 .when(!can_open, |row| row.cursor_default())
                 .into_any_element()
         })
-        .with_sizing_behavior(ListSizingBehavior::Infer)
+        .with_sizing_behavior(if fill_height { ListSizingBehavior::Auto } else { ListSizingBehavior::Infer })
         .w_full()
-        .max_h(rems(28.0));
+        .when(fill_height, |rows| rows.flex_1().min_h_0());
         let scrollbar = Scrollbar::new(state).axis(ScrollbarAxis::Vertical);
         let state = state.clone();
         let previous_width = state.viewport_bounds().size.width;
@@ -856,6 +858,9 @@ impl BookDetailPage {
             .relative()
             .w_full()
             .min_h_0()
+            .flex()
+            .flex_col()
+            .when(fill_height, |viewport| viewport.flex_1())
             .child(rows)
             .child(
                 canvas(
@@ -871,12 +876,20 @@ impl BookDetailPage {
                 .size_full(),
             )
             .child(scrollbar);
-        let panel = components::contents_panel(theme).when(audiobook, |panel| panel.child(components::contents_timing_header(theme))).child(viewport);
+        let panel = components::contents_panel(theme).when(fill_height, |panel| panel.flex_1().min_h_0()).when(audiobook, |panel| panel.child(components::contents_timing_header(theme).flex_none())).child(viewport);
         let reset = can_open.then(|| components::contents_read_reset_button("reset-chapter-read-status").on_click(cx.listener(|page, _, _, cx| page.reset_contents_read_status(None, cx))));
-        let controls = self.contents_filter.as_ref().map(|input| components::contents_filter_bar(input, reset, theme));
-        let panel = div().w_full().min_w_0().flex().flex_col().children(controls).child(panel).when(no_matches, |panel| panel.child(components::reader_state_note(text!(reader::no_chapters_match_your_filter), theme).p(px(12.0))));
+        let controls = self.contents_filter.as_ref().map(|input| components::contents_filter_bar(input, reset, theme).flex_none());
+        let panel = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .when(fill_height, |panel| panel.flex_1().min_h_0())
+            .children(controls)
+            .child(panel)
+            .when(no_matches, |panel| panel.child(components::reader_state_note(text!(reader::no_chapters_match_your_filter), theme).flex_none().p(px(12.0))));
         match heading {
-            Some(heading) => components::book_detail_section().child(heading).child(panel).into_any_element(),
+            Some(heading) => components::book_detail_section().when(fill_height, |section| section.flex_1().min_h_0()).child(heading.flex_none()).child(panel).into_any_element(),
             None => panel.into_any_element(),
         }
     }

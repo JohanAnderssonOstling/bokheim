@@ -229,7 +229,7 @@ mod tests {
             let theme = components::BrowserTheme::default();
             let top_bar = self.chrome.then(|| components::ruled_topbar(theme).debug_selector(|| "test-top-bar".into()).into_any_element());
             let bottom_bar = self.chrome.then(|| components::bottom_navigation(theme).debug_selector(|| "test-bottom-bar".into()).into_any_element());
-            let dock = self.dock.then(|| components::player_dock(div(), div(), div(), theme).debug_selector(|| "test-dock".into()).into_any_element());
+            let dock = self.dock.then(|| components::player_dock(div(), div(), div(), components::uses_mobile_reader_controls(window), theme).debug_selector(|| "test-dock".into()).into_any_element());
             let sheet = self.sheet.then(|| div().size_full().debug_selector(|| "test-sheet".into()).bg(theme.page_bg).into_any_element());
             let content = components::reader_document_body()
                 .id("test-document")

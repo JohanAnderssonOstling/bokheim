@@ -69,8 +69,6 @@ impl BackendContext {
 
     fn open_with_preferences(app_data_dir: PathBuf, library_root: &Path, preferences: Arc<PreferenceStore>) -> Result<Self, BackendError> {
         let registry = LibraryRegistry::open_with_library_root(app_data_dir.to_string_lossy(), library_root.to_string_lossy()).map_err(|error| BackendError::operation(error).context("failed to initialize library registry"))?;
-        #[cfg(target_os = "android")]
-        client_platform_android::book::configure_lease_root(&app_data_dir).map_err(BackendError::operation)?;
         let executor = BackendExecutor::new().map_err(BackendError::operation)?;
         Ok(Self { registry, preferences, app_data_dir, executor })
     }

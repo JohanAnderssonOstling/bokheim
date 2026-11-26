@@ -1,6 +1,7 @@
 //! Choice controls shared by application and reader settings.
 
 use crate::Button;
+use crate::tokens::selected_surface;
 use gpui::prelude::*;
 use gpui::{Div, ElementId, IntoElement, SharedString, div, px, rems};
 use gpui_component::Selectable;
@@ -24,7 +25,8 @@ pub fn settings_choice_surface<T: Styled>(surface: T, selected: bool, theme: Bro
     if !selected {
         return surface;
     }
-    if cfg!(feature = "kobo") { surface.bg(theme.page_bg).text_color(theme.text).border_0().border_b(px(2.0)).border_color(theme.accent) } else { surface.bg(theme.accent).text_color(theme.accent_text) }
+    let surface = selected_surface(surface, theme);
+    if cfg!(feature = "kobo") { surface.border_0().border_b(px(2.0)) } else { surface }
 }
 
 /// Controls belonging to one setting always share a single row.

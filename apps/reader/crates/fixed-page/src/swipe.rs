@@ -1,6 +1,6 @@
 /// Accumulated finger travel. Panning an image consumes its swipe, and gestures
 /// beginning at the system edge never navigate. Preview and turn policies stay
-/// with the reader, including its threshold and reading direction.
+/// with the reader, including its reading direction.
 #[derive(Default)]
 pub struct PageSwipe {
     travel: Option<(f32, f32)>,

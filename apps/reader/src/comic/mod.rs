@@ -294,9 +294,9 @@ impl ComicReaderView {
         }
     }
 
-    fn finish_swipe(&mut self, window: &Window, cx: &mut Context<Self>) {
+    fn finish_swipe(&mut self, cx: &mut Context<Self>) {
         if let Some((dx, dy)) = self.swipe.finish() {
-            if let Some(forward) = components::swipe_turns_forward_with_direction(gpui::point(dx, dy), window, self.right_to_left) {
+            if let Some(forward) = components::swipe_turns_forward_with_direction(gpui::point(dx, dy), self.right_to_left) {
                 self.turn(if forward { 1 } else { -1 }, cx);
             }
         }
@@ -431,7 +431,7 @@ impl Render for ComicReaderView {
                 if matches!(event.delta, ScrollDelta::Pages(_)) {
                     view.swipe.begin(false);
                     view.swipe.push(dx, dy);
-                    view.finish_swipe(window, cx);
+                    view.finish_swipe(cx);
                 } else if window.is_touch_scroll() {
                     if matches!(event.touch_phase, TouchPhase::Started) {
                         view.swipe.begin(components::in_bottom_gesture_edge(event.position, window));
@@ -447,7 +447,7 @@ impl Render for ComicReaderView {
                         }
                     }
                     if matches!(event.touch_phase, TouchPhase::Ended) {
-                        view.finish_swipe(window, cx);
+                        view.finish_swipe(cx);
                     }
                 } else if matches!(event.delta, ScrollDelta::Pixels(_)) || view.touchpad.is_active() || matches!(event.delta, ScrollDelta::Lines(delta) if delta.x.abs() > delta.y.abs()) {
                     let turn = view.touchpad.update(event);

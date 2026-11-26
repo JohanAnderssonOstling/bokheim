@@ -112,6 +112,13 @@ impl BookFileActivity {
     }
 }
 
+/// File transfer observations before an imported book has a library identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImportProgress {
+    Copying { name: String, copied_bytes: u64, total_bytes: u64 },
+    Importing { name: String },
+}
+
 /// A change relevant to a currently displayed library page.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum LibraryUpdate {
@@ -135,6 +142,7 @@ pub enum LibraryUpdate {
         entry: CardKey,
         progress: crate::CatalogImportProgress,
     },
+    ImportProgress(ImportProgress),
     Scanning(bool),
     /// Foreground restrictions or background download activity changed.
     BookFileActivity(BookFileActivity),
@@ -369,8 +377,14 @@ pub struct BrowseRow {
     pub name: String,
     /// Parent hierarchy for scoped search results; absent for direct children.
     pub path: Option<String>,
+    /// Matching books here plus each child's total. A book assigned to
+    /// multiple containers contributes once in each container.
     pub book_count: usize,
     pub downloaded_book_count: usize,
+    /// Unavailable folder books with a durable download request. Other headings
+    /// do not report transfer counts.
+    #[serde(default)]
+    pub requested_book_count: Option<usize>,
     /// Combined size of the matching folder contents, including subfolders.
     /// Absent when any file size is unknown or this is another kind of heading.
     #[serde(default)]

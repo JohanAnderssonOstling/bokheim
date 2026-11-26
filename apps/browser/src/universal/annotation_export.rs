@@ -149,7 +149,7 @@ impl AnnotationExportDialog {
     }
 
     fn choose_folder(&mut self, cx: &mut Context<Self>) {
-        let selection = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(text!(browse::choose_annotation_export_folder).into()) });
+        let selection = cx.prompt_for_paths(gpui::PathPromptOptions { directory: None, files: false, directories: true, multiple: false, prompt: Some(text!(browse::choose_annotation_export_folder).into()) });
         cx.spawn(async move |view, cx| {
             let Ok(Ok(Some(paths))) = selection.await else { return };
             let Some(path) = paths.into_iter().next() else { return };
@@ -241,7 +241,7 @@ impl AnnotationExportDialog {
                         .items_center()
                         .gap(px(components::SPACE_SM))
                         .child(div().flex_1().min_w_0().child(components::browser_path_input("annotation-export-folder-label", &self.folder, self.loading, theme, window, cx)))
-                        .child(components::base_button("annotation-export-browse").label(text!(browse::browse)).disabled(self.loading).on_click(cx.listener(|view, _, _, cx| view.choose_folder(cx)))),
+                        .child(components::action_button("annotation-export-browse", text!(browse::browse)).disabled(self.loading).on_click(cx.listener(|view, _, _, cx| view.choose_folder(cx)))),
                 ),
             );
         }
@@ -473,7 +473,7 @@ impl Render for AnnotationExportDialog {
         if let Some(report) = &self.report {
             if report.results.iter().any(|result| result.destination.format == AnnotationExportFormat::Markdown && (matches!(result.outcome, AnnotationExportOutcome::Written) || result.failure.is_some_and(|failure| failure.file_written))) {
                 let destination = self.destination.clone();
-                buttons = buttons.child(components::base_button("annotation-export-open-folder").label(text!(browse::open_export_folder)).on_click(move |_, _, cx| {
+                buttons = buttons.child(components::action_button("annotation-export-open-folder", text!(browse::open_export_folder)).on_click(move |_, _, cx| {
                     if let Some(path) = &destination {
                         cx.open_with_system(path);
                     }

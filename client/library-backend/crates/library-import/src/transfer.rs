@@ -83,7 +83,7 @@ impl LibraryImport<'_> {
         use content_address::hash_file;
         use library_files::filesystem::fingerprint;
         use library_model::PublishedStagedBook;
-        use std::fs::File;
+        use client_platform_runtime::filesystem as fs;
         use std::path::PathBuf;
 
         if state.addition.facts.format == BookFormat::Mp3Folder {
@@ -104,7 +104,7 @@ impl LibraryImport<'_> {
         let verified = run_blocking({
             let path = path.clone();
             move || -> Result<Option<(u64, u64)>, BackendError> {
-                let metadata = match std::fs::symlink_metadata(&path) {
+                let metadata = match fs::symlink_metadata(&path) {
                     Ok(metadata) if metadata.is_file() => metadata,
                     Ok(_) => return Ok(None),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -112,7 +112,7 @@ impl LibraryImport<'_> {
                 };
                 let before = fingerprint(&path)?;
 
-                if (known_revision != Some(before) && hash_file(&mut File::open(&path)?)? != checksum) || fingerprint(&path)? != before {
+                if (known_revision != Some(before) && hash_file(&mut fs::open(&path)?)? != checksum) || fingerprint(&path)? != before {
                     return Ok(None);
                 }
                 Ok(Some((before, metadata.len())))
@@ -123,12 +123,12 @@ impl LibraryImport<'_> {
         let Some((revision, size_bytes)) = verified else { return Ok(None) };
         validate_import_destination(self.storage.database(), &import.parent_id).await?;
         let relative = self.storage.database().native_book_path(import.parent_id, &name).await?.ok_or("destination folder is missing")?;
-        if PathBuf::from(&self.root).canonicalize()?.join(relative.as_str().trim_start_matches('/')) != path || fingerprint(&path)? != revision {
+        if fs::canonicalize(PathBuf::from(&self.root))?.join(relative.as_str().trim_start_matches('/')) != path || fingerprint(&path)? != revision {
             return Err(BackendError::message("destination changed during transfer verification; retry the import"));
         }
         let content = ImportContent { book_id: identity, byte_checksum: Some(checksum), audiobook_content_hash: None, size_bytes, source_identity: None };
         let import = ValidatedImport { parent_id: import.parent_id, file_name: name.clone(), format: state.addition.facts.format };
-        let published = PublishedStagedBook { name, relative_path: relative.to_string(), published: true, fingerprint: Some(revision) };
+        let published = PublishedStagedBook { physical_size_bytes: Some(size_bytes), name, relative_path: relative.to_string(), published: true, fingerprint: Some(revision) };
         let version = reader_inspection_version(import.format);
         let commit = self.prepare_import_commit(import, content, published, None, version).await?;
         let state = state.clone().retarget(identity)?;
