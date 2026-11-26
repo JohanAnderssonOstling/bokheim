@@ -40,7 +40,7 @@ pub fn book_detail_contents_button(theme: BrowserTheme) -> crate::Button {
 }
 
 pub fn book_detail_mobile_tools(theme: BrowserTheme) -> Div {
-    crate::now_playing_tools().child(book_detail_contents_button(theme)).child(book_detail_description_button(theme))
+    crate::now_playing_tools().justify_center().gap(px(SPACE_SM)).child(book_detail_contents_button(theme)).child(book_detail_description_button(theme))
 }
 
 /// How hard a desktop column grows against a margin or gap. The columns take

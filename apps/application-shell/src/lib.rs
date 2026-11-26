@@ -91,6 +91,7 @@ pub(crate) struct ApplicationPane {
     split_enabled: bool,
     notification_mode: Option<bool>,
     notification_interest: Option<NotificationLease>,
+    browser_volume_button_capture: Option<bool>,
 }
 
 impl ApplicationPane {
@@ -271,6 +272,7 @@ impl ApplicationPane {
                 root.return_to_library(window, cx);
             }
             root.save_navigation(cx);
+            root.sync_browser_volume_buttons(cx);
         });
         cx.subscribe_in(&browser, window, |root, _, request: &browser_ui::PaneRequest, window, cx| match request {
             browser_ui::PaneRequest::Browse => root.return_to_library(window, cx),
@@ -323,6 +325,7 @@ impl ApplicationPane {
             split_enabled: false,
             notification_mode: None,
             notification_interest: None,
+            browser_volume_button_capture: None,
             native_back_overlay: None,
             audiobook: None,
             audiobook_footer,
@@ -592,6 +595,7 @@ impl ApplicationPane {
         self.backend.management.evict_cover_caches();
         self.save_navigation(cx);
         self.update_notification_interest(window);
+        self.browser_volume_button_capture = None;
         cx.set_volume_button_capture(true);
         cx.set_keep_screen_awake(true);
         cx.notify();
@@ -615,7 +619,7 @@ impl ApplicationPane {
             self.native_pointer_left_client = false;
         }
         self.update_notification_interest(window);
-        cx.set_volume_button_capture(true);
+        self.sync_browser_volume_buttons(cx);
         cx.set_keep_screen_awake(false);
         cx.set_system_bars_visible(true);
         window.set_window_title(&self.application_title);
@@ -636,6 +640,20 @@ impl ApplicationPane {
 
     pub fn audiobook_is_expanded(&self, cx: &App) -> bool {
         self.reader.is_none() && self.audiobook.as_ref().is_some_and(|audio| self.browser.read(cx).shown_book_detail(cx).as_ref() == Some(&audio.locator))
+    }
+
+    /// The visible audiobook player uses media volume; library pages use page keys.
+    /// Reader narration manages its own volume-key policy.
+    fn sync_browser_volume_buttons(&mut self, cx: &App) {
+        if self.reader.is_some() {
+            self.browser_volume_button_capture = None;
+            return;
+        }
+        let capture = !self.audiobook_is_expanded(cx);
+        if self.browser_volume_button_capture != Some(capture) {
+            self.browser_volume_button_capture = Some(capture);
+            cx.set_volume_button_capture(capture);
+        }
     }
 
     pub fn expand_audiobook(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -667,6 +685,7 @@ impl ApplicationPane {
         }
         let Some((locator, session)) = active else {
             self.browser.update(cx, |browser, cx| browser.set_now_playing(None, cx));
+            self.sync_browser_volume_buttons(cx);
             cx.notify();
             return;
         };
@@ -694,6 +713,7 @@ impl ApplicationPane {
         })
         .detach();
         self.audiobook = Some(AudiobookSurface { locator, session, dock });
+        self.sync_browser_volume_buttons(cx);
         cx.notify();
     }
 

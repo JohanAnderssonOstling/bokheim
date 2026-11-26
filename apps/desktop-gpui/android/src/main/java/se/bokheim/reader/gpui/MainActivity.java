@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.Intent;
 import android.database.Cursor;
+import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
@@ -254,6 +255,7 @@ public final class MainActivity extends GameActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        setVolumeControlStream(AudioManager.STREAM_MUSIC);
         SpeechAssets.prepareInBackground(getApplicationContext());
         accountActivity = new java.lang.ref.WeakReference<>(this);
         getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
