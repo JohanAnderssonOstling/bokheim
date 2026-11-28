@@ -7,7 +7,7 @@ mod voice_picker;
 use audiobook_player::{PlaybackMenu, SleepChoice, SleepPlan, format_playback_rate, sleep_menu, speed_menu};
 use components::playback_secondary_button;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, SharedString, Task};
+use gpui::{AnyElement, App, Context, SharedString, Task, div, rems};
 use gpui_component::menu::DropdownMenu;
 use gpui_component::{Disableable, Icon, IconName};
 #[cfg(not(target_arch = "wasm32"))]
@@ -861,7 +861,7 @@ pub(crate) fn dock<C: TtsReader>(state: &Narration, compact: bool, theme: compon
     let transport = components::playback_transport_buttons("tts", playing, components::TransportLayout::Dock, None, components::PlaybackSkipKind::Elements, theme)
         .into_iter()
         .map(|(action, button)| {
-            let button = button.debug_selector(move || {
+            let button = button.when(compact, |button| button.size(rems(if action == PlaybackTransportAction::PlayPause { 4.0 } else { 2.0 }))).debug_selector(move || {
                 match action {
                     PlaybackTransportAction::PlayPause => "tts-play",
                     PlaybackTransportAction::Back | PlaybackTransportAction::Previous => "tts-back",
@@ -877,6 +877,13 @@ pub(crate) fn dock<C: TtsReader>(state: &Narration, compact: bool, theme: compon
         })
         .collect::<Vec<_>>();
 
+    let value_button = |id: &'static str, label: SharedString, set| {
+        if compact {
+            playback_secondary_button(components::base_button(id).ghost()).size(rems(2.0)).text_color(if set { theme.text_accent } else { theme.text }).child(div().text_size(rems(0.75)).whitespace_nowrap().child(label))
+        } else {
+            components::playback_tool_button(id, label, None, set, theme)
+        }
+    };
     let rate = state.rate();
     let entity = cx.entity().downgrade();
     let set_rate = move |rate, cx: &mut App| {
@@ -886,7 +893,7 @@ pub(crate) fn dock<C: TtsReader>(state: &Narration, compact: bool, theme: compon
             cx.notify();
         });
     };
-    let speed = components::playback_tool_button("tts-speed", format_playback_rate(rate), None, (rate - 1.0).abs() >= f64::EPSILON, theme).debug_selector(|| "tts-speed".into()).tooltip(text!(reader::reading_speed));
+    let speed = value_button("tts-speed", format_playback_rate(rate).into(), (rate - 1.0).abs() >= f64::EPSILON).debug_selector(|| "tts-speed".into()).tooltip(text!(reader::reading_speed));
     let speed = if compact {
         speed.on_click(move |_, window, cx| speed_menu(rate).title(text!(reader::reading_speed)).open_sheet(window, cx, set_rate.clone())).into_any_element()
     } else {
@@ -905,6 +912,7 @@ pub(crate) fn dock<C: TtsReader>(state: &Narration, compact: bool, theme: compon
         });
     };
     let pauses = playback_secondary_button(components::outlined_icon_button("tts-pauses", text!(reader::pauses_between_sentences_and_paragraphs), Icon::empty().path("icons/hourglass.svg")))
+        .when(compact, |button| button.size(rems(2.0)))
         .disabled(state.voice == NarrationVoice::Device)
         .when(state.voice == NarrationVoice::Device, |button| button.tooltip(text!(reader::custom_pauses_are_unavailable_for_device_voices)))
         .debug_selector(|| "tts-pauses".into());
@@ -928,9 +936,17 @@ pub(crate) fn dock<C: TtsReader>(state: &Narration, compact: bool, theme: compon
     };
 
     let sleep_label = state.sleep_label();
-    let sleep = components::playback_tool_button("tts-sleep", sleep_label.clone().unwrap_or_else(|| text!(common::sleep_timer).into()), Some(Icon::empty().path("icons/alarm.svg")), sleep_label.is_some(), theme)
-        .tooltip(text!(common::sleep_timer))
-        .debug_selector(|| "tts-sleep".into());
+    let sleep = if compact {
+        match state.sleep {
+            Some(SleepPlan::Until(deadline)) => value_button("tts-sleep", format!("{}m", deadline.saturating_duration_since(Instant::now()).as_secs().div_ceil(60)).into(), true),
+            Some(SleepPlan::EndOfChapter(_)) => value_button("tts-sleep", text!(reader::ch).into(), true),
+            None => playback_secondary_button(components::outlined_icon_button("tts-sleep", text!(common::sleep_timer), Icon::empty().path("icons/alarm.svg"))).size(rems(2.0)),
+        }
+    } else {
+        components::playback_tool_button("tts-sleep", sleep_label.clone().unwrap_or_else(|| text!(common::sleep_timer).into()), Some(Icon::empty().path("icons/alarm.svg")), sleep_label.is_some(), theme)
+    }
+    .tooltip(text!(common::sleep_timer))
+    .debug_selector(|| "tts-sleep".into());
     let entity = cx.entity().downgrade();
     let set_sleep = move |choice, cx: &mut App| {
         let _ = entity.update(cx, |reader, cx| choose_sleep(reader, choice, cx));
@@ -940,12 +956,19 @@ pub(crate) fn dock<C: TtsReader>(state: &Narration, compact: bool, theme: compon
     } else {
         sleep.dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, _, _| sleep_menu(sleep_label.as_deref()).dropdown(menu, set_sleep.clone())).into_any_element()
     };
-    let close =
-        playback_secondary_button(components::outlined_icon_button("tts-close", text!(common::close_player), IconName::Close)).debug_selector(|| "tts-close".into()).on_click(cx.listener(|reader, _, _, cx| reader.close_tts_dock(cx)));
-
-    let tools = components::player_dock_tools().child(sleep).child(speed).child(pauses).child(close);
-    let transport = components::player_dock_transport(None, transport, theme);
-    components::player_dock(voice, transport, tools, compact, theme).id("tts-dock").on_scroll_wheel(|_, _, cx| cx.stop_propagation()).into_any_element()
+    let close = playback_secondary_button(components::outlined_icon_button("tts-close", text!(common::close_player), IconName::Close))
+        .when(compact, |button| button.size(rems(2.0)))
+        .debug_selector(|| "tts-close".into())
+        .on_click(cx.listener(|reader, _, _, cx| reader.close_tts_dock(cx)));
+    let dock = if compact {
+        let controls = [voice, speed, pauses].into_iter().chain(transport.into_iter().map(IntoElement::into_any_element)).chain([sleep, close.into_any_element()]);
+        components::player_dock_evenly(controls, theme)
+    } else {
+        let transport = components::player_dock_transport(None, transport, theme);
+        let tools = components::player_dock_tools().child(sleep).child(speed).child(pauses).child(close);
+        components::player_dock(voice, transport, tools, false, theme)
+    };
+    dock.id("tts-dock").on_scroll_wheel(|_, _, cx| cx.stop_propagation()).into_any_element()
 }
 
 #[cfg(test)]

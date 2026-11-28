@@ -2,8 +2,8 @@
 //! and reader narration.
 //!
 //! Wide docks keep the transport centred between what is playing on the left
-//! and the remaining tools on the right. Compact docks put information and
-//! tools above the transport, retaining the same control sizes and spacing.
+//! and the remaining tools on the right. Compact narration docks distribute
+//! all controls evenly across one row.
 
 use gpui::prelude::*;
 use gpui::{App, DispatchPhase, Div, HitboxBehavior, SharedString, TouchEvent, TouchPhase, Window, canvas, px, rems};
@@ -40,28 +40,25 @@ pub fn playback_scrub_touch_listener(listener: impl Fn(&TouchEvent, &mut Window,
 
 /// Total dock height in pixels, including its fixed top border.
 pub fn player_dock_height_px(window: &Window) -> f32 {
-    let height = if crate::uses_mobile_reader_controls(window) { PLAYER_DOCK_COMPACT_ROW_HEIGHT_REM * 2.0 } else { PLAYER_DOCK_HEIGHT_REM };
+    let height = if crate::uses_mobile_reader_controls(window) { PLAYER_DOCK_COMPACT_ROW_HEIGHT_REM } else { PLAYER_DOCK_HEIGHT_REM };
     f32::from(rems(height).to_pixels(window.rem_size())) + 1.0
 }
 
 /// Information or voice selection, playback controls, and secondary tools.
-/// Compact docks share two rows; overflow scrolls instead of shrinking targets.
+/// Compact docks use one row; overflow scrolls instead of shrinking targets.
 pub fn player_dock(leading: impl IntoElement, transport: impl IntoElement, trailing: impl IntoElement, compact: bool, theme: BrowserTheme) -> Div {
     let content = if compact {
-        crate::column(0.0)
+        crate::row(0.0)
+            .id("player-dock-controls-row")
             .w_full()
-            .child(
-                crate::row(0.0)
-                    .id("player-dock-tools-row")
-                    .w_full()
-                    .h(rems(PLAYER_DOCK_COMPACT_ROW_HEIGHT_REM))
-                    .gap(rems(SPACE_SM / 16.0))
-                    .px(rems(SPACE_SM / 16.0))
-                    .overflow_x_scroll()
-                    .child(crate::row(0.0).fill().min_w(rems(PLAYER_DOCK_COMPACT_ROW_HEIGHT_REM)).h_full().child(leading))
-                    .child(crate::row(0.0).flex_none().h_full().justify_end().child(trailing)),
-            )
-            .child(crate::row(0.0).id("player-dock-transport-row").w_full().h(rems(PLAYER_DOCK_COMPACT_ROW_HEIGHT_REM)).overflow_x_scroll().child(crate::row(0.0).flex_none().min_w_full().justify_center().child(transport)))
+            .h(rems(PLAYER_DOCK_COMPACT_ROW_HEIGHT_REM))
+            .gap(rems(SPACE_SM / 16.0))
+            .px(rems(SPACE_SM / 16.0))
+            .overflow_x_scroll()
+            .child(crate::row(0.0).flex_none().h_full().child(leading))
+            .child(crate::row(0.0).flex_grow(1.0).flex_shrink_0().h_full().justify_center().child(transport))
+            .child(crate::row(0.0).flex_none().h_full().justify_end().child(trailing))
+            .into_any_element()
     } else {
         crate::row(0.0)
             .gap(rems(SPACE_MD / 16.0))
@@ -71,8 +68,14 @@ pub fn player_dock(leading: impl IntoElement, transport: impl IntoElement, trail
             .child(crate::row(0.0).gap(rems(SPACE_SM / 16.0)).fill().h_full().child(leading))
             .child(transport)
             .child(crate::row(0.0).gap(rems(SPACE_SM / 16.0)).fill().h_full().justify_end().child(trailing))
+            .into_any_element()
     };
     crate::bottom_bar(theme).occlude().relative().child(content)
+}
+
+/// Equal spacing between every compact control and at both ends of the row.
+pub fn player_dock_evenly(controls: impl IntoIterator<Item = impl IntoElement>, theme: BrowserTheme) -> Div {
+    crate::bottom_bar(theme).occlude().relative().child(crate::row(0.0).w_full().h(rems(PLAYER_DOCK_COMPACT_ROW_HEIGHT_REM)).justify_evenly().children(controls))
 }
 
 /// The transport buttons, with an optional caption over them.

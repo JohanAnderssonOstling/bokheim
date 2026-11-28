@@ -1,7 +1,7 @@
 {
   "rust_version": "stable",
   "dependencies": {
-    "GPUI-Fork": "e2b024b69568c9677859a0e0da0c4e204fb29e89",
+    "GPUI-Fork": "845a906b638ce23c45ddd51c5a23bdf3cd976a18",
     "HtmlEngine": "8b367a012c97f01eb45da923c8c489861046cd07",
     "HtmlViewCore": "4de93bd0260f8fccc05cc997efae8e0352d626d3"
   },

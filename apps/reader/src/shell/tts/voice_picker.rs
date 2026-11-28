@@ -202,11 +202,7 @@ impl<C: TtsReader> Render for Picker<C> {
                         .min_w_0()
                         .h_auto()
                         .py(px(10.0))
-                        .tooltip(if checked && !required {
-                            format!(text!(reader::deselect_voice), item.name)
-                        } else {
-                            item.name.clone()
-                        })
+                        .tooltip(if checked && !required { format!(text!(reader::deselect_voice), item.name) } else { item.name.clone() })
                         .child(
                             components::column(0.0)
                                 .items_start()
@@ -285,7 +281,7 @@ pub(super) fn button<C: TtsReader>(state: &Narration, compact: bool, cx: &mut Co
         text!(reader::alba).to_owned()
     };
     let trigger = if compact {
-        components::playback_secondary_button(components::outlined_icon_button("tts-voice", format!(text!(reader::narration_voice), label = label), IconName::User))
+        components::playback_secondary_button(components::outlined_icon_button("tts-voice", format!(text!(reader::narration_voice), label = label), IconName::User)).size(gpui::rems(2.0))
     } else {
         components::playback_tool_button("tts-voice", label.to_owned(), None, false, theme).min_w_0().max_w_full().flex_shrink_1().tooltip(format!(text!(reader::narration_voice), label = label))
     }
